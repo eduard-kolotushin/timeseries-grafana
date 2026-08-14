@@ -1,8 +1,15 @@
-import React, { useEffect, useState } from 'react';
-import { DataFrame, dateTime, FieldType, MutableDataFrame, PanelProps } from '@grafana/data';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  applyFieldOverrides,
+  DataFrame,
+  dateTime,
+  FieldType,
+  MutableDataFrame,
+  PanelProps,
+} from '@grafana/data';
 import { getBackendSrv, PanelDataErrorView } from '@grafana/runtime';
-import { LegendDisplayMode } from '@grafana/schema';
-import { Alert, TimeSeries, useTheme2 } from '@grafana/ui';
+import { LegendDisplayMode, TooltipDisplayMode } from '@grafana/schema';
+import { Alert, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
 import { FORECAST_RESOURCE } from '../constants';
 import { extractSeries } from './extract';
 import { ForecastOptions, ForecastResponse } from './types';
@@ -17,6 +24,7 @@ export const ForecastPanel: React.FC<Props> = ({
   timeRange,
   timeZone,
   fieldConfig,
+  replaceVariables,
   id,
 }) => {
   const theme = useTheme2();
@@ -81,12 +89,24 @@ export const ForecastPanel: React.FC<Props> = ({
     theme.colors.warning.main,
   ]);
 
+  const plotFrames = useMemo(
+    () =>
+      applyFieldOverrides({
+        data: frames,
+        fieldConfig,
+        replaceVariables,
+        theme,
+        timeZone,
+      }),
+    [frames, fieldConfig, replaceVariables, theme, timeZone]
+  );
+
   if (data.series.length === 0) {
     return <PanelDataErrorView fieldConfig={fieldConfig} panelId={id} data={data} needsTimeField needsNumberField />;
   }
 
   let toMs = timeRange.to.valueOf();
-  for (const frame of frames) {
+  for (const frame of plotFrames) {
     const timeField = frame.fields.find((f) => f.type === FieldType.time);
     if (!timeField || timeField.values.length === 0) {
       continue;
@@ -109,9 +129,18 @@ export const ForecastPanel: React.FC<Props> = ({
         height={error ? height - 64 : height}
         timeRange={{ ...timeRange, to: dateTime(toMs) }}
         timeZone={timeZone}
-        frames={frames}
+        frames={plotFrames}
         legend={{ showLegend: true, displayMode: LegendDisplayMode.List, placement: 'bottom', calcs: [] }}
-      />
+      >
+        {(config, alignedFrame) => (
+          <TooltipPlugin
+            config={config}
+            data={alignedFrame}
+            timeZone={timeZone}
+            mode={TooltipDisplayMode.Multi}
+          />
+        )}
+      </TimeSeries>
     </div>
   );
 };
