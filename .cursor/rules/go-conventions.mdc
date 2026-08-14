@@ -1,0 +1,27 @@
+---
+description: Conventions for the Grafana forecast plugin
+alwaysApply: true
+---
+
+# Conventions
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Plugin
+
+- App id `eduardkolotushin-forecast-app`
+- Nested panel id `eduardkolotushin-forecast-panel`
+- Backend executable `gpx_forecast`
+- Go 1.26+
+
+## API
+
+- `POST /forecast` returns new points; do not mutate inputs
+- Panel forecasts each numeric series independently
+- Pre-size Go slices to the request/horizon length
+
+## Quality
+
+- Table-driven tests next to the resource handler
+- No drive-by refactors
+- Keep Grafana scaffold files under `.config/` unless a plugin-tools upgrade requires it

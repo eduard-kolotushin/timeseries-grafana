@@ -1,0 +1,24 @@
+---
+description: Respect Grafana plugin intentions; keep models in timeseries-forecast
+alwaysApply: true
+---
+
+# Project intentions
+
+Read [docs/INTENTIONS.md](docs/INTENTIONS.md) before expanding scope.
+
+## Stay in v1
+
+Allowed: app + Go `/forecast` resource, nested overlay panel.
+
+Do **not** add without updating INTENTIONS first:
+
+- Docker Compose / TestData sandbox (sibling `timeseries-grafana-sandbox`)
+- Grafana.com signing/publish
+- Prometheus
+- Prediction intervals or alerting
+- A forked Series or forecast implementation
+
+## Use the sibling libraries
+
+Call `timeseries` and `timeseries-forecast` through their public APIs. Local development uses `replace => ../timeseries` and `replace => ../timeseries-forecast`.

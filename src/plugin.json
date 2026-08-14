@@ -1,0 +1,48 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "app",
+  "name": "Timeseries Forecast",
+  "id": "eduardkolotushin-forecast-app",
+  "backend": true,
+  "executable": "gpx_forecast",
+  "info": {
+    "keywords": ["app", "forecast", "timeseries"],
+    "description": "Overlay univariate forecasts from timeseries-forecast on Grafana queries.",
+    "author": {
+      "name": "Eduard Kolotushin",
+      "url": "https://github.com/eduard-kolotushin"
+    },
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "includes": [
+    {
+      "type": "page",
+      "name": "Forecast",
+      "path": "/a/%PLUGIN_ID%",
+      "addToNav": true,
+      "defaultNav": true
+    },
+    {
+      "type": "panel",
+      "name": "Forecast overlay"
+    },
+    {
+      "type": "page",
+      "icon": "cog",
+      "name": "Configuration",
+      "path": "/plugins/%PLUGIN_ID%",
+      "role": "Admin",
+      "addToNav": true
+    }
+  ],
+  "dependencies": {
+    "grafanaDependency": ">=12.3.0",
+    "plugins": []
+  }
+}
