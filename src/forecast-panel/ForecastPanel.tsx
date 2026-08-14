@@ -46,6 +46,8 @@ export const ForecastPanel: React.FC<Props> = ({
             alpha: options.alpha,
             beta: options.beta,
             period: options.period,
+            season: options.season,
+            calendar: options.calendar,
           });
           forecasts.push(
             toFrame(`${points.name} (forecast)`, resp.times, resp.values.map(nullToNaN), theme.colors.warning.main)
@@ -74,6 +76,8 @@ export const ForecastPanel: React.FC<Props> = ({
     options.alpha,
     options.beta,
     options.period,
+    options.season,
+    options.calendar,
     theme.colors.warning.main,
   ]);
 

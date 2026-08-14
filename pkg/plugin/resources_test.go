@@ -61,6 +61,28 @@ func TestCallResource(t *testing.T) {
 		Model:   "arima",
 		Horizon: 1,
 	})
+	baselineTimes := make([]int64, 48)
+	baselineVals := make([]nullableFloat, 48)
+	for i := range 48 {
+		baselineTimes[i] = int64(i) * 3_600_000
+		baselineVals[i] = nullableFloat(float64(i))
+	}
+	baselineBody, _ := json.Marshal(ForecastRequest{
+		Times:    baselineTimes,
+		Values:   baselineVals,
+		Model:    "baseline",
+		Horizon:  1,
+		Season:   "hour",
+		Calendar: "ru",
+	})
+	badCalendar, _ := json.Marshal(ForecastRequest{
+		Times:    baselineTimes,
+		Values:   baselineVals,
+		Model:    "baseline",
+		Horizon:  1,
+		Season:   "hour",
+		Calendar: "us",
+	})
 
 	for _, tc := range []struct {
 		name      string
@@ -154,6 +176,29 @@ func TestCallResource(t *testing.T) {
 			method:    http.MethodPost,
 			path:      "forecast",
 			body:      badModel,
+			expStatus: http.StatusBadRequest,
+		},
+		{
+			name:      "baseline hour ru 200",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      baselineBody,
+			expStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var got ForecastResponse
+				if err := json.Unmarshal(body, &got); err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Times) != 1 || len(got.Values) != 1 {
+					t.Fatalf("baseline len times=%d values=%d", len(got.Times), len(got.Values))
+				}
+			},
+		},
+		{
+			name:      "unknown calendar 400",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      badCalendar,
 			expStatus: http.StatusBadRequest,
 		},
 		{

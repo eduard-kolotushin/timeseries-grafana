@@ -1,4 +1,6 @@
-export type ForecastModel = 'naive' | 'mean' | 'drift' | 'seasonal' | 'ses' | 'holt';
+export type ForecastModel = 'naive' | 'mean' | 'drift' | 'seasonal' | 'baseline' | 'ses' | 'holt';
+export type BaselineSeason = 'hour' | 'day' | 'week';
+export type BaselineCalendar = '' | 'ru';
 
 export interface ForecastOptions {
   model: ForecastModel;
@@ -6,6 +8,8 @@ export interface ForecastOptions {
   alpha: number;
   beta: number;
   period: number;
+  season: BaselineSeason;
+  calendar: BaselineCalendar;
 }
 
 export interface ForecastResponse {

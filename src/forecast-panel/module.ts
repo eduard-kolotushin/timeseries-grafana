@@ -15,6 +15,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
           { value: 'mean', label: 'Mean' },
           { value: 'drift', label: 'Drift' },
           { value: 'seasonal', label: 'Seasonal naive' },
+          { value: 'baseline', label: 'Seasonal baseline' },
           { value: 'ses', label: 'SES' },
           { value: 'holt', label: 'Holt' },
         ],
@@ -49,5 +50,32 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       defaultValue: 7,
       settings: { min: 1, integer: true },
       showIf: (opts) => opts.model === 'seasonal',
+    })
+    .addSelect({
+      path: 'season',
+      name: 'Seasonality',
+      description: 'Hour of day, day of week, or hour of week',
+      defaultValue: 'hour',
+      settings: {
+        options: [
+          { value: 'hour', label: 'Hour' },
+          { value: 'day', label: 'Day' },
+          { value: 'week', label: 'Week (hour of week)' },
+        ],
+      },
+      showIf: (opts) => opts.model === 'baseline',
+    })
+    .addSelect({
+      path: 'calendar',
+      name: 'Calendar',
+      description: 'Optional production calendar for workdays, weekends, and holidays',
+      defaultValue: '',
+      settings: {
+        options: [
+          { value: '', label: 'Off' },
+          { value: 'ru', label: 'RU' },
+        ],
+      },
+      showIf: (opts) => opts.model === 'baseline',
     });
 });

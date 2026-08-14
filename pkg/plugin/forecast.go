@@ -15,13 +15,15 @@ var errUnknownModel = errors.New("forecast: unknown model")
 
 // ForecastRequest is the JSON body for POST /forecast.
 type ForecastRequest struct {
-	Times   []int64         `json:"times"`
-	Values  []nullableFloat `json:"values"`
-	Model   string          `json:"model"`
-	Horizon int             `json:"horizon"`
-	Alpha   float64         `json:"alpha"`
-	Beta    float64         `json:"beta"`
-	Period  int             `json:"period"`
+	Times    []int64         `json:"times"`
+	Values   []nullableFloat `json:"values"`
+	Model    string          `json:"model"`
+	Horizon  int             `json:"horizon"`
+	Alpha    float64         `json:"alpha"`
+	Beta     float64         `json:"beta"`
+	Period   int             `json:"period"`
+	Season   string          `json:"season"`
+	Calendar string          `json:"calendar"`
 }
 
 // ForecastResponse is the JSON body returned by POST /forecast.
@@ -94,6 +96,13 @@ func runForecast(in ForecastRequest) (ForecastResponse, error) {
 		fitted, err = forecast.FitDrift(s)
 	case "seasonal":
 		fitted, err = forecast.FitSeasonalNaive(s, period)
+	case "baseline":
+		var cal *forecast.Calendar
+		cal, err = forecast.CalendarByName(in.Calendar)
+		if err != nil {
+			return ForecastResponse{}, err
+		}
+		fitted, err = forecast.FitSeasonalBaseline(s, parseSeason(in.Season), cal)
 	case "ses":
 		fitted, err = forecast.FitSES(s, alpha)
 	case "holt":
@@ -122,6 +131,19 @@ func runForecast(in ForecastRequest) (ForecastResponse, error) {
 	return resp, nil
 }
 
+func parseSeason(s string) forecast.Seasonality {
+	switch s {
+	case "", "hour":
+		return forecast.SeasonHour
+	case "day":
+		return forecast.SeasonDay
+	case "week":
+		return forecast.SeasonHourOfWeek
+	default:
+		return 0
+	}
+}
+
 func httpStatusFor(err error) int {
 	switch {
 	case errors.Is(err, errUnknownModel),
@@ -130,6 +152,8 @@ func httpStatusFor(err error) int {
 		errors.Is(err, forecast.ErrNoFrequency),
 		errors.Is(err, forecast.ErrInvalidAlpha),
 		errors.Is(err, forecast.ErrInvalidPeriod),
+		errors.Is(err, forecast.ErrInvalidSeason),
+		errors.Is(err, forecast.ErrUnknownCalendar),
 		errors.Is(err, forecast.ErrTooShort),
 		errors.Is(err, timeseries.ErrLengthMismatch),
 		errors.Is(err, timeseries.ErrUnsorted),

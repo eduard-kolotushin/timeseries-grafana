@@ -18,7 +18,7 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 
 - `POST /forecast` resource using `timeseries.New` + `forecast.Fit*` + `Forecast(h)`
 - Nested panel overlaying history and forecast
-- Options: model, horizon, alpha, beta, period
+- Options: model, horizon, alpha, beta, period, season, calendar
 
 ## v1 non-goals
 
