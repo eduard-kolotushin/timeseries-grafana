@@ -68,7 +68,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addSelect({
       path: 'calendar',
       name: 'Calendar',
-      description: 'Optional production calendar for workdays, weekends, and holidays',
+      description: 'Optional production calendar. Only years present in the file apply (RU is 2026); other years behave as Off.',
       defaultValue: '',
       settings: {
         options: [
