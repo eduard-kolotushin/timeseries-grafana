@@ -139,6 +139,8 @@ func parseSeason(s string) forecast.Seasonality {
 		return forecast.SeasonDay
 	case "week":
 		return forecast.SeasonHourOfWeek
+	case "minute-week":
+		return forecast.SeasonMinuteOfWeek
 	default:
 		return 0
 	}

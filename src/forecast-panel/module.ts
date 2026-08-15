@@ -54,13 +54,14 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addSelect({
       path: 'season',
       name: 'Seasonality',
-      description: 'Hour of day, day of week, or hour of week',
+      description: 'Hour of day, day of week, hour of week, or minute of week',
       defaultValue: 'hour',
       settings: {
         options: [
           { value: 'hour', label: 'Hour' },
           { value: 'day', label: 'Day' },
           { value: 'week', label: 'Week (hour of week)' },
+          { value: 'minute-week', label: 'Week (minute of week)' },
         ],
       },
       showIf: (opts) => opts.model === 'baseline',

@@ -1,5 +1,5 @@
 export type ForecastModel = 'naive' | 'mean' | 'drift' | 'seasonal' | 'baseline' | 'ses' | 'holt';
-export type BaselineSeason = 'hour' | 'day' | 'week';
+export type BaselineSeason = 'hour' | 'day' | 'week' | 'minute-week';
 export type BaselineCalendar = '' | 'ru';
 
 export interface ForecastOptions {

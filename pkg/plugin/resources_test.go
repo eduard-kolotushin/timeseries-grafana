@@ -83,6 +83,13 @@ func TestCallResource(t *testing.T) {
 		Season:   "hour",
 		Calendar: "us",
 	})
+	minuteWeekBody, _ := json.Marshal(ForecastRequest{
+		Times:   baselineTimes,
+		Values:  baselineVals,
+		Model:   "baseline",
+		Horizon: 1,
+		Season:  "minute-week",
+	})
 
 	for _, tc := range []struct {
 		name      string
@@ -200,6 +207,22 @@ func TestCallResource(t *testing.T) {
 			path:      "forecast",
 			body:      badCalendar,
 			expStatus: http.StatusBadRequest,
+		},
+		{
+			name:      "baseline minute-week 200",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      minuteWeekBody,
+			expStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var got ForecastResponse
+				if err := json.Unmarshal(body, &got); err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Times) != 1 || len(got.Values) != 1 {
+					t.Fatalf("minute-week len times=%d values=%d", len(got.Times), len(got.Values))
+				}
+			},
 		},
 		{
 			name:      "get non existing handler 404",
