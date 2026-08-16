@@ -22,28 +22,12 @@ replace github.com/eduard-kolotushin/timeseries-forecast => ../timeseries-foreca
 ## Build
 
 ```bash
-npm install
-npm run build
+make build      # webpack + Linux backend -> dist/
+make frontend   # webpack only
+make backend    # Linux amd64 binary only
 ```
 
-On Windows, cross-compile the backend for the Linux Grafana container:
-
-```powershell
-$env:GOOS="linux"; $env:GOARCH="amd64"; go build -o dist/gpx_forecast_linux_amd64 ./pkg
-```
-
-On Linux/macOS:
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o dist/gpx_forecast_linux_amd64 ./pkg
-```
-
-Then start Grafana from the sandbox:
-
-```bash
-cd ../timeseries-grafana-sandbox
-docker compose up
-```
+Grafana start/restart lives in the sibling sandbox Makefile (`make up`, `make refresh`, `make ingest`).
 
 ## Agents
 

@@ -37,4 +37,5 @@ Docker Compose sandbox (see `timeseries-grafana-sandbox`), Grafana.com signing/p
 
 - Table-driven Go tests for the forecast resource
 - `replace` directives for local sibling modules
+- `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`
