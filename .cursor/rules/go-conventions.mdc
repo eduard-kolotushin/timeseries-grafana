@@ -22,6 +22,6 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quality
 
-- Table-driven tests next to the resource handler
+- Table-driven tests next to the resource handler and the baseline publisher
 - No drive-by refactors
 - Keep Grafana scaffold files under `.config/` unless a plugin-tools upgrade requires it

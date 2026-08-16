@@ -7,9 +7,9 @@ alwaysApply: true
 
 Read [docs/INTENTIONS.md](docs/INTENTIONS.md) before expanding scope.
 
-## Stay in v1
+## Stay in v1/v2
 
-Allowed: app + Go `/forecast` resource, nested overlay panel.
+Allowed: app + Go `/forecast` resource, nested overlay panel, Druid→minute-of-week baseline→Kafka publisher (app Configuration + backend ticker).
 
 Do **not** add without updating INTENTIONS first:
 
@@ -18,6 +18,8 @@ Do **not** add without updating INTENTIONS first:
 - Prometheus
 - Prediction intervals or alerting
 - A forked Series or forecast implementation
+- Extra app pages beyond landing + Configuration
+- Reading the metrics Kafka topic (use Druid SQL)
 
 ## Use the sibling libraries
 

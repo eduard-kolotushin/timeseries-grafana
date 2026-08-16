@@ -5,6 +5,8 @@
   "id": "eduardkolotushin-forecast-app",
   "backend": true,
   "executable": "gpx_forecast",
+  "preload": true,
+  "autoEnabled": true,
   "info": {
     "keywords": ["app", "forecast", "timeseries"],
     "description": "Overlay univariate forecasts from timeseries-forecast on Grafana queries.",

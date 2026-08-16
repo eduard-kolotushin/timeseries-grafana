@@ -29,6 +29,8 @@ make backend    # Linux amd64 binary only
 
 Grafana start/restart lives in the sibling sandbox Makefile (`make up`, `make refresh`, `make ingest`).
 
+Minute-of-week baselines are published from the Go backend when enabled on **Configuration** (Druid broker, datasource, Kafka brokers, baseline topic, lookback, ahead minutes N, interval). The overlay panel does not need those settings.
+
 ## Agents
 
 Contributors and coding agents: start with [AGENTS.md](AGENTS.md).
