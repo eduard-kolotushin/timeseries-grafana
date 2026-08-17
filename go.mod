@@ -6,7 +6,6 @@ require (
 	github.com/eduard-kolotushin/timeseries v0.0.0
 	github.com/eduard-kolotushin/timeseries-forecast v0.0.0
 	github.com/grafana/grafana-plugin-sdk-go v0.296.1
-	github.com/segmentio/kafka-go v0.4.49
 )
 
 replace github.com/eduard-kolotushin/timeseries => ../timeseries

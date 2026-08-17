@@ -4,7 +4,7 @@ import { PluginType } from '@grafana/data';
 import AppConfig, { AppConfigProps } from './AppConfig';
 
 describe('Components/AppConfig', () => {
-  test('shows baseline publisher fields', () => {
+  test('shows that overlay needs no extra settings', () => {
     const props = {
       plugin: {
         meta: {
@@ -12,23 +12,13 @@ describe('Components/AppConfig', () => {
           name: 'Timeseries Forecast',
           type: PluginType.app,
           enabled: true,
-          jsonData: {
-            enabled: true,
-            druidBroker: 'http://druid-broker:8082',
-            druidDatasource: 'metrics',
-            kafkaBrokers: 'kafka:9092',
-            kafkaTopic: 'baselines',
-          },
+          jsonData: {},
         },
       },
       query: {},
     } as unknown as AppConfigProps;
 
     render(<AppConfig plugin={props.plugin} query={props.query} />);
-    expect(screen.getByText(/baseline publisher/i)).toBeInTheDocument();
-    expect(screen.getByDisplayValue('http://druid-broker:8082')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('metrics')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('kafka:9092')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('baselines')).toBeInTheDocument();
+    expect(screen.queryByText(/no extra api settings/i)).toBeInTheDocument();
   });
 });

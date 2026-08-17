@@ -27,9 +27,7 @@ make frontend   # webpack only
 make backend    # Linux amd64 binary only
 ```
 
-Grafana start/restart lives in the sibling sandbox Makefile (`make up`, `make refresh`, `make ingest`).
-
-Minute-of-week baselines are published from the Go backend when enabled on **Configuration** (Druid broker, datasource, Kafka brokers, baseline topic, lookback, ahead minutes N, interval). The overlay panel does not need those settings.
+Grafana start/restart lives in the sibling sandbox Makefile (`make up`, `make refresh`, `make ingest`). Minute-of-week Druid→Kafka baselines run in sibling [`timeseries-baselines`](../timeseries-baselines), not in this plugin process.
 
 ## Agents
 

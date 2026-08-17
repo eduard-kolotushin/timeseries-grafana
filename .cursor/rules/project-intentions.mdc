@@ -7,9 +7,9 @@ alwaysApply: true
 
 Read [docs/INTENTIONS.md](docs/INTENTIONS.md) before expanding scope.
 
-## Stay in v1/v2
+## Stay in v1
 
-Allowed: app + Go `/forecast` resource, nested overlay panel, Druid→minute-of-week baseline→Kafka publisher (app Configuration + backend ticker).
+Allowed: app + Go `/forecast` resource, nested overlay panel.
 
 Do **not** add without updating INTENTIONS first:
 
@@ -19,7 +19,7 @@ Do **not** add without updating INTENTIONS first:
 - Prediction intervals or alerting
 - A forked Series or forecast implementation
 - Extra app pages beyond landing + Configuration
-- Reading the metrics Kafka topic (use Druid SQL)
+- A Druid/Kafka ticker in this plugin (sibling `timeseries-baselines`)
 
 ## Use the sibling libraries
 
