@@ -16,7 +16,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## API
 
-- `POST /forecast` returns new points; do not mutate inputs
+- `POST /forecast` returns new points and optional `lower`/`upper`; do not mutate inputs
 - Panel forecasts each numeric series independently
 - Pre-size Go slices to the request/horizon length
 

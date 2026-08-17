@@ -78,5 +78,12 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
         ],
       },
       showIf: (opts) => opts.model === 'baseline',
+    })
+    .addNumberInput({
+      path: 'interval',
+      name: 'Prediction interval',
+      description: 'Coverage in (0, 1). 0 hides the band.',
+      defaultValue: 0.95,
+      settings: { min: 0, max: 0.99, step: 0.05 },
     });
 });

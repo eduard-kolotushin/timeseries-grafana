@@ -7,16 +7,16 @@ alwaysApply: true
 
 Read [docs/INTENTIONS.md](docs/INTENTIONS.md) before expanding scope.
 
-## Stay in v1
+## Stay in v1/v2
 
-Allowed: app + Go `/forecast` resource, nested overlay panel.
+Allowed: app + Go `/forecast` resource, nested overlay panel, prediction interval bands.
 
 Do **not** add without updating INTENTIONS first:
 
 - Docker Compose / TestData sandbox (sibling `timeseries-grafana-sandbox`)
 - Grafana.com signing/publish
 - Prometheus
-- Prediction intervals or alerting
+- Alerting
 - A forked Series or forecast implementation
 - Extra app pages beyond landing + Configuration
 - A Druid/Kafka ticker in this plugin (sibling `timeseries-baselines`)

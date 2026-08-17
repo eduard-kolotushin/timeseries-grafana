@@ -56,15 +56,22 @@ export const ForecastPanel: React.FC<Props> = ({
             period: options.period,
             season: options.season,
             calendar: options.calendar,
+            level: options.interval ?? 0.95,
           });
           forecasts.push(
-            toFrame(`${points.name} (forecast)`, resp.times, resp.values.map(nullToNaN), theme.colors.warning.main)
+            toForecastFrame(
+              `${points.name} (forecast)`,
+              resp.times,
+              resp.values.map(nullToNaN),
+              resp.lower,
+              resp.upper,
+              theme.colors.warning.main
+            )
           );
         } catch (e) {
           if (!cancelled) {
             setError(e instanceof Error ? e.message : String(e));
           }
-          return;
         }
       }
 
@@ -86,6 +93,7 @@ export const ForecastPanel: React.FC<Props> = ({
     options.period,
     options.season,
     options.calendar,
+    options.interval,
     theme.colors.warning.main,
   ]);
 
@@ -149,7 +157,57 @@ function nullToNaN(v: number | null): number {
   return v == null ? NaN : v;
 }
 
-function toFrame(name: string, times: number[], values: Array<number | null | number>, color?: string): DataFrame {
+function toNullable(v: number | null | undefined): number | null {
+  return v == null || Number.isNaN(Number(v)) ? null : Number(v);
+}
+
+function toForecastFrame(
+  name: string,
+  times: number[],
+  values: number[],
+  lower: Array<number | null> | undefined,
+  upper: Array<number | null> | undefined,
+  color?: string
+): DataFrame {
+  const frame = toFrame(name, times, values, color);
+  const lo = lower?.map(toNullable);
+  const hi = upper?.map(toNullable);
+  if (!lo?.length || !hi?.length || !lo.some((v, i) => v != null && hi[i] != null)) {
+    return frame;
+  }
+  const loName = `${name} lower`;
+  const hiName = `${name} upper`;
+  frame.addField({
+    name: loName,
+    type: FieldType.number,
+    values: lo,
+    config: {
+      displayName: loName,
+      custom: {
+        lineWidth: 0,
+        fillOpacity: 0,
+        hideFrom: { legend: true, tooltip: true, viz: false },
+      },
+    },
+  });
+  frame.addField({
+    name: hiName,
+    type: FieldType.number,
+    values: hi,
+    config: {
+      displayName: hiName,
+      custom: {
+        lineWidth: 0,
+        fillOpacity: 20,
+        fillBelowTo: loName,
+        hideFrom: { legend: true, tooltip: true, viz: false },
+      },
+    },
+  });
+  return frame;
+}
+
+function toFrame(name: string, times: number[], values: Array<number | null | number>, color?: string): MutableDataFrame {
   const frame = new MutableDataFrame();
   frame.refId = name;
   frame.addField({ name: 'Time', type: FieldType.time, values: times });

@@ -17,9 +17,9 @@ Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeserie
 ## Overlay data flow
 
 1. The nested panel reads Grafana frames (time + first numeric field) per series.
-2. It POSTs `{ times, values, model, horizon, season, calendar, ... }` to `/api/plugins/eduardkolotushin-forecast-app/resources/forecast`.
-3. The backend builds `timeseries.Series[float64]`, fits, and returns future unix-ms points.
-4. The panel draws history and forecast with `@grafana/ui` `TimeSeries`.
+2. It POSTs `{ times, values, model, horizon, season, calendar, level, ... }` to `/api/plugins/eduardkolotushin-forecast-app/resources/forecast`.
+3. The backend builds `timeseries.Series[float64]`, fits, and returns future unix-ms points plus optional `lower` / `upper` when `level` is in `(0, 1)`.
+4. The panel draws history and forecast with `@grafana/ui` `TimeSeries`. Interval bounds use `custom.fillBelowTo` on the forecast frame.
 
 ## Horizon clock
 

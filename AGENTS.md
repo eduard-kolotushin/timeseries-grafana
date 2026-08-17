@@ -24,15 +24,19 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Visualization plugin source stays in this repo; the Grafana runtime does not
 - Nested panel calls `POST /api/plugins/eduardkolotushin-forecast-app/resources/forecast`
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
-- Stay within v1 unless `docs/INTENTIONS.md` is updated first
+- Stay within v1/v2 unless `docs/INTENTIONS.md` is updated first
 
 ## v1 in scope
 
 App + Go backend, nested overlay panel.
 
-## v1 out of scope
+## v2 in scope
 
-Docker Compose sandbox (see `timeseries-grafana-sandbox`), Grafana.com signing/publish, Prometheus, prediction intervals, alerting, extra app pages, baseline publisher process.
+Prediction interval bands on the overlay (`POST /forecast` `lower`/`upper`, panel `interval` option).
+
+## v1/v2 out of scope
+
+Docker Compose sandbox (see `timeseries-grafana-sandbox`), Grafana.com signing/publish, Prometheus, alerting, extra app pages, baseline publisher process.
 
 ## Workflow
 

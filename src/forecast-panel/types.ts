@@ -10,9 +10,12 @@ export interface ForecastOptions {
   period: number;
   season: BaselineSeason;
   calendar: BaselineCalendar;
+  interval: number;
 }
 
 export interface ForecastResponse {
   times: number[];
   values: Array<number | null>;
+  lower?: Array<number | null>;
+  upper?: Array<number | null>;
 }

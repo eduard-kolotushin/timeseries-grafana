@@ -90,6 +90,20 @@ func TestCallResource(t *testing.T) {
 		Horizon: 1,
 		Season:  "minute-week",
 	})
+	intervalBody, _ := json.Marshal(ForecastRequest{
+		Times:   []int64{0, 1000, 2000, 3000},
+		Values:  []nullableFloat{1, 2, 3, 4},
+		Model:   "naive",
+		Horizon: 2,
+		Level:   0.95,
+	})
+	badLevel, _ := json.Marshal(ForecastRequest{
+		Times:   []int64{0, 1000, 2000, 3000},
+		Values:  []nullableFloat{1, 2, 3, 4},
+		Model:   "naive",
+		Horizon: 1,
+		Level:   1.5,
+	})
 
 	for _, tc := range []struct {
 		name      string
@@ -223,6 +237,35 @@ func TestCallResource(t *testing.T) {
 					t.Fatalf("minute-week len times=%d values=%d", len(got.Times), len(got.Values))
 				}
 			},
+		},
+		{
+			name:      "naive interval 200",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      intervalBody,
+			expStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var got ForecastResponse
+				if err := json.Unmarshal(body, &got); err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Lower) != len(got.Values) || len(got.Upper) != len(got.Values) {
+					t.Fatalf("interval len values=%d lower=%d upper=%d", len(got.Values), len(got.Lower), len(got.Upper))
+				}
+				for i := range got.Values {
+					v, lo, hi := float64(got.Values[i]), float64(got.Lower[i]), float64(got.Upper[i])
+					if lo > v || hi < v {
+						t.Fatalf("k=%d %v not in [%v, %v]", i+1, v, lo, hi)
+					}
+				}
+			},
+		},
+		{
+			name:      "invalid level 400",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      badLevel,
+			expStatus: http.StatusBadRequest,
 		},
 		{
 			name:      "get non existing handler 404",
