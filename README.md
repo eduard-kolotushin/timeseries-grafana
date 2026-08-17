@@ -10,14 +10,7 @@ This repo is plugin source only. The Grafana runtime lives in [`timeseries-grafa
 
 See [docs/INTENTIONS.md](docs/INTENTIONS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Local siblings
-
-`go.mod` replaces the libraries while they live side by side:
-
-```
-replace github.com/eduard-kolotushin/timeseries => ../timeseries
-replace github.com/eduard-kolotushin/timeseries-forecast => ../timeseries-forecast
-```
+The Go backend depends on tagged `timeseries` and `timeseries-forecast` modules.
 
 ## Build
 

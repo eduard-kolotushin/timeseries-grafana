@@ -25,9 +25,6 @@ Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeserie
 
 Same as `timeseries-forecast`: last timestamp + `k * step` for `k = 1..h`.
 
-## Local modules
+## Modules
 
-```
-replace github.com/eduard-kolotushin/timeseries => ../timeseries
-replace github.com/eduard-kolotushin/timeseries-forecast => ../timeseries-forecast
-```
+`go.mod` requires tagged `github.com/eduard-kolotushin/timeseries` and `github.com/eduard-kolotushin/timeseries-forecast`. Do not add a `replace` directive.

@@ -11,7 +11,7 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 | Repo | sibling `timeseries-grafana` |
 | Plugin | Grafana app `eduardkolotushin-forecast-app` with Go backend |
 | Panel | nested `eduardkolotushin-forecast-panel` |
-| Models | public `timeseries-forecast` Fit functions |
+| Models | public `timeseries-forecast` Fit functions (tagged module; no `replace`) |
 | Sandbox | sibling `timeseries-grafana-sandbox` |
 | Baseline publisher | sibling `timeseries-baselines` (standalone process, not Grafana-hosted) |
 
@@ -40,3 +40,4 @@ Do not add these without first updating this document:
 - Backend does not mutate caller series (libraries already return new series)
 - Invalid model/horizon/series map to HTTP 400
 - Table-driven tests cover golden paths for the resource
+- GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack

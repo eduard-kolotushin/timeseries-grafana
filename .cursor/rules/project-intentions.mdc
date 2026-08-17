@@ -23,4 +23,4 @@ Do **not** add without updating INTENTIONS first:
 
 ## Use the sibling libraries
 
-Call `timeseries` and `timeseries-forecast` through their public APIs. Local development uses `replace => ../timeseries` and `replace => ../timeseries-forecast`.
+Call `timeseries` and `timeseries-forecast` through their public APIs. Depend on tagged module versions; do not add a `replace` directive.

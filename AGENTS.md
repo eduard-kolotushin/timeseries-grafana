@@ -10,7 +10,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - **Plugin ID:** `eduardkolotushin-forecast-app` (nested panel `eduardkolotushin-forecast-panel`)
 - **Go module:** `github.com/eduard-kolotushin/timeseries-grafana`
 - **Go:** 1.26+
-- **Local siblings:** `../timeseries`, `../timeseries-forecast` via `go.mod` replace
+- **Libraries:** tagged `timeseries` and `timeseries-forecast` modules (no `replace`)
 - **Sandbox:** sibling `timeseries-grafana-sandbox`
 
 ## Read first
@@ -37,6 +37,7 @@ Docker Compose sandbox (see `timeseries-grafana-sandbox`), Grafana.com signing/p
 ## Workflow
 
 - Table-driven Go tests for the forecast resource
-- `replace` directives for local sibling modules
+- Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`
+- GitHub Actions on `main`: `gofmt`, `go test`, frontend typecheck/jest/webpack
