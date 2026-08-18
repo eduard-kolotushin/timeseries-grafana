@@ -79,11 +79,26 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       },
       showIf: (opts) => opts.model === 'baseline',
     })
+    .addBooleanSwitch({
+      path: 'showInterval',
+      name: 'Show prediction interval',
+      description: 'Overlay a Hyndman Gaussian band on the forecast',
+      defaultValue: true,
+    })
     .addNumberInput({
       path: 'interval',
-      name: 'Prediction interval',
+      name: 'Interval coverage',
       description: 'Coverage in (0, 1). 0 hides the band.',
       defaultValue: 0.95,
       settings: { min: 0, max: 0.99, step: 0.05 },
+      showIf: (opts) => opts.showInterval !== false,
+    })
+    .addTextInput({
+      path: 'lookback',
+      name: 'Training lookback',
+      description:
+        'History used to fit, independent of the panel time range. auto picks a window by model; otherwise a duration such as 15d or 48h (a bare number is days).',
+      defaultValue: 'auto',
+      settings: { placeholder: 'auto' },
     });
 });

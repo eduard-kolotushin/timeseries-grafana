@@ -11,7 +11,9 @@ import { getBackendSrv, PanelDataErrorView } from '@grafana/runtime';
 import { LegendDisplayMode, TooltipDisplayMode } from '@grafana/schema';
 import { Alert, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
 import { FORECAST_RESOURCE } from '../constants';
-import { extractSeries } from './extract';
+import { extractSeries, pickTrainingPoints } from './extract';
+import { forecastLevel, resolveLookbackMs } from './lookback';
+import { queryTrainingFrames } from './trainQuery';
 import { ForecastOptions, ForecastResponse } from './types';
 
 interface Props extends PanelProps<ForecastOptions> {}
@@ -38,6 +40,20 @@ export const ForecastPanel: React.FC<Props> = ({
       setError(null);
       const history: DataFrame[] = [];
       const forecasts: DataFrame[] = [];
+      const lookbackMs = resolveLookbackMs(options);
+      const toMs = timeRange.to.valueOf();
+      let trainFrames: DataFrame[] | null = null;
+      try {
+        trainFrames = await queryTrainingFrames(data.request, lookbackMs, toMs);
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
+      const trained = (trainFrames ?? [])
+        .map(extractSeries)
+        .filter((p): p is NonNullable<typeof p> => p != null);
+      const level = forecastLevel(options);
 
       for (const series of data.series) {
         const points = extractSeries(series);
@@ -45,10 +61,11 @@ export const ForecastPanel: React.FC<Props> = ({
           continue;
         }
         history.push(toFrame(points.name, points.times, points.values));
+        const fit = trained.length ? pickTrainingPoints(points, trained) : points;
         try {
           const resp = await getBackendSrv().post<ForecastResponse>(FORECAST_RESOURCE, {
-            times: points.times,
-            values: points.values,
+            times: fit.times,
+            values: fit.values,
             model: options.model,
             horizon: options.horizon,
             alpha: options.alpha,
@@ -56,7 +73,7 @@ export const ForecastPanel: React.FC<Props> = ({
             period: options.period,
             season: options.season,
             calendar: options.calendar,
-            level: options.interval ?? 0.95,
+            level,
           });
           forecasts.push(
             toForecastFrame(
@@ -86,6 +103,8 @@ export const ForecastPanel: React.FC<Props> = ({
     };
   }, [
     data.series,
+    data.request,
+    timeRange.to,
     options.model,
     options.horizon,
     options.alpha,
@@ -93,7 +112,9 @@ export const ForecastPanel: React.FC<Props> = ({
     options.period,
     options.season,
     options.calendar,
+    options.showInterval,
     options.interval,
+    options.lookback,
     theme.colors.warning.main,
   ]);
 

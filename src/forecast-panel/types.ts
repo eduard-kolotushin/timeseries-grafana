@@ -10,7 +10,9 @@ export interface ForecastOptions {
   period: number;
   season: BaselineSeason;
   calendar: BaselineCalendar;
+  showInterval: boolean;
   interval: number;
+  lookback: string;
 }
 
 export interface ForecastResponse {

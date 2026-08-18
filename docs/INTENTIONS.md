@@ -27,7 +27,14 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 - Nested panel option `interval` (coverage in `(0, 1)`, default 0.95; `0` hides bands)
 - Overlay draws a `fillBelowTo` band on the forecast series
 
-## v1/v2 non-goals
+## v3 must-have
+
+- Nested panel option `showInterval` (default on); coverage applies only when the switch is on (`level` `0` when off)
+- Training lookback independent of the panel time range: a second datasource query for `[timeRange.to − lookback, timeRange.to]`
+- Lookback **Auto** by model, or a typed duration (`15d`, `48h`, or a number of days); display still follows the panel query range
+- Overlay does not plot the extra training points
+
+## v1/v2/v3 non-goals
 
 Do not add these without first updating this document:
 

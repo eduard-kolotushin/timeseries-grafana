@@ -37,3 +37,14 @@ export function extractSeries(frame: DataFrame): SeriesPoints | null {
     values,
   };
 }
+
+export function pickTrainingPoints(display: SeriesPoints, trained: SeriesPoints[]): SeriesPoints {
+  const byName = trained.find((t) => t.name === display.name);
+  if (byName) {
+    return byName;
+  }
+  if (trained.length === 1) {
+    return trained[0];
+  }
+  return display;
+}
