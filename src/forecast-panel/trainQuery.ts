@@ -12,15 +12,14 @@ import { applyLookbackRange, trainMaxDataPoints } from './lookback';
 
 export async function queryTrainingFrames(
   request: DataQueryRequest | undefined,
-  lookbackMs: number,
+  fromMs: number,
   toMs: number
 ): Promise<DataFrame[] | null> {
   const targets = request?.targets?.filter((t) => !t.hide) ?? [];
-  if (!request || targets.length === 0 || lookbackMs <= 0) {
+  if (!request || targets.length === 0 || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
     return null;
   }
 
-  const fromMs = toMs - lookbackMs;
   const visibleFromMs = request.range?.from?.valueOf();
   const visibleToMs = request.range?.to?.valueOf();
   const range: TimeRange = {
@@ -29,7 +28,7 @@ export async function queryTrainingFrames(
     raw: { from: dateTime(fromMs), to: dateTime(toMs) },
   };
   const intervalMs = request.intervalMs > 0 ? request.intervalMs : 60_000;
-  const maxDataPoints = trainMaxDataPoints(lookbackMs, intervalMs);
+  const maxDataPoints = trainMaxDataPoints(toMs - fromMs, intervalMs);
   const scopedVars = {
     ...request.scopedVars,
     __from: { text: String(fromMs), value: String(fromMs) },

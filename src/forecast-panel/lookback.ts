@@ -1,5 +1,5 @@
 import { rangeUtil } from '@grafana/data';
-import { BaselineSeason, ForecastModel } from './types';
+import { BaselineSeason, ForecastModel, TrainTimeRange } from './types';
 
 export const MAX_TRAIN_POINTS = 100_000;
 
@@ -38,6 +38,53 @@ export function resolveLookbackMs(options: {
     }
   }
   return rangeUtil.intervalToMs(autoLookback(options.model, options.season));
+}
+
+export function isExplicitAutoTrainRange(range?: TrainTimeRange): boolean {
+  if (range == null) {
+    return false;
+  }
+  const from = range.from?.trim() ?? '';
+  const to = range.to?.trim() ?? '';
+  return !from || !to || (from.toLowerCase() === 'auto' && to.toLowerCase() === 'auto');
+}
+
+function parseTrainRange(range: TrainTimeRange, timeZone?: string): { fromMs: number; toMs: number } | null {
+  try {
+    const parsed = rangeUtil.convertRawToRange({ from: range.from, to: range.to }, timeZone);
+    const fromMs = parsed.from.valueOf();
+    const toMs = parsed.to.valueOf();
+    if (Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs) {
+      return { fromMs, toMs };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Training from/to window. Explicit empty picker is Auto (ignores legacy `lookback`). */
+export function resolveTrainWindow(
+  options: {
+    model: ForecastModel;
+    season?: BaselineSeason;
+    lookback?: string;
+    trainRange?: TrainTimeRange;
+  },
+  panelToMs: number,
+  timeZone?: string
+): { fromMs: number; toMs: number } {
+  if (options.trainRange != null && !isExplicitAutoTrainRange(options.trainRange)) {
+    const parsed = parseTrainRange(options.trainRange, timeZone);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  const lookbackMs =
+    options.trainRange != null && isExplicitAutoTrainRange(options.trainRange)
+      ? rangeUtil.intervalToMs(autoLookback(options.model, options.season))
+      : resolveLookbackMs(options);
+  return { fromMs: panelToMs - lookbackMs, toMs: panelToMs };
 }
 
 export function trainMaxDataPoints(lookbackMs: number, intervalMs: number): number {

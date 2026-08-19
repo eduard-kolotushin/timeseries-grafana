@@ -12,7 +12,7 @@ import { LegendDisplayMode, TooltipDisplayMode } from '@grafana/schema';
 import { Alert, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
 import { FORECAST_RESOURCE } from '../constants';
 import { extractSeries, pickTrainingPoints } from './extract';
-import { forecastLevel, resolveLookbackMs } from './lookback';
+import { forecastLevel, resolveTrainWindow } from './lookback';
 import { queryTrainingFrames } from './trainQuery';
 import { ForecastOptions, ForecastResponse } from './types';
 
@@ -40,11 +40,14 @@ export const ForecastPanel: React.FC<Props> = ({
       setError(null);
       const history: DataFrame[] = [];
       const forecasts: DataFrame[] = [];
-      const lookbackMs = resolveLookbackMs(options);
-      const toMs = timeRange.to.valueOf();
+      const { fromMs: trainFromMs, toMs: trainToMs } = resolveTrainWindow(
+        options,
+        timeRange.to.valueOf(),
+        timeZone
+      );
       let trainFrames: DataFrame[] | null = null;
       try {
-        trainFrames = await queryTrainingFrames(data.request, lookbackMs, toMs);
+        trainFrames = await queryTrainingFrames(data.request, trainFromMs, trainToMs);
       } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : String(e));
@@ -105,6 +108,7 @@ export const ForecastPanel: React.FC<Props> = ({
     data.series,
     data.request,
     timeRange.to,
+    timeZone,
     options.model,
     options.horizon,
     options.alpha,
@@ -115,6 +119,8 @@ export const ForecastPanel: React.FC<Props> = ({
     options.showInterval,
     options.interval,
     options.lookback,
+    options.trainRange?.from,
+    options.trainRange?.to,
     theme.colors.warning.main,
   ]);
 

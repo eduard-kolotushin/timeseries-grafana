@@ -1,4 +1,4 @@
-import { applyLookbackRange, autoLookback, forecastLevel, isoUtc, resolveLookbackMs, trainMaxDataPoints } from './lookback';
+import { applyLookbackRange, autoLookback, forecastLevel, isoUtc, resolveLookbackMs, resolveTrainWindow, trainMaxDataPoints } from './lookback';
 
 const day = 24 * 60 * 60 * 1000;
 
@@ -34,6 +34,58 @@ describe('resolveLookbackMs', () => {
 
   it('falls back to Auto when the override is not a duration', () => {
     expect(resolveLookbackMs({ model: 'holt', lookback: 'nope' })).toBe(7 * day);
+  });
+});
+
+describe('resolveTrainWindow', () => {
+  const panelTo = Date.UTC(2026, 7, 19, 12, 0, 0);
+
+  it('uses Auto ending at panel to when trainRange is unset', () => {
+    expect(resolveTrainWindow({ model: 'holt' }, panelTo)).toEqual({
+      fromMs: panelTo - 7 * day,
+      toMs: panelTo,
+    });
+  });
+
+  it('keeps a legacy duration lookback when trainRange was never saved', () => {
+    expect(resolveTrainWindow({ model: 'holt', lookback: '30d' }, panelTo)).toEqual({
+      fromMs: panelTo - 30 * day,
+      toMs: panelTo,
+    });
+  });
+
+  it('ignores legacy lookback when the picker is cleared to Auto', () => {
+    expect(resolveTrainWindow({ model: 'holt', lookback: '30d', trainRange: { from: '', to: '' } }, panelTo)).toEqual({
+      fromMs: panelTo - 7 * day,
+      toMs: panelTo,
+    });
+  });
+
+  it('uses an absolute from/to range', () => {
+    const from = '2026-07-01T00:00:00.000Z';
+    const to = '2026-08-01T00:00:00.000Z';
+    expect(resolveTrainWindow({ model: 'holt', trainRange: { from, to } }, panelTo, 'utc')).toEqual({
+      fromMs: Date.parse(from),
+      toMs: Date.parse(to),
+    });
+  });
+
+  it('parses a relative Grafana range', () => {
+    const { fromMs, toMs } = resolveTrainWindow(
+      { model: 'holt', trainRange: { from: 'now-7d', to: 'now' } },
+      panelTo,
+      'utc'
+    );
+    expect(Math.abs(toMs - fromMs - 7 * day)).toBeLessThan(2);
+  });
+
+  it('falls back to Auto when from is not before to', () => {
+    expect(
+      resolveTrainWindow({ model: 'holt', trainRange: { from: 'now', to: 'now-1h' } }, panelTo, 'utc')
+    ).toEqual({
+      fromMs: panelTo - 7 * day,
+      toMs: panelTo,
+    });
   });
 });
 

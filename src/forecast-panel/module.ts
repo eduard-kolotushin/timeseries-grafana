@@ -1,6 +1,7 @@
 import { PanelPlugin } from '@grafana/data';
 import { ForecastOptions } from './types';
 import { ForecastPanel } from './ForecastPanel';
+import { TrainRangeEditor } from './TrainRangeEditor';
 
 export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOptions((builder) => {
   return builder
@@ -93,12 +94,12 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       settings: { min: 0, max: 0.99, step: 0.05 },
       showIf: (opts) => opts.showInterval !== false,
     })
-    .addTextInput({
-      path: 'lookback',
-      name: 'Training lookback',
-      description:
-        'History used to fit, independent of the panel time range. auto picks a window by model; otherwise a duration such as 15d or 48h (a bare number is days).',
-      defaultValue: 'auto',
-      settings: { placeholder: 'auto' },
+    .addCustomEditor({
+      id: 'trainRange',
+      path: 'trainRange',
+      name: 'Training period',
+      description: 'From and To for the fit, independent of the panel time range. Opens a centered picker. Clear/Auto uses the model window.',
+      defaultValue: { from: '', to: '' },
+      editor: TrainRangeEditor,
     });
 });

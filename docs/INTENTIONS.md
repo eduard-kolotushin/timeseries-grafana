@@ -30,8 +30,8 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 ## v3 must-have
 
 - Nested panel option `showInterval` (default on); coverage applies only when the switch is on (`level` `0` when off)
-- Training lookback independent of the panel time range: a second datasource query for `[timeRange.to − lookback, timeRange.to]`
-- Lookback **Auto** by model, or a typed duration (`15d`, `48h`, or a number of days); display still follows the panel query range
+- Training window independent of the panel time range: a second datasource query for `[trainFrom, trainTo]`
+- Training period is a Grafana from/to time picker (relative or absolute), same as the dashboard time picker. Clear / Auto uses a model-based window ending at the panel `to`. Dashboards that still store a duration `lookback` (`15d`, `48h`) keep that meaning until a picker range is saved. Display still follows the panel query range
 - Overlay does not plot the extra training points
 
 ## v1/v2/v3 non-goals

@@ -9,7 +9,7 @@ Read [docs/INTENTIONS.md](docs/INTENTIONS.md) before expanding scope.
 
 ## Stay in v1/v2/v3
 
-Allowed: app + Go `/forecast` resource, nested overlay panel, prediction interval bands, `showInterval`, training lookback independent of the panel time range.
+Allowed: app + Go `/forecast` resource, nested overlay panel, prediction interval bands, `showInterval`, training window independent of the panel time range (from/to picker).
 
 Do **not** add without updating INTENTIONS first:
 

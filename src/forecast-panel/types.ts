@@ -2,6 +2,12 @@ export type ForecastModel = 'naive' | 'mean' | 'drift' | 'seasonal' | 'baseline'
 export type BaselineSeason = 'hour' | 'day' | 'week' | 'minute-week';
 export type BaselineCalendar = '' | 'ru';
 
+/** Grafana raw from/to, same strings as the dashboard time picker. Empty is Auto. */
+export interface TrainTimeRange {
+  from: string;
+  to: string;
+}
+
 export interface ForecastOptions {
   model: ForecastModel;
   horizon: number;
@@ -12,7 +18,9 @@ export interface ForecastOptions {
   calendar: BaselineCalendar;
   showInterval: boolean;
   interval: number;
-  lookback: string;
+  trainRange: TrainTimeRange;
+  /** @deprecated Duration lookback (`15d`); used only when `trainRange` was never saved. */
+  lookback?: string;
 }
 
 export interface ForecastResponse {

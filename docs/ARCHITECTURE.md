@@ -17,15 +17,15 @@ Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeserie
 ## Overlay data flow
 
 1. Grafana queries the **visible** panel time range. The nested panel draws those frames as history (time + first numeric field per series).
-2. Independently, the panel issues a second datasource query for `[timeRange.to − lookback, timeRange.to]` (same targets, with Druid/SQL time bounds rewritten to that window; `maxDataPoints` sized to the lookback). Lookback is Auto by model, or a typed duration (`15d`, `48h`, or a number of days).
+2. Independently, the panel issues a second datasource query for the training window (same targets, with Druid/SQL time bounds rewritten to that window; `maxDataPoints` sized to the window). The window is a Grafana from/to range (`trainRange`). Auto (cleared picker) is `[timeRange.to − autoLookback, timeRange.to]`.
 3. It POSTs the **training** points `{ times, values, model, horizon, season, calendar, level, ... }` to `/api/plugins/eduardkolotushin-forecast-app/resources/forecast`. `level` is `0` when `showInterval` is off.
 4. The backend builds `timeseries.Series[float64]`, fits, and returns future unix-ms points plus optional `lower` / `upper` when `level` is in `(0, 1)`.
-5. The panel draws visible history and forecast with `@grafana/ui` `TimeSeries`. Interval bounds use `custom.fillBelowTo` on the forecast frame. Extra lookback points are not plotted.
-6. If the lookback query cannot run or fails, the panel falls back to the visible series.
+5. The panel draws visible history and forecast with `@grafana/ui` `TimeSeries`. Interval bounds use `custom.fillBelowTo` on the forecast frame. Extra training points are not plotted.
+6. If the training query cannot run or fails, the panel falls back to the visible series.
 
-## Training lookback
+## Training window
 
-Auto windows (override with panel `lookback`, e.g. `15d`):
+`trainRange` is Grafana raw from/to (`now-7d`/`now`, or absolute ISO). Empty / Auto windows (legacy `lookback` duration still applies if `trainRange` was never saved):
 
 | Model | Lookback |
 | --- | --- |
@@ -35,7 +35,7 @@ Auto windows (override with panel `lookback`, e.g. `15d`):
 | seasonal naive | 14d |
 | naive, mean, drift, SES, Holt | 7d |
 
-`maxDataPoints` for the training query is `min(100000, ceil(lookback / interval) + 1)`.
+`maxDataPoints` for the training query is `min(100000, ceil((trainTo − trainFrom) / interval) + 1)`.
 
 ## Horizon clock
 

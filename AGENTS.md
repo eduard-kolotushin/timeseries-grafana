@@ -36,7 +36,7 @@ Prediction interval bands on the overlay (`POST /forecast` `lower`/`upper`, pane
 
 ## v3 in scope
 
-`showInterval` (default on). Training lookback via a second datasource query; Auto by model, or a typed duration. Display still follows the panel time range.
+`showInterval` (default on). Training window via a second datasource query; Grafana from/to time picker, or Auto by model. Display still follows the panel time range.
 
 ## v1/v2/v3 out of scope
 

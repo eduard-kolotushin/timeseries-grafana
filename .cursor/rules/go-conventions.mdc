@@ -18,7 +18,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - `POST /forecast` returns new points and optional `lower`/`upper`; do not mutate inputs
 - Panel forecasts each numeric series independently
-- Panel `showInterval` gates `level`; training uses a lookback query, not the visible range
+- Panel `showInterval` gates `level`; training uses a from/to query, not the visible range
 - Pre-size Go slices to the request/horizon length
 
 ## Quality
