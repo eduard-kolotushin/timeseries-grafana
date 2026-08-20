@@ -12,7 +12,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules |
 | `pkg/plugin/resources.go` | `POST /forecast`, `GET /ping` |
 
-Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeseries-grafana-sandbox`, which mounts `dist/`. The Druid→Kafka baseline ticker lives in sibling `timeseries-baselines`.
+Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeseries-grafana-sandbox`, which mounts `dist/`. Cluster install (Grafana image with this plugin baked in, plus the worker image) lives in sibling `timeseries-k8s`. The Druid→Kafka baseline ticker lives in sibling `timeseries-baselines`.
 
 ## Overlay data flow
 

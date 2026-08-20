@@ -12,7 +12,8 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 | Plugin | Grafana app `eduardkolotushin-forecast-app` with Go backend |
 | Panel | nested `eduardkolotushin-forecast-panel` |
 | Models | public `timeseries-forecast` Fit functions (tagged module; no `replace`) |
-| Sandbox | sibling `timeseries-grafana-sandbox` |
+| Sandbox | sibling `timeseries-grafana-sandbox` (Compose) |
+| Kubernetes | sibling `timeseries-k8s` (Helm + images) |
 | Baseline publisher | sibling `timeseries-baselines` (standalone process, not Grafana-hosted) |
 
 ## v1 must-have
@@ -39,6 +40,7 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 Do not add these without first updating this document:
 
 - Docker Compose / TestData sandbox (those live in `timeseries-grafana-sandbox`)
+- Kubernetes Helm / container images (those live in `timeseries-k8s`)
 - Publishing or signing on grafana.com
 - Prometheus
 - Alerting

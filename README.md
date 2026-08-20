@@ -6,7 +6,7 @@ Grafana app plugin that overlays forecasts from [`timeseries-forecast`](https://
 **Nested panel:** `eduardkolotushin-forecast-panel`  
 **Go:** 1.26+
 
-This repo is plugin source only. The Grafana runtime lives in [`timeseries-grafana-sandbox`](../timeseries-grafana-sandbox). Open all siblings with [`../timeseries-workspace.code-workspace`](../timeseries-workspace.code-workspace).
+This repo is plugin source only. Local Grafana is [`timeseries-grafana-sandbox`](../timeseries-grafana-sandbox). Cluster Helm and images are [`timeseries-k8s`](../timeseries-k8s). Open all siblings with [`../timeseries-workspace.code-workspace`](../timeseries-workspace.code-workspace).
 
 See [docs/INTENTIONS.md](docs/INTENTIONS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -20,7 +20,7 @@ make frontend   # webpack only
 make backend    # Linux amd64 binary only
 ```
 
-Grafana start/restart lives in the sibling sandbox Makefile (`make up`, `make refresh`, `make ingest`). Minute-of-week Druid→Kafka baselines run in sibling [`timeseries-baselines`](../timeseries-baselines), not in this plugin process.
+Grafana start/restart lives in the sibling sandbox Makefile (`make up`, `make refresh`, `make ingest`). A cluster install is `helm install` from [`timeseries-k8s`](../timeseries-k8s). Minute-of-week Druid→Kafka baselines run in sibling [`timeseries-baselines`](../timeseries-baselines), not in this plugin process.
 
 ## Agents
 

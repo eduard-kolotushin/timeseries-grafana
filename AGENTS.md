@@ -12,6 +12,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - **Go:** 1.26+
 - **Libraries:** tagged `timeseries` and `timeseries-forecast` modules (no `replace`)
 - **Sandbox:** sibling `timeseries-grafana-sandbox`
+- **Kubernetes:** sibling `timeseries-k8s`
 
 ## Read first
 
@@ -21,7 +22,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 ## Hard constraints
 
 - Do not reimplement Series or forecast models; use the public sibling APIs only
-- Visualization plugin source stays in this repo; the Grafana runtime does not
+- Visualization plugin source stays in this repo; the Grafana runtime does not (Compose sandbox or `timeseries-k8s`)
 - Nested panel calls `POST /api/plugins/eduardkolotushin-forecast-app/resources/forecast`
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
 - Stay within v1/v2/v3 unless `docs/INTENTIONS.md` is updated first
@@ -40,7 +41,7 @@ Prediction interval bands on the overlay (`POST /forecast` `lower`/`upper`, pane
 
 ## v1/v2/v3 out of scope
 
-Docker Compose sandbox (see `timeseries-grafana-sandbox`), Grafana.com signing/publish, Prometheus, alerting, extra app pages, baseline publisher process.
+Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prometheus, alerting, extra app pages, baseline publisher process.
 
 ## Workflow
 
@@ -48,4 +49,5 @@ Docker Compose sandbox (see `timeseries-grafana-sandbox`), Grafana.com signing/p
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`
+- Cluster images and Helm live in `timeseries-k8s` (build from a git pin of this repo)
 - GitHub Actions on `main`: `gofmt`, `go test`, frontend typecheck/jest/webpack

@@ -14,6 +14,7 @@ Allowed: app + Go `/forecast` resource, nested overlay panel, prediction interva
 Do **not** add without updating INTENTIONS first:
 
 - Docker Compose / TestData sandbox (sibling `timeseries-grafana-sandbox`)
+- Kubernetes Helm / images (sibling `timeseries-k8s`)
 - Grafana.com signing/publish
 - Prometheus
 - Alerting
