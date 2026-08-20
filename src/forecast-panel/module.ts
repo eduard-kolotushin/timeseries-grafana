@@ -98,7 +98,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       id: 'trainRange',
       path: 'trainRange',
       name: 'Training period',
-      description: 'From and To for the fit, independent of the panel time range. Opens a centered picker. Clear/Auto uses the model window.',
+      description: 'From and To for the fit, independent of the panel time range. Opens above the control. Auto uses the model window.',
       defaultValue: { from: '', to: '' },
       editor: TrainRangeEditor,
     });

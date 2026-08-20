@@ -105,12 +105,12 @@ export function TrainRangeCalendar({
 function getStyles(theme: GrafanaTheme2) {
   return {
     wrap: css({
-      marginTop: theme.spacing(1),
-      marginBottom: theme.spacing(1),
       padding: theme.spacing(1),
       border: `1px solid ${theme.colors.border.weak}`,
       borderRadius: theme.shape.radius.default,
-      background: theme.colors.background.primary,
+      background: theme.colors.background.elevated,
+      boxShadow: theme.shadows.z3,
+      width: 240,
     }),
     header: css({
       display: 'flex',
