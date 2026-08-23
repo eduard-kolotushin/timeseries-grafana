@@ -18,10 +18,10 @@ Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeserie
 
 1. Grafana queries the **visible** panel time range. The nested panel draws those frames as history (time + first numeric field per series).
 2. Independently, the panel issues a second datasource query for the training window (same targets, with Druid/SQL time bounds rewritten to that window; `maxDataPoints` sized to the window). The window is a Grafana from/to range (`trainRange`). Auto (cleared picker) is `[timeRange.to − autoLookback, timeRange.to]`.
-3. It POSTs the **training** points `{ times, values, model, horizon, season, calendar, level, ... }` to `/api/plugins/eduardkolotushin-forecast-app/resources/forecast`. `level` is `0` when `showInterval` is off.
-4. The backend builds `timeseries.Series[float64]`, fits, and returns future unix-ms points plus optional `lower` / `upper` when `level` is in `(0, 1)`.
-5. The panel draws visible history and forecast with `@grafana/ui` `TimeSeries`. Interval bounds use `custom.fillBelowTo` on the forecast frame. Extra training points are not plotted.
-6. If the training query cannot run or fails, the panel falls back to the visible series.
+3. It POSTs the **training** points `{ times, values, model, from, to, season, calendar, level, ... }` to `/api/plugins/eduardkolotushin-forecast-app/resources/forecast`. `from`/`to` are unix ms for the forecast window. `level` is `0` when `showInterval` is off.
+4. The backend builds `timeseries.Series[float64]`, fits, and returns grid points in `[from, to]` (`ForecastRange`) plus optional `lower` / `upper` when `level` is in `(0, 1)`.
+5. The panel draws visible history and forecast with `@grafana/ui` `TimeSeries`. Interval bounds use `custom.fillBelowTo` on the forecast frame. Extra training points are not plotted. The plot `to` includes the forecast window.
+6. If the training query returns no points, or the forecast window has no grid points (or all NaN), the panel shows a reason. It does not silently fit the visible series.
 
 ## Training window
 
@@ -37,9 +37,23 @@ Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeserie
 
 `maxDataPoints` for the training query is `min(100000, ceil((trainTo − trainFrom) / interval) + 1)`.
 
+## Forecast window
+
+`forecastRange` is Grafana raw from/to. Empty / Auto is `[dashboard now, now + autoForecastHorizon]`:
+
+| Model | Duration |
+| --- | --- |
+| baseline minute-of-week or hour-of-week | 6h |
+| baseline hour | 24h |
+| baseline day | 7d |
+| seasonal naive | 24h |
+| naive, mean, drift, SES, Holt | 6h |
+
+The backend emits `last + k×step` points inside that window (skip-ahead; no backcast before `last+step`).
+
 ## Horizon clock
 
-Same as `timeseries-forecast`: last timestamp + `k * step` for `k = 1..h`.
+Same as `timeseries-forecast`: grid `last + k * step` for `k ≥ 1`, clipped to the request `[from, to]`.
 
 ## Modules
 

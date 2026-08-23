@@ -1,4 +1,4 @@
-import { applyLookbackRange, autoLookback, forecastLevel, isoUtc, resolveLookbackMs, resolveTrainWindow, trainMaxDataPoints } from './lookback';
+import { applyLookbackRange, autoForecastHorizon, autoLookback, forecastLevel, isoUtc, isInvalidForecastWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, trainMaxDataPoints } from './lookback';
 
 const day = 24 * 60 * 60 * 1000;
 
@@ -169,5 +169,68 @@ describe('applyLookbackRange', () => {
     expect(got.builder.query).toContain(`MILLIS_TO_TIMESTAMP(${trainFrom})`);
     expect(got.builder.query).toContain(`MILLIS_TO_TIMESTAMP(${trainTo})`);
     expect(got.builder.query).not.toContain('${__from}');
+  });
+});
+
+const hour = 60 * 60 * 1000;
+
+describe('autoForecastHorizon', () => {
+  it.each([
+    ['baseline', 'minute-week', '6h'],
+    ['baseline', 'week', '6h'],
+    ['baseline', 'hour', '24h'],
+    ['baseline', 'day', '7d'],
+    ['seasonal', undefined, '24h'],
+    ['holt', undefined, '6h'],
+    ['ses', undefined, '6h'],
+    ['naive', undefined, '6h'],
+    ['mean', undefined, '6h'],
+    ['drift', undefined, '6h'],
+  ] as const)('%s %s → %s', (model, season, want) => {
+    expect(autoForecastHorizon(model, season)).toBe(want);
+  });
+});
+
+describe('resolveForecastWindow', () => {
+  const nowMs = Date.UTC(2026, 7, 23, 12, 0, 0);
+
+  it('uses Auto from dashboard now through now + model duration', () => {
+    expect(resolveForecastWindow({ model: 'holt' }, nowMs)).toEqual({
+      fromMs: nowMs,
+      toMs: nowMs + 6 * hour,
+    });
+    expect(resolveForecastWindow({ model: 'baseline', season: 'hour' }, nowMs)).toEqual({
+      fromMs: nowMs,
+      toMs: nowMs + 24 * hour,
+    });
+    expect(resolveForecastWindow({ model: 'baseline', season: 'day' }, nowMs)).toEqual({
+      fromMs: nowMs,
+      toMs: nowMs + 7 * day,
+    });
+  });
+
+  it('ignores a leftover horizon and still uses Auto when forecastRange is unset', () => {
+    expect(resolveForecastWindow({ model: 'holt' }, nowMs)).toEqual({
+      fromMs: nowMs,
+      toMs: nowMs + 6 * hour,
+    });
+  });
+
+  it('uses an absolute from/to range', () => {
+    const from = '2026-08-23T12:00:00.000Z';
+    const to = '2026-08-23T18:00:00.000Z';
+    expect(resolveForecastWindow({ model: 'holt', forecastRange: { from, to } }, nowMs, 'utc')).toEqual({
+      fromMs: Date.parse(from),
+      toMs: Date.parse(to),
+    });
+  });
+
+  it('marks an inverted range invalid instead of falling back to Auto', () => {
+    const w = resolveForecastWindow(
+      { model: 'holt', forecastRange: { from: 'now', to: 'now-1h' } },
+      nowMs,
+      'utc'
+    );
+    expect(isInvalidForecastWindow(w)).toBe(true);
   });
 });

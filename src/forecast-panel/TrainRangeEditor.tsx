@@ -12,7 +12,7 @@ import {
   TimeRange,
 } from '@grafana/data';
 import { Button, Field, FilterInput, IconButton, Input, Stack, TimeRangeLabel, useStyles2 } from '@grafana/ui';
-import { autoLookback, isExplicitAutoTrainRange } from './lookback';
+import { autoForecastHorizon, autoLookback, isExplicitAutoTrainRange } from './lookback';
 import { TrainRangeCalendar } from './TrainRangeCalendar';
 import { ForecastOptions, TrainTimeRange } from './types';
 
@@ -35,13 +35,32 @@ const QUICK: Array<{ from: string; to: string; display: string }> = [
   { from: 'now-1y', to: 'now', display: 'Last 1 year' },
 ];
 
+const QUICK_FUTURE: Array<{ from: string; to: string; display: string }> = [
+  { from: 'now', to: 'now+5m', display: 'Next 5 minutes' },
+  { from: 'now', to: 'now+15m', display: 'Next 15 minutes' },
+  { from: 'now', to: 'now+30m', display: 'Next 30 minutes' },
+  { from: 'now', to: 'now+1h', display: 'Next 1 hour' },
+  { from: 'now', to: 'now+3h', display: 'Next 3 hours' },
+  { from: 'now', to: 'now+6h', display: 'Next 6 hours' },
+  { from: 'now', to: 'now+12h', display: 'Next 12 hours' },
+  { from: 'now', to: 'now+24h', display: 'Next 24 hours' },
+  { from: 'now', to: 'now+2d', display: 'Next 2 days' },
+  { from: 'now', to: 'now+7d', display: 'Next 7 days' },
+];
+
+export type RangeEditorSettings = { kind?: 'train' | 'forecast' };
+
 function pickerRaw(
+  kind: 'train' | 'forecast',
   value: TrainTimeRange | undefined,
   lookback: string | undefined,
   auto: string
 ): TrainTimeRange {
   if (value != null && !isExplicitAutoTrainRange(value)) {
     return value;
+  }
+  if (kind === 'forecast') {
+    return { from: 'now', to: `now+${auto}` };
   }
   const override = lookback?.trim();
   if (value == null && override && override.toLowerCase() !== 'auto') {
@@ -77,12 +96,17 @@ export const TrainRangeEditor = ({
   value,
   onChange,
   context,
-}: StandardEditorProps<TrainTimeRange, unknown, ForecastOptions>) => {
+  item,
+}: StandardEditorProps<TrainTimeRange, RangeEditorSettings, ForecastOptions>) => {
   const styles = useStyles2(getStyles);
   const timeZone = 'browser';
-  const auto = autoLookback(context.options?.model ?? 'holt', context.options?.season);
+  const kind = item.settings?.kind ?? 'train';
+  const auto =
+    kind === 'forecast'
+      ? autoForecastHorizon(context.options?.model ?? 'holt', context.options?.season)
+      : autoLookback(context.options?.model ?? 'holt', context.options?.season);
   const isAuto = value == null || isExplicitAutoTrainRange(value);
-  const raw = pickerRaw(value, context.options?.lookback, auto);
+  const raw = pickerRaw(kind, value, context.options?.lookback, auto);
   const range = toPickerValue(raw, timeZone);
 
   const triggerRef = useRef<HTMLDivElement>(null);
@@ -120,12 +144,12 @@ export const TrainRangeEditor = ({
     if (!open) {
       return;
     }
-    const next = pickerRaw(value, context.options?.lookback, auto);
+    const next = pickerRaw(kind, value, context.options?.lookback, auto);
     setFrom(next.from);
     setTo(next.to);
     setSearch('');
     setShowCalendar(false);
-  }, [open, value, context.options?.lookback, auto]);
+  }, [open, value, context.options?.lookback, auto, kind]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -171,7 +195,9 @@ export const TrainRangeEditor = ({
     close();
   };
 
-  const quick = QUICK.filter((q) => q.display.toLowerCase().includes(search.trim().toLowerCase()));
+  const quick = (kind === 'forecast' ? QUICK_FUTURE : QUICK).filter((q) =>
+    q.display.toLowerCase().includes(search.trim().toLowerCase())
+  );
   const calFrom = parseDate(from, timeZone).toDate();
   const calTo = parseDate(to, timeZone).toDate();
 
@@ -197,7 +223,9 @@ export const TrainRangeEditor = ({
       </div>
       {isAuto && (
         <div className={styles.hint}>
-          Auto (last {auto} ending at the panel To). Open to set From and To; use Auto in the picker to reset.
+          {kind === 'forecast'
+            ? `Auto (Grafana now through now + ${auto}). Open to set From and To; use Auto in the picker to reset.`
+            : `Auto (last ${auto} ending at the panel To). Open to set From and To; use Auto in the picker to reset.`}
         </div>
       )}
       {open &&
@@ -226,7 +254,7 @@ export const TrainRangeEditor = ({
                 <Field label="From" noMargin className={styles.field}>
                   <div className={styles.inputRow}>
                     <div className={styles.inputGrow}>
-                      <Input value={from} placeholder="now-7d" onChange={(e) => setFrom(e.currentTarget.value)} />
+                      <Input value={from} placeholder={kind === 'forecast' ? 'now' : 'now-7d'} onChange={(e) => setFrom(e.currentTarget.value)} />
                     </div>
                     <IconButton
                       name="calendar-alt"
@@ -239,7 +267,7 @@ export const TrainRangeEditor = ({
                 <Field label="To" noMargin className={styles.field}>
                   <div className={styles.inputRow}>
                     <div className={styles.inputGrow}>
-                      <Input value={to} placeholder="now" onChange={(e) => setTo(e.currentTarget.value)} />
+                      <Input value={to} placeholder={kind === 'forecast' ? 'now+6h' : 'now'} onChange={(e) => setTo(e.currentTarget.value)} />
                     </div>
                     <IconButton
                       name="calendar-alt"

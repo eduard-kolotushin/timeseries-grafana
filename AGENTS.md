@@ -25,7 +25,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Visualization plugin source stays in this repo; the Grafana runtime does not (Compose sandbox or `timeseries-k8s`)
 - Nested panel calls `POST /api/plugins/eduardkolotushin-forecast-app/resources/forecast`
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
-- Stay within v1/v2/v3 unless `docs/INTENTIONS.md` is updated first
+- Stay within v1/v2/v3/v4 unless `docs/INTENTIONS.md` is updated first
 
 ## v1 in scope
 
@@ -39,7 +39,11 @@ Prediction interval bands on the overlay (`POST /forecast` `lower`/`upper`, pane
 
 `showInterval` (default on). Training window via a second datasource query; Grafana from/to time picker, or Auto by model. Display still follows the panel time range.
 
-## v1/v2/v3 out of scope
+## v4 in scope
+
+Forecast from/to picker (Auto: Grafana `now` → `now` + model duration). Overlay is robust against that window: points or a reason. No silent train fallback.
+
+## v1/v2/v3/v4 out of scope
 
 Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prometheus, alerting, extra app pages, baseline publisher process.
 

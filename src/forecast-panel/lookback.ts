@@ -1,4 +1,4 @@
-import { rangeUtil } from '@grafana/data';
+import { dateTime, rangeUtil } from '@grafana/data';
 import { BaselineSeason, ForecastModel, TrainTimeRange } from './types';
 
 export const MAX_TRAIN_POINTS = 100_000;
@@ -18,6 +18,38 @@ export function autoLookback(model: ForecastModel, season?: BaselineSeason): str
     default:
       return '7d';
   }
+}
+
+/** Auto forecast window length starting at Grafana dashboard `now`. */
+export function autoForecastHorizon(model: ForecastModel, season?: BaselineSeason): string {
+  switch (model) {
+    case 'baseline':
+      if (season === 'minute-week' || season === 'week') {
+        return '6h';
+      }
+      if (season === 'day') {
+        return '7d';
+      }
+      return '24h';
+    case 'seasonal':
+      return '24h';
+    default:
+      return '6h';
+  }
+}
+
+/** Grafana time-picker `now` (honors nowDelay), not wall clock and not panel `to`. */
+export function dashboardNowMs(timeZone?: string): number {
+  try {
+    const parsed = rangeUtil.convertRawToRange({ from: 'now', to: 'now' }, timeZone);
+    const ms = parsed.from.valueOf();
+    if (Number.isFinite(ms)) {
+      return ms;
+    }
+  } catch {
+    // fall through
+  }
+  return dateTime().valueOf();
 }
 
 export function resolveLookbackMs(options: {
@@ -49,12 +81,16 @@ export function isExplicitAutoTrainRange(range?: TrainTimeRange): boolean {
   return !from || !to || (from.toLowerCase() === 'auto' && to.toLowerCase() === 'auto');
 }
 
-function parseTrainRange(range: TrainTimeRange, timeZone?: string): { fromMs: number; toMs: number } | null {
+function parseTimeRange(
+  range: TrainTimeRange,
+  timeZone?: string,
+  allowEqual = false
+): { fromMs: number; toMs: number } | null {
   try {
     const parsed = rangeUtil.convertRawToRange({ from: range.from, to: range.to }, timeZone);
     const fromMs = parsed.from.valueOf();
     const toMs = parsed.to.valueOf();
-    if (Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs) {
+    if (Number.isFinite(fromMs) && Number.isFinite(toMs) && (allowEqual ? toMs >= fromMs : toMs > fromMs)) {
       return { fromMs, toMs };
     }
   } catch {
@@ -75,7 +111,7 @@ export function resolveTrainWindow(
   timeZone?: string
 ): { fromMs: number; toMs: number } {
   if (options.trainRange != null && !isExplicitAutoTrainRange(options.trainRange)) {
-    const parsed = parseTrainRange(options.trainRange, timeZone);
+    const parsed = parseTimeRange(options.trainRange, timeZone);
     if (parsed) {
       return parsed;
     }
@@ -85,6 +121,33 @@ export function resolveTrainWindow(
       ? rangeUtil.intervalToMs(autoLookback(options.model, options.season))
       : resolveLookbackMs(options);
   return { fromMs: panelToMs - lookbackMs, toMs: panelToMs };
+}
+
+export type ForecastWindow = { fromMs: number; toMs: number } | { invalid: true };
+
+export function isInvalidForecastWindow(w: ForecastWindow): w is { invalid: true } {
+  return 'invalid' in w;
+}
+
+/** Forecast from/to window. Empty picker is Auto (`now` → `now` + model duration). Invalid explicit range is not Auto. */
+export function resolveForecastWindow(
+  options: {
+    model: ForecastModel;
+    season?: BaselineSeason;
+    forecastRange?: TrainTimeRange;
+  },
+  nowMs: number,
+  timeZone?: string
+): ForecastWindow {
+  if (options.forecastRange != null && !isExplicitAutoTrainRange(options.forecastRange)) {
+    const parsed = parseTimeRange(options.forecastRange, timeZone, true);
+    if (parsed) {
+      return parsed;
+    }
+    return { invalid: true };
+  }
+  const durationMs = rangeUtil.intervalToMs(autoForecastHorizon(options.model, options.season));
+  return { fromMs: nowMs, toMs: nowMs + durationMs };
 }
 
 export function trainMaxDataPoints(lookbackMs: number, intervalMs: number): number {

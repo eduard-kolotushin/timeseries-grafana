@@ -18,7 +18,8 @@ type ForecastRequest struct {
 	Times    []int64         `json:"times"`
 	Values   []nullableFloat `json:"values"`
 	Model    string          `json:"model"`
-	Horizon  int             `json:"horizon"`
+	From     int64           `json:"from"`
+	To       int64           `json:"to"`
 	Alpha    float64         `json:"alpha"`
 	Beta     float64         `json:"beta"`
 	Period   int             `json:"period"`
@@ -117,7 +118,9 @@ func runForecast(in ForecastRequest) (ForecastResponse, error) {
 		return ForecastResponse{}, err
 	}
 
-	out, err := fitted.Forecast(in.Horizon)
+	from := time.UnixMilli(in.From).UTC()
+	to := time.UnixMilli(in.To).UTC()
+	out, err := fitted.ForecastRange(from, to)
 	if err != nil {
 		return ForecastResponse{}, err
 	}
@@ -132,7 +135,7 @@ func runForecast(in ForecastRequest) (ForecastResponse, error) {
 		resp.Values[i] = nullableFloat(vs[i])
 	}
 	if in.Level != 0 {
-		lower, upper, err := fitted.ForecastInterval(in.Horizon, in.Level)
+		lower, upper, err := fitted.ForecastIntervalRange(from, to, in.Level)
 		if err != nil {
 			return ForecastResponse{}, err
 		}
@@ -178,6 +181,8 @@ func httpStatusFor(err error) int {
 		errors.Is(err, forecast.ErrUnknownCalendar),
 		errors.Is(err, forecast.ErrTooShort),
 		errors.Is(err, forecast.ErrInvalidLevel),
+		errors.Is(err, forecast.ErrRange),
+		errors.Is(err, forecast.ErrEmptyRange),
 		errors.Is(err, timeseries.ErrLengthMismatch),
 		errors.Is(err, timeseries.ErrUnsorted),
 		errors.Is(err, timeseries.ErrDuplicateTime):

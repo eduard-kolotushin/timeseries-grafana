@@ -10,7 +10,8 @@ export interface TrainTimeRange {
 
 export interface ForecastOptions {
   model: ForecastModel;
-  horizon: number;
+  /** @deprecated Point-count horizon; ignored once `forecastRange` ships. */
+  horizon?: number;
   alpha: number;
   beta: number;
   period: number;
@@ -19,6 +20,7 @@ export interface ForecastOptions {
   showInterval: boolean;
   interval: number;
   trainRange: TrainTimeRange;
+  forecastRange: TrainTimeRange;
   /** @deprecated Duration lookback (`15d`); used only when `trainRange` was never saved. */
   lookback?: string;
 }

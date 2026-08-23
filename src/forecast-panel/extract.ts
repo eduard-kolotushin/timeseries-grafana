@@ -48,3 +48,11 @@ export function pickTrainingPoints(display: SeriesPoints, trained: SeriesPoints[
   }
   return display;
 }
+
+/** Training points to POST. Empty train must not fall back to the visible series. */
+export function trainingForFit(display: SeriesPoints, trained: SeriesPoints[]): SeriesPoints | null {
+  if (trained.length === 0) {
+    return null;
+  }
+  return pickTrainingPoints(display, trained);
+}

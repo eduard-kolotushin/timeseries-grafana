@@ -1,5 +1,5 @@
 import { FieldType, toDataFrame } from '@grafana/data';
-import { extractSeries, pickTrainingPoints } from './extract';
+import { extractSeries, pickTrainingPoints, trainingForFit } from './extract';
 
 describe('extractSeries', () => {
   it('reads the time field and first numeric field', () => {
@@ -50,5 +50,18 @@ describe('pickTrainingPoints', () => {
 
   it('falls back to display when nothing matches', () => {
     expect(pickTrainingPoints(display, [other, { name: 'x', times: [], values: [] }])).toBe(display);
+  });
+});
+
+describe('trainingForFit', () => {
+  const display = { name: 'views', times: [1], values: [1] };
+  const trained = { name: 'views', times: [0, 1], values: [0, 1] };
+
+  it('returns null when the training query is empty (no silent fallback)', () => {
+    expect(trainingForFit(display, [])).toBeNull();
+  });
+
+  it('uses matched training points when the query returned data', () => {
+    expect(trainingForFit(display, [trained])).toBe(trained);
   });
 });

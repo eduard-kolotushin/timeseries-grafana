@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/eduard-kolotushin/timeseries v0.1.0
-	github.com/eduard-kolotushin/timeseries-forecast v0.2.0
+	github.com/eduard-kolotushin/timeseries-forecast v0.3.0
 	github.com/grafana/grafana-plugin-sdk-go v0.296.1
 )
 

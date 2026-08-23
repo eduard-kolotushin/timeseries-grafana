@@ -11,8 +11,22 @@ import { getBackendSrv, PanelDataErrorView } from '@grafana/runtime';
 import { LegendDisplayMode, TooltipDisplayMode } from '@grafana/schema';
 import { Alert, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
 import { FORECAST_RESOURCE } from '../constants';
-import { extractSeries, pickTrainingPoints } from './extract';
-import { forecastLevel, resolveTrainWindow } from './lookback';
+import { extractSeries, trainingForFit } from './extract';
+import {
+  dashboardNowMs,
+  forecastLevel,
+  isInvalidForecastWindow,
+  resolveForecastWindow,
+  resolveTrainWindow,
+} from './lookback';
+import {
+  REASON_ALL_NAN,
+  REASON_EMPTY_WINDOW,
+  REASON_INVALID_RANGE,
+  REASON_TRAIN_EMPTY,
+  hasDrawableValues,
+  reasonFromUnknown,
+} from './reasons';
 import { queryTrainingFrames } from './trainQuery';
 import { ForecastOptions, ForecastResponse } from './types';
 
@@ -32,6 +46,7 @@ export const ForecastPanel: React.FC<Props> = ({
   const theme = useTheme2();
   const [frames, setFrames] = useState<DataFrame[]>(data.series);
   const [error, setError] = useState<string | null>(null);
+  const [forecastToMs, setForecastToMs] = useState<number | undefined>();
 
   useEffect(() => {
     let cancelled = false;
@@ -40,6 +55,28 @@ export const ForecastPanel: React.FC<Props> = ({
       setError(null);
       const history: DataFrame[] = [];
       const forecasts: DataFrame[] = [];
+      const nowMs = dashboardNowMs(timeZone);
+      const window = resolveForecastWindow(options, nowMs, timeZone);
+
+      for (const series of data.series) {
+        const points = extractSeries(series);
+        if (points) {
+          history.push(toFrame(points.name, points.times, points.values));
+        }
+      }
+
+      if (isInvalidForecastWindow(window)) {
+        if (!cancelled) {
+          setError(REASON_INVALID_RANGE);
+          setForecastToMs(undefined);
+          setFrames(history);
+        }
+        return;
+      }
+      if (!cancelled) {
+        setForecastToMs(window.toMs);
+      }
+
       const { fromMs: trainFromMs, toMs: trainToMs } = resolveTrainWindow(
         options,
         timeRange.to.valueOf(),
@@ -50,27 +87,41 @@ export const ForecastPanel: React.FC<Props> = ({
         trainFrames = await queryTrainingFrames(data.request, trainFromMs, trainToMs);
       } catch (e) {
         if (!cancelled) {
-          setError(e instanceof Error ? e.message : String(e));
+          setError(reasonFromUnknown(e));
+          setFrames(history);
         }
+        return;
       }
       const trained = (trainFrames ?? [])
         .map(extractSeries)
         .filter((p): p is NonNullable<typeof p> => p != null);
+      if (trained.length === 0) {
+        if (!cancelled) {
+          setError(REASON_TRAIN_EMPTY);
+          setFrames(history);
+        }
+        return;
+      }
       const level = forecastLevel(options);
+      let overlayError: string | null = null;
 
       for (const series of data.series) {
         const points = extractSeries(series);
         if (!points) {
           continue;
         }
-        history.push(toFrame(points.name, points.times, points.values));
-        const fit = trained.length ? pickTrainingPoints(points, trained) : points;
+        const fit = trainingForFit(points, trained);
+        if (!fit) {
+          overlayError = overlayError ?? REASON_TRAIN_EMPTY;
+          continue;
+        }
         try {
           const resp = await getBackendSrv().post<ForecastResponse>(FORECAST_RESOURCE, {
             times: fit.times,
             values: fit.values,
             model: options.model,
-            horizon: options.horizon,
+            from: window.fromMs,
+            to: window.toMs,
             alpha: options.alpha,
             beta: options.beta,
             period: options.period,
@@ -78,24 +129,32 @@ export const ForecastPanel: React.FC<Props> = ({
             calendar: options.calendar,
             level,
           });
+          const values = resp.values.map(nullToNaN);
+          if (!resp.times?.length) {
+            overlayError = overlayError ?? REASON_EMPTY_WINDOW;
+            continue;
+          }
+          if (!hasDrawableValues(values)) {
+            overlayError = overlayError ?? REASON_ALL_NAN;
+            continue;
+          }
           forecasts.push(
             toForecastFrame(
               `${points.name} (forecast)`,
               resp.times,
-              resp.values.map(nullToNaN),
+              values,
               resp.lower,
               resp.upper,
               theme.colors.warning.main
             )
           );
         } catch (e) {
-          if (!cancelled) {
-            setError(e instanceof Error ? e.message : String(e));
-          }
+          overlayError = overlayError ?? reasonFromUnknown(e);
         }
       }
 
       if (!cancelled) {
+        setError(overlayError);
         setFrames([...history, ...forecasts]);
       }
     }
@@ -110,7 +169,6 @@ export const ForecastPanel: React.FC<Props> = ({
     timeRange.to,
     timeZone,
     options.model,
-    options.horizon,
     options.alpha,
     options.beta,
     options.period,
@@ -121,6 +179,8 @@ export const ForecastPanel: React.FC<Props> = ({
     options.lookback,
     options.trainRange?.from,
     options.trainRange?.to,
+    options.forecastRange?.from,
+    options.forecastRange?.to,
     theme.colors.warning.main,
   ]);
 
@@ -141,6 +201,9 @@ export const ForecastPanel: React.FC<Props> = ({
   }
 
   let toMs = timeRange.to.valueOf();
+  if (forecastToMs != null && forecastToMs > toMs) {
+    toMs = forecastToMs;
+  }
   for (const frame of plotFrames) {
     const timeField = frame.fields.find((f) => f.type === FieldType.time);
     if (!timeField || timeField.values.length === 0) {

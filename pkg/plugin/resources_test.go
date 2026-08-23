@@ -30,36 +30,41 @@ func TestCallResource(t *testing.T) {
 	}
 
 	holtBody, _ := json.Marshal(ForecastRequest{
-		Times:   []int64{0, 1000, 2000, 3000},
-		Values:  []nullableFloat{1, 2, 3, 4},
-		Model:   "holt",
-		Horizon: 2,
-		Alpha:   1,
-		Beta:    1,
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "holt",
+		From:   4000,
+		To:     5000,
+		Alpha:  1,
+		Beta:   1,
 	})
 	naiveBody, _ := json.Marshal(ForecastRequest{
-		Times:   []int64{0, 1000, 2000, 3000},
-		Values:  []nullableFloat{1, 2, 3, 4},
-		Model:   "naive",
-		Horizon: 2,
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "naive",
+		From:   4000,
+		To:     5000,
 	})
 	meanBody, _ := json.Marshal(ForecastRequest{
-		Times:   []int64{0, 1000, 2000, 3000},
-		Values:  []nullableFloat{1, 2, 3, 4},
-		Model:   "mean",
-		Horizon: 1,
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "mean",
+		From:   4000,
+		To:     4000,
 	})
 	driftBody, _ := json.Marshal(ForecastRequest{
-		Times:   []int64{0, 1000, 2000, 3000},
-		Values:  []nullableFloat{1, 2, 3, 4},
-		Model:   "drift",
-		Horizon: 2,
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "drift",
+		From:   4000,
+		To:     5000,
 	})
 	badModel, _ := json.Marshal(ForecastRequest{
-		Times:   []int64{0, 1000},
-		Values:  []nullableFloat{1, 2},
-		Model:   "arima",
-		Horizon: 1,
+		Times:  []int64{0, 1000},
+		Values: []nullableFloat{1, 2},
+		Model:  "arima",
+		From:   2000,
+		To:     2000,
 	})
 	baselineTimes := make([]int64, 48)
 	baselineVals := make([]nullableFloat, 48)
@@ -71,7 +76,8 @@ func TestCallResource(t *testing.T) {
 		Times:    baselineTimes,
 		Values:   baselineVals,
 		Model:    "baseline",
-		Horizon:  1,
+		From:     48 * 3_600_000,
+		To:       48 * 3_600_000,
 		Season:   "hour",
 		Calendar: "ru",
 	})
@@ -79,30 +85,57 @@ func TestCallResource(t *testing.T) {
 		Times:    baselineTimes,
 		Values:   baselineVals,
 		Model:    "baseline",
-		Horizon:  1,
+		From:     48 * 3_600_000,
+		To:       48 * 3_600_000,
 		Season:   "hour",
 		Calendar: "us",
 	})
 	minuteWeekBody, _ := json.Marshal(ForecastRequest{
-		Times:   baselineTimes,
-		Values:  baselineVals,
-		Model:   "baseline",
-		Horizon: 1,
-		Season:  "minute-week",
+		Times:  baselineTimes,
+		Values: baselineVals,
+		Model:  "baseline",
+		From:   48 * 3_600_000,
+		To:     48 * 3_600_000,
+		Season: "minute-week",
 	})
 	intervalBody, _ := json.Marshal(ForecastRequest{
-		Times:   []int64{0, 1000, 2000, 3000},
-		Values:  []nullableFloat{1, 2, 3, 4},
-		Model:   "naive",
-		Horizon: 2,
-		Level:   0.95,
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "naive",
+		From:   4000,
+		To:     5000,
+		Level:  0.95,
 	})
 	badLevel, _ := json.Marshal(ForecastRequest{
-		Times:   []int64{0, 1000, 2000, 3000},
-		Values:  []nullableFloat{1, 2, 3, 4},
-		Model:   "naive",
-		Horizon: 1,
-		Level:   1.5,
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "naive",
+		From:   4000,
+		To:     4000,
+		Level:  1.5,
+	})
+	skipAheadBody, _ := json.Marshal(ForecastRequest{
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "holt",
+		From:   5000,
+		To:     6000,
+		Alpha:  1,
+		Beta:   1,
+	})
+	emptyWindowBody, _ := json.Marshal(ForecastRequest{
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "naive",
+		From:   0,
+		To:     2000,
+	})
+	invertedBody, _ := json.Marshal(ForecastRequest{
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "naive",
+		From:   5000,
+		To:     4000,
 	})
 
 	for _, tc := range []struct {
@@ -265,6 +298,39 @@ func TestCallResource(t *testing.T) {
 			method:    http.MethodPost,
 			path:      "forecast",
 			body:      badLevel,
+			expStatus: http.StatusBadRequest,
+		},
+		{
+			name:      "holt skip-ahead 200",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      skipAheadBody,
+			expStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var got ForecastResponse
+				if err := json.Unmarshal(body, &got); err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Values) != 2 || float64(got.Values[0]) != 6 || float64(got.Values[1]) != 7 {
+					t.Fatalf("skip-ahead values=%v", got.Values)
+				}
+				if got.Times[0] != 5000 || got.Times[1] != 6000 {
+					t.Fatalf("skip-ahead times=%v", got.Times)
+				}
+			},
+		},
+		{
+			name:      "empty window 400",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      emptyWindowBody,
+			expStatus: http.StatusBadRequest,
+		},
+		{
+			name:      "inverted range 400",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      invertedBody,
 			expStatus: http.StatusBadRequest,
 		},
 		{

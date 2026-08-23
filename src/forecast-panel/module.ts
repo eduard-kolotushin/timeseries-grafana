@@ -22,12 +22,14 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
         ],
       },
     })
-    .addNumberInput({
-      path: 'horizon',
-      name: 'Horizon',
-      description: 'Number of future points',
-      defaultValue: 10,
-      settings: { min: 1, integer: true },
+    .addCustomEditor({
+      id: 'forecastRange',
+      path: 'forecastRange',
+      name: 'Forecast range',
+      description: 'From and To for forecast timestamps. Auto starts at dashboard now and lasts a model-based duration.',
+      defaultValue: { from: '', to: '' },
+      editor: TrainRangeEditor,
+      settings: { kind: 'forecast' },
     })
     .addNumberInput({
       path: 'alpha',
@@ -101,5 +103,6 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       description: 'From and To for the fit, independent of the panel time range. Opens above the control. Auto uses the model window.',
       defaultValue: { from: '', to: '' },
       editor: TrainRangeEditor,
+      settings: { kind: 'train' },
     });
 });

@@ -35,7 +35,25 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 - Training period is a Grafana from/to time picker (relative or absolute), same as the dashboard time picker. Clear / Auto uses a model-based window ending at the panel `to`. Dashboards that still store a duration `lookback` (`15d`, `48h`) keep that meaning until a picker range is saved. Display still follows the panel query range
 - Overlay does not plot the extra training points
 
-## v1/v2/v3 non-goals
+## v4 must-have
+
+- Nested panel option `forecastRange` `{from,to}` (Grafana raw strings). Empty / Auto is Grafana dashboard `now` through `now` + a model-based duration (independent of the dashboard range)
+- Replace the numeric horizon with that from/to picker (same UX as the training picker)
+- `POST /forecast` sends `from` / `to` unix ms; backend calls `ForecastRange` (and `ForecastIntervalRange` when bands are on)
+- Plot `to` extends to include the forecast window so Auto `now→now+duration` is visible
+- If the forecast window has no drawable points, the panel shows a specific reason (no silent empty overlay; no silent fit of the visible series when the train query is empty)
+
+Auto forecast duration (start = dashboard `now`):
+
+| Model | Duration |
+| --- | --- |
+| baseline minute-of-week or hour-of-week | 6h |
+| baseline hour | 24h |
+| baseline day | 7d |
+| seasonal naive | 24h |
+| naive, mean, drift, SES, Holt | 6h |
+
+## v1/v2/v3/v4 non-goals
 
 Do not add these without first updating this document:
 
@@ -52,6 +70,6 @@ Do not add these without first updating this document:
 ## Quality bar
 
 - Backend does not mutate caller series (libraries already return new series)
-- Invalid model/horizon/series/level map to HTTP 400
+- Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource
 - GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack
