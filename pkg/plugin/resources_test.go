@@ -362,3 +362,119 @@ func TestCallResource(t *testing.T) {
 		})
 	}
 }
+
+func TestForecastCache(t *testing.T) {
+	store := newMemoryStore()
+	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	other := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	saveBody, _ := json.Marshal(ForecastRequest{
+		Times:    []int64{0, 1000, 2000, 3000},
+		Values:   []nullableFloat{1, 2, 3, 4},
+		Model:    "naive",
+		From:     4000,
+		To:       5000,
+		CacheKey: key,
+	})
+	probeBody, _ := json.Marshal(ForecastRequest{
+		Model:    "naive",
+		From:     4000,
+		To:       5000,
+		CacheKey: key,
+	})
+	retrainProbe, _ := json.Marshal(ForecastRequest{
+		Model:    "naive",
+		From:     4000,
+		To:       5000,
+		CacheKey: key,
+		Retrain:  true,
+	})
+	overwrite, _ := json.Marshal(ForecastRequest{
+		Times:    []int64{0, 1000, 2000, 3000},
+		Values:   []nullableFloat{10, 20, 30, 40},
+		Model:    "naive",
+		From:     4000,
+		To:       5000,
+		CacheKey: key,
+	})
+	badKey, _ := json.Marshal(ForecastRequest{
+		Model:    "naive",
+		From:     4000,
+		To:       5000,
+		CacheKey: "not-hex",
+	})
+	otherKey, _ := json.Marshal(ForecastRequest{
+		Model:    "naive",
+		From:     4000,
+		To:       5000,
+		CacheKey: other,
+	})
+
+	call := func(org int64, body []byte) (int, ForecastResponse) {
+		t.Helper()
+		var r mockCallResourceResponseSender
+		err := app.CallResource(context.Background(), &backend.CallResourceRequest{
+			PluginContext: backend.PluginContext{OrgID: org},
+			Method:        http.MethodPost,
+			Path:          "forecast",
+			Body:          body,
+		}, &r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got ForecastResponse
+		if r.response.Status == http.StatusOK {
+			if err := json.Unmarshal(bytes.TrimSpace(r.response.Body), &got); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return r.response.Status, got
+	}
+
+	status, got := call(1, probeBody)
+	if status != http.StatusOK || !got.NeedTrain {
+		t.Fatalf("miss: status=%d needTrain=%v body=%+v", status, got.NeedTrain, got)
+	}
+
+	status, got = call(1, saveBody)
+	if status != http.StatusOK || got.NeedTrain || len(got.Values) != 2 || float64(got.Values[0]) != 4 {
+		t.Fatalf("save: status=%d got=%+v", status, got)
+	}
+
+	status, got = call(1, probeBody)
+	if status != http.StatusOK || !got.Cached || got.NeedTrain || float64(got.Values[0]) != 4 {
+		t.Fatalf("hit: status=%d got=%+v", status, got)
+	}
+
+	status, got = call(2, probeBody)
+	if status != http.StatusOK || !got.NeedTrain {
+		t.Fatalf("org isolation: status=%d got=%+v", status, got)
+	}
+
+	status, got = call(1, otherKey)
+	if status != http.StatusOK || !got.NeedTrain {
+		t.Fatalf("other key: status=%d got=%+v", status, got)
+	}
+
+	status, got = call(1, retrainProbe)
+	if status != http.StatusOK || !got.NeedTrain {
+		t.Fatalf("retrain probe: status=%d got=%+v", status, got)
+	}
+
+	status, got = call(1, overwrite)
+	if status != http.StatusOK || float64(got.Values[0]) != 40 {
+		t.Fatalf("overwrite: status=%d got=%+v", status, got)
+	}
+	status, got = call(1, probeBody)
+	if status != http.StatusOK || float64(got.Values[0]) != 40 {
+		t.Fatalf("after overwrite: status=%d got=%+v", status, got)
+	}
+
+	status, _ = call(1, badKey)
+	if status != http.StatusBadRequest {
+		t.Fatalf("bad key status=%d", status)
+	}
+}

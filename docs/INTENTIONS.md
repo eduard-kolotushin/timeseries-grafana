@@ -65,14 +65,21 @@ Auto forecast duration (start = dashboard `now`):
 
 Train step follows the model, not the dashboard interval: minute-of-week `1m`, hour / hour-of-week `1h`, day `1d`, otherwise the request `intervalMs` (floor 1m). Still clamp with `MAX_TRAIN_POINTS` (100k).
 
-## v1/v2/v3/v4/v5 non-goals
+## v6 must-have
+
+- Persist fitted snapshots in Postgres (`forecast.snapshots`) via **pgx** in `gpx_forecast`. Org-scoped, survives Grafana restart, shared across users. Not Grafana Postgres datasource HTTP and not Druid metadata Postgres
+- `POST /forecast` `cacheKey` / `needTrain` / `retrain`. Skip the training datasource query until Retrain or a change to query / model / train-range strings
+- Configuration page (existing) and env `FORECAST_STORE_*` for the DSN. No DSN: persist off (always `needTrain`)
+- Overlay Retrain control; status when a saved model is used
+
+## v1/v2/v3/v4/v5/v6 non-goals
 
 Do not add these without first updating this document:
 
 - Docker Compose / TestData sandbox (those live in `timeseries-grafana-sandbox`)
 - Kubernetes Helm / container images (those live in `timeseries-k8s`)
 - Publishing or signing on grafana.com
-- Prometheus, OpenSearch, or Postgres HTTP in `pkg/`
+- Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (pgx snapshot store is v6)
 - Elasticsearch plugin type
 - Alerting
 - Extra app pages beyond the landing page and existing Configuration page
@@ -85,5 +92,5 @@ Do not add these without first updating this document:
 - Backend does not mutate caller series (libraries already return new series)
 - Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource
-- Table-driven frontend tests cover train rewrite and extract/match
+- Table-driven frontend tests cover train rewrite, extract/match, and cache fingerprint
 - GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack

@@ -10,22 +10,25 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/forecast-panel/` | Overlay visualization |
 | `src/forecast-panel/trainRewrite.ts` | Type-keyed training-query rewrite (Prom / OpenSearch / Postgres / Druid) |
 | `src/forecast-panel/extract.ts` | Time+numeric series from frames; train ↔ visible match |
-| `src/components/AppConfig/` | Enable-app copy (no publisher settings) |
+| `src/forecast-panel/cacheKey.ts` | Train-cache fingerprint (SHA-256) |
+| `src/components/AppConfig/` | Overlay Postgres DSN for the snapshot store |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules |
+| `pkg/plugin/store.go` | SnapshotStore; pgx `forecast.snapshots` |
 | `pkg/plugin/resources.go` | `POST /forecast`, `GET /ping` |
 
 Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeseries-grafana-sandbox`, which mounts `dist/`. Cluster install (Grafana image with this plugin baked in, plus the worker image) lives in sibling `timeseries-k8s`. The Druid→Kafka baseline ticker lives in sibling `timeseries-baselines`.
 
-`gpx_forecast` never talks to Prometheus, OpenSearch, or Postgres. Training queries run through Grafana datasource plugins; the backend only sees `{times, values}`.
+`gpx_forecast` never talks to Prometheus, OpenSearch, or the Grafana Postgres **datasource**. Training queries run through Grafana datasource plugins; the backend sees `{times, values}` on a miss. Fitted snapshots are stored with **pgx** in schema `forecast` on a configured Postgres (sandbox overlay-postgres, not Druid metadata).
 
 ## Overlay data flow
 
 1. Grafana queries the **visible** panel time range. The nested panel draws those frames as history (time + every numeric field per frame).
-2. Independently, the panel issues a second datasource query for the training window (same targets, rewritten for that window and a model-aware step; `maxDataPoints` sized to the window). The window is a Grafana from/to range (`trainRange`). Auto (cleared picker) is `[timeRange.to − autoLookback, timeRange.to]`.
-3. It POSTs the **training** points `{ times, values, model, from, to, season, calendar, level, ... }` to `/api/plugins/eduardkolotushin-forecast-app/resources/forecast`. `from`/`to` are unix ms for the forecast window. `level` is `0` when `showInterval` is off. One POST per extracted visible series.
-4. The backend builds `timeseries.Series[float64]`, fits, and returns grid points in `[from, to]` (`ForecastRange`) plus optional `lower` / `upper` when `level` is in `(0, 1)`.
-5. The panel draws visible history and forecast with `@grafana/ui` `TimeSeries`. Interval bounds use `custom.fillBelowTo` on the forecast frame. Extra training points are not plotted. The plot `to` includes the forecast window.
-6. If the training query returns no points, or the forecast window has no grid points (or all NaN), the panel shows a reason. It does not silently fit the visible series.
+2. Per visible series it POSTs `{ cacheKey, from, to, model, ... }` without training points. `cacheKey` is SHA-256 of datasource uid, time-redacted targets, model options, raw train-range strings, and series name (not the dashboard range or forecast window).
+3. On a hit the backend `Restore`s the snapshot and `ForecastRange`s. The panel skips the training datasource query.
+4. On `needTrain` or Retrain, the panel issues one training query (rewritten for the train window and a model-aware step), then POSTs `{ times, values, cacheKey, ... }`. The backend fits, upserts JSONB, and returns the window.
+5. Auto/relative train strings do not re-query until Retrain; the saved model can lag `now`.
+6. The panel draws visible history and forecast with `@grafana/ui` `TimeSeries`. Interval bounds use `custom.fillBelowTo` on the forecast frame. Extra training points are not plotted. The plot `to` includes the forecast window.
+7. If the training query returns no points, or the forecast window has no grid points (or all NaN), the panel shows a reason. It does not silently fit the visible series.
 
 ## Training query adapters
 
@@ -43,6 +46,10 @@ Set `request.intervalMs` to the train step before `ds.query`.
 Valid train queries: Prometheus **range** PromQL (Mimir/AMP same type); OpenSearch **Lucene metric + date histogram** or **PPL time series**; Postgres **time series** SQL with Grafana time macros.
 
 Invalid (reason, history only, no POST): Prometheus instant; OpenSearch logs/raw/traces; Postgres table/EXPLAIN; frames that are not time+number. Unsupported types are detected on the target **before** query when possible.
+
+## Snapshot store
+
+DSN from env `FORECAST_STORE_URL` or `FORECAST_STORE_*` (overrides) and app `jsonData` / `secureJsonData` (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`). On connect: `CREATE SCHEMA IF NOT EXISTS forecast` and table `forecast.snapshots (org_id, cache_key, snapshot JSONB, updated_at)` PK `(org_id, cache_key)`. `org_id` comes from plugin context. No DSN: persist off.
 
 ## Train step
 

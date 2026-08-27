@@ -17,14 +17,15 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## API
 
 - `POST /forecast` returns new points and optional `lower`/`upper`; do not mutate inputs
+- `cacheKey` / `needTrain` / `retrain` skip the train query when a snapshot exists
 - Panel forecasts each numeric series independently
 - Panel `showInterval` gates `level`; training uses a from/to query, not the visible range; forecast uses a from/to window (`ForecastRange`)
-- Train rewrite is type-keyed in the overlay frontend (Prom / OpenSearch / Postgres / Druid); `pkg/` has no Prom/OS/PG clients
+- Train rewrite is type-keyed in the overlay frontend (Prom / OpenSearch / Postgres / Druid); `pkg/` has no Prom/OS/PG **datasource** clients (pgx snapshot store is allowed)
 - Pre-size Go slices to the request/window length
 
 ## Quality
 
 - Table-driven tests next to the resource handler
-- Table-driven frontend tests next to train rewrite and extract
+- Table-driven frontend tests next to train rewrite, extract, and cache fingerprint
 - No drive-by refactors
 - Keep Grafana scaffold files under `.config/` unless a plugin-tools upgrade requires it

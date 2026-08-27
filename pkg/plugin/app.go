@@ -6,6 +6,7 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource/httpadapter"
 )
 
@@ -18,19 +19,42 @@ var (
 // App is the Grafana app backend: overlay /forecast.
 type App struct {
 	backend.CallResourceHandler
+	store SnapshotStore
+	close func()
 }
 
 // NewApp creates a new *App instance.
-func NewApp(_ context.Context, _ backend.AppInstanceSettings) (instancemgmt.Instance, error) {
-	var app App
+func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instancemgmt.Instance, error) {
+	return newApp(ctx, settings, nil)
+}
+
+func newApp(ctx context.Context, settings backend.AppInstanceSettings, store SnapshotStore) (*App, error) {
+	app := &App{store: store}
+	if store == nil {
+		dsn := storeDSN(settings)
+		if dsn != "" {
+			pg, err := openPostgresStore(ctx, dsn)
+			if err != nil {
+				log.DefaultLogger.Error("forecast store", "err", err.Error())
+				app.store = errStore{err: err}
+			} else {
+				app.store = withCache(pg)
+				app.close = pg.Close
+			}
+		}
+	}
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
 	app.CallResourceHandler = httpadapter.New(mux)
-	return &app, nil
+	return app, nil
 }
 
-// Dispose is a no-op; the overlay backend holds no background work.
-func (a *App) Dispose() {}
+// Dispose closes the snapshot store pool when present.
+func (a *App) Dispose() {
+	if a.close != nil {
+		a.close()
+	}
+}
 
 // CheckHealth handles health checks sent from Grafana to the plugin.
 func (a *App) CheckHealth(_ context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {

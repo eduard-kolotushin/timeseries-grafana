@@ -4,7 +4,7 @@ import { PluginType } from '@grafana/data';
 import AppConfig, { AppConfigProps } from './AppConfig';
 
 describe('Components/AppConfig', () => {
-  test('shows that overlay needs no extra settings', () => {
+  test('shows snapshot store fields', () => {
     const props = {
       plugin: {
         meta: {
@@ -19,6 +19,7 @@ describe('Components/AppConfig', () => {
     } as unknown as AppConfigProps;
 
     render(<AppConfig plugin={props.plugin} query={props.query} />);
-    expect(screen.queryByText(/no extra api settings/i)).toBeInTheDocument();
+    expect(screen.getByText(/snapshot store/i)).toBeInTheDocument();
+    expect(screen.getByText(/eduardkolotushin-forecast-app/)).toBeInTheDocument();
   });
 });

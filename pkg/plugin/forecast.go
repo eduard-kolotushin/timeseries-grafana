@@ -1,17 +1,23 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"time"
 
 	"github.com/eduard-kolotushin/timeseries"
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 )
 
-var errUnknownModel = errors.New("forecast: unknown model")
+var (
+	errUnknownModel    = errors.New("forecast: unknown model")
+	errInvalidCacheKey = errors.New("forecast: cacheKey must be 64 lowercase hex chars")
+	cacheKeyPattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
+)
 
 // ForecastRequest is the JSON body for POST /forecast.
 type ForecastRequest struct {
@@ -26,14 +32,18 @@ type ForecastRequest struct {
 	Season   string          `json:"season"`
 	Calendar string          `json:"calendar"`
 	Level    float64         `json:"level"`
+	CacheKey string          `json:"cacheKey"`
+	Retrain  bool            `json:"retrain"`
 }
 
 // ForecastResponse is the JSON body returned by POST /forecast.
 type ForecastResponse struct {
-	Times  []int64         `json:"times"`
-	Values []nullableFloat `json:"values"`
-	Lower  []nullableFloat `json:"lower,omitempty"`
-	Upper  []nullableFloat `json:"upper,omitempty"`
+	Times     []int64         `json:"times,omitempty"`
+	Values    []nullableFloat `json:"values,omitempty"`
+	Lower     []nullableFloat `json:"lower,omitempty"`
+	Upper     []nullableFloat `json:"upper,omitempty"`
+	NeedTrain bool            `json:"needTrain,omitempty"`
+	Cached    bool            `json:"cached,omitempty"`
 }
 
 type nullableFloat float64
@@ -58,9 +68,63 @@ func (f *nullableFloat) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequest) (ForecastResponse, error) {
+	if in.CacheKey != "" && !cacheKeyPattern.MatchString(in.CacheKey) {
+		return ForecastResponse{}, errInvalidCacheKey
+	}
+	hasTimes := len(in.Times) > 0 || len(in.Values) > 0
+	if in.CacheKey == "" {
+		return runForecast(in)
+	}
+	if hasTimes {
+		fitted, err := fitRequest(in)
+		if err != nil {
+			return ForecastResponse{}, err
+		}
+		if a.store != nil {
+			snap, err := forecast.SnapshotOf(fitted)
+			if err != nil {
+				return ForecastResponse{}, err
+			}
+			if err := a.store.Put(ctx, orgID, in.CacheKey, snap); err != nil {
+				return ForecastResponse{}, err
+			}
+		}
+		return emitForecast(fitted, in)
+	}
+	if in.Retrain || a.store == nil {
+		return ForecastResponse{NeedTrain: true}, nil
+	}
+	snap, ok, err := a.store.Get(ctx, orgID, in.CacheKey)
+	if err != nil {
+		return ForecastResponse{}, err
+	}
+	if !ok {
+		return ForecastResponse{NeedTrain: true}, nil
+	}
+	fitted, err := forecast.Restore(snap)
+	if err != nil {
+		return ForecastResponse{}, err
+	}
+	out, err := emitForecast(fitted, in)
+	if err != nil {
+		return ForecastResponse{}, err
+	}
+	out.Cached = true
+	return out, nil
+}
+
 func runForecast(in ForecastRequest) (ForecastResponse, error) {
+	fitted, err := fitRequest(in)
+	if err != nil {
+		return ForecastResponse{}, err
+	}
+	return emitForecast(fitted, in)
+}
+
+func fitRequest(in ForecastRequest) (forecast.Fitted, error) {
 	if len(in.Times) != len(in.Values) {
-		return ForecastResponse{}, timeseries.ErrLengthMismatch
+		return nil, timeseries.ErrLengthMismatch
 	}
 	times := make([]time.Time, len(in.Times))
 	values := make([]float64, len(in.Values))
@@ -70,7 +134,7 @@ func runForecast(in ForecastRequest) (ForecastResponse, error) {
 	}
 	s, err := timeseries.New(times, values)
 	if err != nil {
-		return ForecastResponse{}, err
+		return nil, err
 	}
 
 	model := in.Model
@@ -104,7 +168,7 @@ func runForecast(in ForecastRequest) (ForecastResponse, error) {
 		var cal *forecast.Calendar
 		cal, err = forecast.CalendarByName(in.Calendar)
 		if err != nil {
-			return ForecastResponse{}, err
+			return nil, err
 		}
 		fitted, err = forecast.FitSeasonalBaseline(s, parseSeason(in.Season), cal)
 	case "ses":
@@ -112,12 +176,15 @@ func runForecast(in ForecastRequest) (ForecastResponse, error) {
 	case "holt":
 		fitted, err = forecast.FitHolt(s, alpha, beta)
 	default:
-		return ForecastResponse{}, fmt.Errorf("%w: %s", errUnknownModel, model)
+		return nil, fmt.Errorf("%w: %s", errUnknownModel, model)
 	}
 	if err != nil {
-		return ForecastResponse{}, err
+		return nil, err
 	}
+	return fitted, nil
+}
 
+func emitForecast(fitted forecast.Fitted, in ForecastRequest) (ForecastResponse, error) {
 	from := time.UnixMilli(in.From).UTC()
 	to := time.UnixMilli(in.To).UTC()
 	out, err := fitted.ForecastRange(from, to)
@@ -172,6 +239,7 @@ func parseSeason(s string) forecast.Seasonality {
 func httpStatusFor(err error) int {
 	switch {
 	case errors.Is(err, errUnknownModel),
+		errors.Is(err, errInvalidCacheKey),
 		errors.Is(err, forecast.ErrEmpty),
 		errors.Is(err, forecast.ErrHorizon),
 		errors.Is(err, forecast.ErrNoFrequency),
@@ -183,6 +251,8 @@ func httpStatusFor(err error) int {
 		errors.Is(err, forecast.ErrInvalidLevel),
 		errors.Is(err, forecast.ErrRange),
 		errors.Is(err, forecast.ErrEmptyRange),
+		errors.Is(err, forecast.ErrUnknownSnapshot),
+		errors.Is(err, forecast.ErrInvalidSnapshot),
 		errors.Is(err, timeseries.ErrLengthMismatch),
 		errors.Is(err, timeseries.ErrUnsorted),
 		errors.Is(err, timeseries.ErrDuplicateTime):

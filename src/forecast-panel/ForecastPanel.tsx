@@ -11,7 +11,8 @@ import { getBackendSrv, PanelDataErrorView } from '@grafana/runtime';
 import { LegendDisplayMode, TooltipDisplayMode } from '@grafana/schema';
 import { Alert, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
 import { FORECAST_RESOURCE } from '../constants';
-import { extractSeries, trainingForFit } from './extract';
+import { cacheKey, fitOptions } from './cacheKey';
+import { extractSeries } from './extract';
 import {
   dashboardNowMs,
   forecastLevel,
@@ -20,14 +21,9 @@ import {
   resolveTrainWindow,
   trainStepMs,
 } from './lookback';
-import {
-  REASON_ALL_NAN,
-  REASON_EMPTY_WINDOW,
-  REASON_INVALID_RANGE,
-  REASON_TRAIN_EMPTY,
-  hasDrawableValues,
-  reasonFromUnknown,
-} from './reasons';
+import { loadOverlayForecasts } from './overlayLoad';
+import { REASON_INVALID_RANGE } from './reasons';
+import { queueRetrain, takeRetrain } from './retrain';
 import { queryTrainingFrames } from './trainQuery';
 import { ForecastOptions, ForecastResponse } from './types';
 
@@ -48,14 +44,17 @@ export const ForecastPanel: React.FC<Props> = ({
   const [frames, setFrames] = useState<DataFrame[]>(data.series);
   const [error, setError] = useState<string | null>(null);
   const [forecastToMs, setForecastToMs] = useState<number | undefined>();
+  const [usedSaved, setUsedSaved] = useState(false);
+  const [retrainNonce, setRetrainNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    let finished = false;
+    let retrain = false;
 
     async function load() {
       setError(null);
       const history: DataFrame[] = [];
-      const forecasts: DataFrame[] = [];
       const nowMs = dashboardNowMs(timeZone);
       const window = resolveForecastWindow(options, nowMs, timeZone);
 
@@ -68,7 +67,9 @@ export const ForecastPanel: React.FC<Props> = ({
         if (!cancelled) {
           setError(REASON_INVALID_RANGE);
           setForecastToMs(undefined);
+          setUsedSaved(false);
           setFrames(history);
+          finished = true;
         }
         return;
       }
@@ -76,104 +77,69 @@ export const ForecastPanel: React.FC<Props> = ({
         setForecastToMs(window.toMs);
       }
 
+      retrain = takeRetrain(id);
       const { fromMs: trainFromMs, toMs: trainToMs } = resolveTrainWindow(
         options,
         timeRange.to.valueOf(),
         timeZone
       );
-      let trainFrames: DataFrame[] | null = null;
-      try {
-        const train = await queryTrainingFrames(data.request, {
-          fromMs: trainFromMs,
-          toMs: trainToMs,
-          visibleFromMs: data.request?.range?.from?.valueOf(),
-          visibleToMs: data.request?.range?.to?.valueOf(),
-          intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
-        });
-        if (train.reason && !train.frames?.length) {
-          if (!cancelled) {
-            setError(train.reason);
-            setFrames(history);
-          }
-          return;
-        }
-        trainFrames = train.frames;
-      } catch (e) {
-        if (!cancelled) {
-          setError(reasonFromUnknown(e));
-          setFrames(history);
-        }
+      const visibleFromMs = data.request?.range?.from?.valueOf();
+      const visibleToMs = data.request?.range?.to?.valueOf();
+      const targets = data.request?.targets?.filter((t) => !t.hide) ?? [];
+      const result = await loadOverlayForecasts({
+        visible,
+        fromMs: window.fromMs,
+        toMs: window.toMs,
+        level: forecastLevel(options),
+        retrain,
+        fitBody: fitOptions(options),
+        cacheKeyFor: (seriesName) =>
+          cacheKey({
+            targets,
+            visibleFromMs,
+            visibleToMs,
+            options,
+            seriesName,
+          }),
+        queryTrain: () =>
+          queryTrainingFrames(data.request, {
+            fromMs: trainFromMs,
+            toMs: trainToMs,
+            visibleFromMs,
+            visibleToMs,
+            intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
+          }),
+        post: (body) => getBackendSrv().post<ForecastResponse>(FORECAST_RESOURCE, body),
+      });
+      if (cancelled) {
         return;
       }
-      const trained = (trainFrames ?? []).flatMap((frame) => extractSeries(frame, trainFrames ?? []));
-      if (trained.length === 0) {
-        if (!cancelled) {
-          setError(REASON_TRAIN_EMPTY);
-          setFrames(history);
-        }
-        return;
-      }
-      const level = forecastLevel(options);
-      let overlayError: string | null = null;
-
-      for (const points of visible) {
-        const fit = trainingForFit(points, trained);
-        if (!fit) {
-          continue;
-        }
-        try {
-          const resp = await getBackendSrv().post<ForecastResponse>(FORECAST_RESOURCE, {
-            times: fit.times,
-            values: fit.values,
-            model: options.model,
-            from: window.fromMs,
-            to: window.toMs,
-            alpha: options.alpha,
-            beta: options.beta,
-            period: options.period,
-            season: options.season,
-            calendar: options.calendar,
-            level,
-          });
-          const values = resp.values.map(nullToNaN);
-          if (!resp.times?.length) {
-            overlayError = overlayError ?? REASON_EMPTY_WINDOW;
-            continue;
-          }
-          if (!hasDrawableValues(values)) {
-            overlayError = overlayError ?? REASON_ALL_NAN;
-            continue;
-          }
-          forecasts.push(
-            toForecastFrame(
-              `${points.name} (forecast)`,
-              resp.times,
-              values,
-              resp.lower,
-              resp.upper,
-              theme.colors.warning.main
-            )
-          );
-        } catch (e) {
-          overlayError = overlayError ?? reasonFromUnknown(e);
-        }
-      }
-
-      if (!cancelled) {
-        setError(overlayError);
-        setFrames([...history, ...forecasts]);
-      }
+      finished = true;
+      setError(result.error);
+      setUsedSaved(result.usedSaved);
+      setFrames([
+        ...history,
+        ...result.forecasts.map((fc) =>
+          toForecastFrame(fc.name, fc.times, fc.values, fc.lower, fc.upper, theme.colors.warning.main)
+        ),
+      ]);
     }
 
     load();
     return () => {
       cancelled = true;
+      if (retrain && !finished) {
+        queueRetrain(id);
+      }
     };
   }, [
+    id,
+    retrainNonce,
     data.series,
     data.request,
     timeRange.to,
     timeZone,
+    options,
     options.model,
     options.alpha,
     options.beta,
@@ -223,6 +189,31 @@ export const ForecastPanel: React.FC<Props> = ({
 
   return (
     <div style={{ width, height, position: 'relative' }}>
+      <div
+        style={{
+          position: 'absolute',
+          top: 4,
+          right: 8,
+          zIndex: 1,
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+        }}
+      >
+        {usedSaved && !error && (
+          <span style={{ fontSize: 12, opacity: 0.8 }}>Using saved model</span>
+        )}
+        <button
+          type="button"
+          onClick={() => {
+            queueRetrain(id);
+            setRetrainNonce((n) => n + 1);
+          }}
+          style={{ fontSize: 12 }}
+        >
+          Retrain
+        </button>
+      </div>
       {error && (
         <Alert title="Forecast failed" severity="error">
           {error}
@@ -248,10 +239,6 @@ export const ForecastPanel: React.FC<Props> = ({
     </div>
   );
 };
-
-function nullToNaN(v: number | null): number {
-  return v == null ? NaN : v;
-}
 
 function toNullable(v: number | null | undefined): number | null {
   return v == null || Number.isNaN(Number(v)) ? null : Number(v);

@@ -2,6 +2,7 @@ import { PanelPlugin } from '@grafana/data';
 import { ForecastOptions } from './types';
 import { ForecastPanel } from './ForecastPanel';
 import { TrainRangeEditor } from './TrainRangeEditor';
+import { RetrainEditor } from './RetrainEditor';
 
 export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOptions((builder) => {
   return builder
@@ -104,5 +105,13 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       defaultValue: { from: '', to: '' },
       editor: TrainRangeEditor,
       settings: { kind: 'train' },
+    })
+    .addCustomEditor({
+      id: 'retrain',
+      path: 'trainRange',
+      name: 'Saved model',
+      description: 'Reuse the fitted snapshot until Retrain or a query, model, or training-period change. Auto train windows do not re-query as time moves.',
+      defaultValue: { from: '', to: '' },
+      editor: RetrainEditor,
     });
 });

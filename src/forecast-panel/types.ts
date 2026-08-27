@@ -26,8 +26,10 @@ export interface ForecastOptions {
 }
 
 export interface ForecastResponse {
-  times: number[];
-  values: Array<number | null>;
+  times?: number[];
+  values?: Array<number | null>;
   lower?: Array<number | null>;
   upper?: Array<number | null>;
+  needTrain?: boolean;
+  cached?: boolean;
 }

@@ -3,6 +3,8 @@ package plugin
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
 
 func (a *App) handlePing(w http.ResponseWriter, _ *http.Request) {
@@ -20,7 +22,8 @@ func (a *App) handleForecast(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	out, err := runForecast(body)
+	orgID := backend.PluginConfigFromContext(req.Context()).OrgID
+	out, err := a.dispatchForecast(req.Context(), orgID, body)
 	if err != nil {
 		http.Error(w, err.Error(), httpStatusFor(err))
 		return
