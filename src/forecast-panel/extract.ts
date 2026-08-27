@@ -1,4 +1,4 @@
-import { DataFrame, FieldType } from '@grafana/data';
+import { DataFrame, FieldType, getFieldDisplayName } from '@grafana/data';
 
 export type SeriesPoints = {
   name: string;
@@ -6,39 +6,63 @@ export type SeriesPoints = {
   values: Array<number | null>;
 };
 
-export function extractSeries(frame: DataFrame): SeriesPoints | null {
-  const timeField = frame.fields.find((f) => f.type === FieldType.time);
-  const valueField = frame.fields.find((f) => f.type === FieldType.number);
-  if (!timeField || !valueField) {
-    return null;
+/** Every numeric field on a timeseries frame. Skips logs/trace frames. */
+export function extractSeries(frame: DataFrame, allFrames?: DataFrame[]): SeriesPoints[] {
+  if (isNonTimeseriesFrame(frame)) {
+    return [];
   }
-  const times: number[] = [];
-  const values: Array<number | null> = [];
-  const n = timeField.values.length;
-  for (let i = 0; i < n; i++) {
-    const t = Number(timeField.values[i]);
-    const v = valueField.values[i];
-    if (!Number.isFinite(t)) {
+  const timeField = frame.fields.find((f) => f.type === FieldType.time);
+  if (!timeField) {
+    return [];
+  }
+  const frames = allFrames ?? [frame];
+  const out: SeriesPoints[] = [];
+  for (const valueField of frame.fields) {
+    if (valueField.type !== FieldType.number) {
       continue;
     }
-    times.push(t);
-    if (v == null || (typeof v === 'number' && Number.isNaN(v))) {
-      values.push(null);
-    } else {
-      values.push(Number(v));
+    const times: number[] = [];
+    const values: Array<number | null> = [];
+    const n = timeField.values.length;
+    for (let i = 0; i < n; i++) {
+      const t = Number(timeField.values[i]);
+      const v = valueField.values[i];
+      if (!Number.isFinite(t)) {
+        continue;
+      }
+      times.push(t);
+      if (v == null || (typeof v === 'number' && Number.isNaN(v))) {
+        values.push(null);
+      } else {
+        values.push(Number(v));
+      }
     }
+    if (times.length === 0) {
+      continue;
+    }
+    out.push({
+      name: getFieldDisplayName(valueField, frame, frames),
+      times,
+      values,
+    });
   }
-  if (times.length === 0) {
-    return null;
-  }
-  return {
-    name: valueField.name || frame.name || frame.refId || 'series',
-    times,
-    values,
-  };
+  return out;
 }
 
-export function pickTrainingPoints(display: SeriesPoints, trained: SeriesPoints[]): SeriesPoints {
+function isNonTimeseriesFrame(frame: DataFrame): boolean {
+  const meta = frame.meta;
+  if (!meta) {
+    return false;
+  }
+  const vis = meta.preferredVisualisationType;
+  if (vis === 'logs' || vis === 'trace' || vis === 'nodeGraph') {
+    return true;
+  }
+  const t = String(meta.type ?? '');
+  return t === 'log-lines' || t === 'heatmap-cells' || t === 'heatmap-rows' || t === 'directory-listing';
+}
+
+export function pickTrainingPoints(display: SeriesPoints, trained: SeriesPoints[]): SeriesPoints | null {
   const byName = trained.find((t) => t.name === display.name);
   if (byName) {
     return byName;
@@ -46,7 +70,7 @@ export function pickTrainingPoints(display: SeriesPoints, trained: SeriesPoints[
   if (trained.length === 1) {
     return trained[0];
   }
-  return display;
+  return null;
 }
 
 /** Training points to POST. Empty train must not fall back to the visible series. */

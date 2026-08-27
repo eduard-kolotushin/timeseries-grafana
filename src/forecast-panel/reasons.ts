@@ -2,6 +2,9 @@ export const REASON_TRAIN_EMPTY = 'Training query returned no points';
 export const REASON_INVALID_RANGE = 'Forecast range is inverted or invalid';
 export const REASON_EMPTY_WINDOW = 'No forecast points in the requested range';
 export const REASON_ALL_NAN = 'All forecast values in the window are missing';
+export const REASON_UNSUPPORTED_PROM_INSTANT = 'Prometheus instant queries cannot train a forecast';
+export const REASON_UNSUPPORTED_OS_QUERY = 'OpenSearch logs, raw, and traces queries cannot train a forecast';
+export const REASON_UNSUPPORTED_PG_FORMAT = 'Postgres table and EXPLAIN queries cannot train a forecast';
 
 export function hasDrawableValues(values: Array<number | null | undefined>): boolean {
   return values.some((v) => v != null && Number.isFinite(Number(v)));

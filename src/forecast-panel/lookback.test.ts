@@ -1,4 +1,4 @@
-import { applyLookbackRange, autoForecastHorizon, autoLookback, forecastLevel, isoUtc, isInvalidForecastWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, trainMaxDataPoints } from './lookback';
+import { applyLookbackRange, autoForecastHorizon, autoLookback, forecastLevel, isoUtc, isInvalidForecastWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, trainMaxDataPoints, trainStepInterval, trainStepMs } from './lookback';
 
 const day = 24 * 60 * 60 * 1000;
 
@@ -86,6 +86,31 @@ describe('resolveTrainWindow', () => {
       fromMs: panelTo - 7 * day,
       toMs: panelTo,
     });
+  });
+});
+
+describe('trainStepMs', () => {
+  it.each([
+    ['baseline', 'minute-week', 15_000, 60_000],
+    ['baseline', 'hour', 15_000, 3_600_000],
+    ['baseline', 'week', 15_000, 3_600_000],
+    ['baseline', 'day', 15_000, 86_400_000],
+    ['holt', undefined, 15_000, 60_000],
+    ['holt', undefined, 300_000, 300_000],
+    ['ses', undefined, 0, 60_000],
+  ] as const)('%s %s interval=%s → %s', (model, season, intervalMs, want) => {
+    expect(trainStepMs(model, season, intervalMs)).toBe(want);
+  });
+});
+
+describe('trainStepInterval', () => {
+  it.each([
+    [60_000, '1m'],
+    [3_600_000, '1h'],
+    [86_400_000, '1d'],
+    [120_000, '2m'],
+  ] as const)('%s → %s', (ms, want) => {
+    expect(trainStepInterval(ms)).toBe(want);
   });
 });
 

@@ -3,6 +3,45 @@ import { BaselineSeason, ForecastModel, TrainTimeRange } from './types';
 
 export const MAX_TRAIN_POINTS = 100_000;
 
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+
+/** Model-aware training step. Floor 1m unless the seasonal baseline pins 1h/1d. */
+export function trainStepMs(model: ForecastModel, season: BaselineSeason | undefined, intervalMs: number): number {
+  if (model === 'baseline') {
+    if (season === 'minute-week') {
+      return MINUTE_MS;
+    }
+    if (season === 'hour' || season === 'week') {
+      return HOUR_MS;
+    }
+    if (season === 'day') {
+      return DAY_MS;
+    }
+  }
+  const step = intervalMs > 0 ? intervalMs : MINUTE_MS;
+  return Math.max(step, MINUTE_MS);
+}
+
+/** Grafana interval string for a millisecond step (`1m`, `1h`, `1d`). */
+export function trainStepInterval(ms: number): string {
+  const step = ms > 0 ? ms : MINUTE_MS;
+  if (step % DAY_MS === 0) {
+    return `${step / DAY_MS}d`;
+  }
+  if (step % HOUR_MS === 0) {
+    return `${step / HOUR_MS}h`;
+  }
+  if (step % MINUTE_MS === 0) {
+    return `${step / MINUTE_MS}m`;
+  }
+  if (step % 1000 === 0) {
+    return `${step / 1000}s`;
+  }
+  return `${step}ms`;
+}
+
 export function autoLookback(model: ForecastModel, season?: BaselineSeason): string {
   switch (model) {
     case 'baseline':
@@ -165,6 +204,11 @@ export function forecastLevel(options: { showInterval?: boolean; interval?: numb
 
 export function isoUtc(ms: number): string {
   return new Date(ms).toISOString();
+}
+
+/** RFC3339 UTC without milliseconds (`…05Z`), as Grafana SQL macros often expand. */
+export function rfc3339Utc(ms: number): string {
+  return isoUtc(ms).replace(/\.\d{3}Z$/, 'Z');
 }
 
 /** Clone targets and pin Druid/SQL time bounds to the training window. */

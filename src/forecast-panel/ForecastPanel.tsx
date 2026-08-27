@@ -18,6 +18,7 @@ import {
   isInvalidForecastWindow,
   resolveForecastWindow,
   resolveTrainWindow,
+  trainStepMs,
 } from './lookback';
 import {
   REASON_ALL_NAN,
@@ -58,11 +59,9 @@ export const ForecastPanel: React.FC<Props> = ({
       const nowMs = dashboardNowMs(timeZone);
       const window = resolveForecastWindow(options, nowMs, timeZone);
 
-      for (const series of data.series) {
-        const points = extractSeries(series);
-        if (points) {
-          history.push(toFrame(points.name, points.times, points.values));
-        }
+      const visible = data.series.flatMap((series) => extractSeries(series, data.series));
+      for (const points of visible) {
+        history.push(toFrame(points.name, points.times, points.values));
       }
 
       if (isInvalidForecastWindow(window)) {
@@ -84,7 +83,21 @@ export const ForecastPanel: React.FC<Props> = ({
       );
       let trainFrames: DataFrame[] | null = null;
       try {
-        trainFrames = await queryTrainingFrames(data.request, trainFromMs, trainToMs);
+        const train = await queryTrainingFrames(data.request, {
+          fromMs: trainFromMs,
+          toMs: trainToMs,
+          visibleFromMs: data.request?.range?.from?.valueOf(),
+          visibleToMs: data.request?.range?.to?.valueOf(),
+          intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
+        });
+        if (train.reason && !train.frames?.length) {
+          if (!cancelled) {
+            setError(train.reason);
+            setFrames(history);
+          }
+          return;
+        }
+        trainFrames = train.frames;
       } catch (e) {
         if (!cancelled) {
           setError(reasonFromUnknown(e));
@@ -92,9 +105,7 @@ export const ForecastPanel: React.FC<Props> = ({
         }
         return;
       }
-      const trained = (trainFrames ?? [])
-        .map(extractSeries)
-        .filter((p): p is NonNullable<typeof p> => p != null);
+      const trained = (trainFrames ?? []).flatMap((frame) => extractSeries(frame, trainFrames ?? []));
       if (trained.length === 0) {
         if (!cancelled) {
           setError(REASON_TRAIN_EMPTY);
@@ -105,14 +116,9 @@ export const ForecastPanel: React.FC<Props> = ({
       const level = forecastLevel(options);
       let overlayError: string | null = null;
 
-      for (const series of data.series) {
-        const points = extractSeries(series);
-        if (!points) {
-          continue;
-        }
+      for (const points of visible) {
         const fit = trainingForFit(points, trained);
         if (!fit) {
-          overlayError = overlayError ?? REASON_TRAIN_EMPTY;
           continue;
         }
         try {

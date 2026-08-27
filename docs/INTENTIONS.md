@@ -15,6 +15,7 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 | Sandbox | sibling `timeseries-grafana-sandbox` (Compose) |
 | Kubernetes | sibling `timeseries-k8s` (Helm + images) |
 | Baseline publisher | sibling `timeseries-baselines` (standalone process, not Grafana-hosted) |
+| Train adapters | frontend only (Prometheus, OpenSearch, Postgres, existing Druid/SQL rewrite). No Prom/OS/PG HTTP clients in `pkg/` |
 
 ## v1 must-have
 
@@ -53,14 +54,26 @@ Auto forecast duration (start = dashboard `now`):
 | seasonal naive | 24h |
 | naive, mean, drift, SES, Holt | 6h |
 
-## v1/v2/v3/v4 non-goals
+## v5 must-have
+
+- Type-keyed training-query adapters so the second datasource query uses the training window (and a model-aware step) on Prometheus, OpenSearch, and Postgres, while keeping the existing Druid/SQL rewrite for other types (including TestData)
+- Extraction and matching for labeled and wide frames: every numeric field, Grafana display names (labels), match train to visible by that name
+- Valid train queries: Prometheus **range** PromQL; OpenSearch **Lucene metric + date histogram** or **PPL time series**; Postgres **time series** SQL (`postgres` and `grafana-postgresql-datasource`) with Grafana time macros
+- Invalid train queries (reason, history only, no `POST /forecast`): Prometheus instant; OpenSearch logs/raw/traces; Postgres table/EXPLAIN; frames that are not time+number
+- Do not silently fit the visible series when several train series exist and a name misses
+- No Prometheus, OpenSearch, or Postgres HTTP clients in `pkg/` (`gpx_forecast` stays datasource-agnostic)
+
+Train step follows the model, not the dashboard interval: minute-of-week `1m`, hour / hour-of-week `1h`, day `1d`, otherwise the request `intervalMs` (floor 1m). Still clamp with `MAX_TRAIN_POINTS` (100k).
+
+## v1/v2/v3/v4/v5 non-goals
 
 Do not add these without first updating this document:
 
 - Docker Compose / TestData sandbox (those live in `timeseries-grafana-sandbox`)
 - Kubernetes Helm / container images (those live in `timeseries-k8s`)
 - Publishing or signing on grafana.com
-- Prometheus
+- Prometheus, OpenSearch, or Postgres HTTP in `pkg/`
+- Elasticsearch plugin type
 - Alerting
 - Extra app pages beyond the landing page and existing Configuration page
 - Duplicating Series or forecast algorithms
@@ -72,4 +85,5 @@ Do not add these without first updating this document:
 - Backend does not mutate caller series (libraries already return new series)
 - Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource
+- Table-driven frontend tests cover train rewrite and extract/match
 - GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack

@@ -8,36 +8,49 @@ import {
 } from '@grafana/data';
 import { getDataSourceSrv } from '@grafana/runtime';
 import { from, lastValueFrom } from 'rxjs';
-import { applyLookbackRange, trainMaxDataPoints } from './lookback';
+import { trainMaxDataPoints, trainStepInterval } from './lookback';
+import { rewriteTrainTargets, TrainRewriteWindow } from './trainRewrite';
+
+export type TrainQueryResult = {
+  frames: DataFrame[] | null;
+  reason?: string;
+};
 
 export async function queryTrainingFrames(
   request: DataQueryRequest | undefined,
-  fromMs: number,
-  toMs: number
-): Promise<DataFrame[] | null> {
+  window: TrainRewriteWindow
+): Promise<TrainQueryResult> {
+  const { fromMs, toMs, intervalMs } = window;
   const targets = request?.targets?.filter((t) => !t.hide) ?? [];
   if (!request || targets.length === 0 || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
-    return null;
+    return { frames: null };
   }
 
-  const visibleFromMs = request.range?.from?.valueOf();
-  const visibleToMs = request.range?.to?.valueOf();
+  const visibleFromMs = window.visibleFromMs ?? request.range?.from?.valueOf();
+  const visibleToMs = window.visibleToMs ?? request.range?.to?.valueOf();
+  const rewriteWindow: TrainRewriteWindow = {
+    fromMs,
+    toMs,
+    visibleFromMs,
+    visibleToMs,
+    intervalMs,
+  };
   const range: TimeRange = {
     from: dateTime(fromMs),
     to: dateTime(toMs),
     raw: { from: dateTime(fromMs), to: dateTime(toMs) },
   };
-  const intervalMs = request.intervalMs > 0 ? request.intervalMs : 60_000;
-  const maxDataPoints = trainMaxDataPoints(toMs - fromMs, intervalMs);
+  const stepMs = intervalMs > 0 ? intervalMs : 60_000;
+  const maxDataPoints = trainMaxDataPoints(toMs - fromMs, stepMs);
+  const interval = trainStepInterval(stepMs);
   const scopedVars = {
     ...request.scopedVars,
     __from: { text: String(fromMs), value: String(fromMs) },
     __to: { text: String(toMs), value: String(toMs) },
   };
 
-  const rewritten = applyLookbackRange(targets, fromMs, toMs, visibleFromMs, visibleToMs);
-  const groups = new Map<string, typeof rewritten>();
-  for (const target of rewritten) {
+  const groups = new Map<string, typeof targets>();
+  for (const target of targets) {
     const key = refKey(target.datasource);
     const group = groups.get(key);
     if (group) {
@@ -48,16 +61,27 @@ export async function queryTrainingFrames(
   }
 
   const frames: DataFrame[] = [];
+  let skipReason: string | undefined;
   for (const group of groups.values()) {
     const ds = await getDataSourceSrv().get(group[0].datasource, scopedVars);
+    const rewritten = rewriteTrainTargets(ds.type || refType(group[0].datasource), group, rewriteWindow);
+    if (rewritten.reason && rewritten.targets.length === 0) {
+      skipReason = skipReason ?? rewritten.reason;
+      continue;
+    }
+    if (rewritten.targets.length === 0) {
+      continue;
+    }
     const resp = (await lastValueFrom(
       from(
         ds.query({
           ...request,
-          targets: group,
+          targets: rewritten.targets,
           range,
           rangeRaw: range.raw,
           startTime: Date.now(),
+          interval,
+          intervalMs: stepMs,
           maxDataPoints,
           scopedVars,
           requestId: `${request.requestId ?? 'forecast'}-train`,
@@ -68,7 +92,10 @@ export async function queryTrainingFrames(
       frames.push(...resp.data);
     }
   }
-  return frames.length > 0 ? frames : null;
+  if (frames.length > 0) {
+    return { frames };
+  }
+  return { frames: null, reason: skipReason };
 }
 
 function refKey(ref: DataSourceRef | string | null | undefined): string {
@@ -79,4 +106,11 @@ function refKey(ref: DataSourceRef | string | null | undefined): string {
     return ref;
   }
   return ref.uid ?? ref.type ?? '';
+}
+
+function refType(ref: DataSourceRef | string | null | undefined): string {
+  if (!ref || typeof ref === 'string') {
+    return '';
+  }
+  return ref.type ?? '';
 }

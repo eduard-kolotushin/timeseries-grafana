@@ -25,7 +25,8 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Visualization plugin source stays in this repo; the Grafana runtime does not (Compose sandbox or `timeseries-k8s`)
 - Nested panel calls `POST /api/plugins/eduardkolotushin-forecast-app/resources/forecast`
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
-- Stay within v1/v2/v3/v4 unless `docs/INTENTIONS.md` is updated first
+- No Prometheus, OpenSearch, or Postgres HTTP clients in `pkg/` (`gpx_forecast` stays datasource-agnostic)
+- Stay within v1/v2/v3/v4/v5 unless `docs/INTENTIONS.md` is updated first
 
 ## v1 in scope
 
@@ -43,13 +44,18 @@ Prediction interval bands on the overlay (`POST /forecast` `lower`/`upper`, pane
 
 Forecast from/to picker (Auto: Grafana `now` → `now` + model duration). Overlay is robust against that window: points or a reason. No silent train fallback.
 
-## v1/v2/v3/v4 out of scope
+## v5 in scope
 
-Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prometheus, alerting, extra app pages, baseline publisher process.
+Type-keyed train-query adapters (Prometheus range, OpenSearch metric+histogram or PPL time series, Postgres time-series SQL) plus labeled/wide-frame extract and name matching. Invalid query types get a reason and history only. Druid/TestData keep the existing rewrite.
+
+## v1/v2/v3/v4/v5 out of scope
+
+Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG clients in `pkg/`, Elasticsearch plugin type, alerting, extra app pages, baseline publisher process.
 
 ## Workflow
 
 - Table-driven Go tests for the forecast resource
+- Table-driven frontend tests for train rewrite and extract/match
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`

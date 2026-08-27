@@ -7,16 +7,17 @@ alwaysApply: true
 
 Read [docs/INTENTIONS.md](docs/INTENTIONS.md) before expanding scope.
 
-## Stay in v1/v2/v3/v4
+## Stay in v1/v2/v3/v4/v5
 
-Allowed: app + Go `/forecast` resource, nested overlay panel, prediction interval bands, `showInterval`, training window independent of the panel time range (from/to picker), forecast window (Auto `now` → `now` + model duration) with a reason when empty.
+Allowed: app + Go `/forecast` resource, nested overlay panel, prediction interval bands, `showInterval`, training window independent of the panel time range (from/to picker), forecast window (Auto `now` → `now` + model duration) with a reason when empty, type-keyed train-query adapters (Prometheus range, OpenSearch metric+histogram or PPL time series, Postgres time-series SQL) and labeled/wide-frame extract/match.
 
 Do **not** add without updating INTENTIONS first:
 
 - Docker Compose / TestData sandbox (sibling `timeseries-grafana-sandbox`)
 - Kubernetes Helm / images (sibling `timeseries-k8s`)
 - Grafana.com signing/publish
-- Prometheus
+- Prometheus, OpenSearch, or Postgres HTTP in `pkg/`
+- Elasticsearch plugin type
 - Alerting
 - A forked Series or forecast implementation
 - Extra app pages beyond landing + Configuration
