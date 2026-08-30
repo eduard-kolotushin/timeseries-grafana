@@ -11,6 +11,11 @@ function Home() {
           The panel sends the series to this app&apos;s Go backend, which fits a model from{' '}
           <code>timeseries-forecast</code> and overlays the forecast window on the history.
         </p>
+        <p>
+          For Grafana alerting, add a <strong>Forecast</strong> datasource query (refId B) after training on the overlay.
+          Query A stays the live metric. The forecast query Restores the saved snapshot; it does not re-query the metric
+          datasource.
+        </p>
         <p>The Docker Grafana sandbox (TestData demo dashboard) is the sibling repo timeseries-grafana-sandbox.</p>
       </div>
     </PluginPage>

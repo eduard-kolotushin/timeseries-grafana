@@ -81,12 +81,46 @@ func openPostgresStore(ctx context.Context, dsn string) (*postgresStore, error) 
 	return &postgresStore{pool: pool}, nil
 }
 
-const gfPluginPrefix = "GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_"
+const (
+	gfPluginPrefix   = "GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_"
+	gfPluginDSPrefix = "GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_"
+)
 
 func storeDSN(ctx context.Context, settings backend.AppInstanceSettings) string {
+	return storeDSNFrom(ctx, settings.JSONData, settings.DecryptedSecureJSONData)
+}
+
+func jsonHasStore(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
 	jd := map[string]any{}
-	if len(settings.JSONData) > 0 {
-		_ = json.Unmarshal(settings.JSONData, &jd)
+	if err := json.Unmarshal(raw, &jd); err != nil {
+		return false
+	}
+	return jsonField(jd, "storeHost") != "" || jsonField(jd, "storeUrl") != ""
+}
+
+// storeJSONFromContext prefers datasource jsonData when it has a host/URL, else the parent app settings.
+// Grafana QueryData for a datasource does not currently attach AppInstanceSettings; this is a fallback.
+func storeJSONFromContext(dsJSON []byte, dsSecure map[string]string, app *backend.AppInstanceSettings) ([]byte, map[string]string) {
+	if jsonHasStore(dsJSON) {
+		return dsJSON, dsSecure
+	}
+	if app != nil && jsonHasStore(app.JSONData) {
+		secure := dsSecure
+		if app.DecryptedSecureJSONData != nil {
+			secure = app.DecryptedSecureJSONData
+		}
+		return app.JSONData, secure
+	}
+	return dsJSON, dsSecure
+}
+
+func storeDSNFrom(ctx context.Context, jsonData []byte, secure map[string]string) string {
+	jd := map[string]any{}
+	if len(jsonData) > 0 {
+		_ = json.Unmarshal(jsonData, &jd)
 	}
 	look := storeLookup{
 		getenv: os.Getenv,
@@ -117,8 +151,8 @@ func storeDSN(ctx context.Context, settings backend.AppInstanceSettings) string 
 		ssl = "disable"
 	}
 	pass := look.get("FORECAST_STORE_PASSWORD", "STORE_PASSWORD", "store_password", "")
-	if pass == "" && settings.DecryptedSecureJSONData != nil {
-		pass = strings.TrimSpace(settings.DecryptedSecureJSONData["storePassword"])
+	if pass == "" && secure != nil {
+		pass = strings.TrimSpace(secure["storePassword"])
 	}
 	u := &url.URL{
 		Scheme: "postgres",
@@ -148,12 +182,20 @@ func (s storeLookup) get(forecastEnv, gfSuffix, iniKey, jsonKey string) string {
 	if v := strings.TrimSpace(s.getenv(forecastEnv)); v != "" {
 		return v
 	}
-	gf := gfPluginPrefix + gfSuffix
-	if v := strings.TrimSpace(s.getenv(gf)); v != "" {
-		return v
+	for _, prefix := range []string{gfPluginPrefix, gfPluginDSPrefix} {
+		if v := strings.TrimSpace(s.getenv(prefix + gfSuffix)); v != "" {
+			return v
+		}
 	}
 	if s.cfg != nil {
-		for _, k := range []string{iniKey, gf, "plugin.eduardkolotushin-forecast-app." + iniKey} {
+		keys := []string{
+			iniKey,
+			gfPluginPrefix + gfSuffix,
+			gfPluginDSPrefix + gfSuffix,
+			"plugin.eduardkolotushin-forecast-app." + iniKey,
+			"plugin.eduardkolotushin-forecast-datasource." + iniKey,
+		}
+		for _, k := range keys {
 			if v := strings.TrimSpace(s.cfg.Get(k)); v != "" {
 				return v
 			}

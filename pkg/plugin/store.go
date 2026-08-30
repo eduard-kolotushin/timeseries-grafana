@@ -5,7 +5,20 @@ import (
 	"sync"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 )
+
+func connectStore(ctx context.Context, dsn string) (SnapshotStore, func()) {
+	if dsn == "" {
+		return nil, nil
+	}
+	pg, err := openPostgresStore(ctx, dsn)
+	if err != nil {
+		log.DefaultLogger.Error("forecast store", "err", err.Error())
+		return errStore{err: err}, nil
+	}
+	return withCache(pg), pg.Close
+}
 
 // SnapshotStore persists fitted snapshots. A nil store means persist is off.
 type SnapshotStore interface {

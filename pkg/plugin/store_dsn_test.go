@@ -26,6 +26,13 @@ func clearStoreEnv(t *testing.T) {
 		gfPluginPrefix + "STORE_USER",
 		gfPluginPrefix + "STORE_SSL_MODE",
 		gfPluginPrefix + "STORE_PASSWORD",
+		gfPluginDSPrefix + "STORE_URL",
+		gfPluginDSPrefix + "STORE_HOST",
+		gfPluginDSPrefix + "STORE_PORT",
+		gfPluginDSPrefix + "STORE_DATABASE",
+		gfPluginDSPrefix + "STORE_USER",
+		gfPluginDSPrefix + "STORE_SSL_MODE",
+		gfPluginDSPrefix + "STORE_PASSWORD",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -66,10 +73,22 @@ func TestStoreDSN(t *testing.T) {
 			wantHost: "from-gf:5432",
 		},
 		{
+			name:     "GF_PLUGIN datasource prefix after app prefix empty",
+			env:      map[string]string{gfPluginDSPrefix + "STORE_HOST": "from-ds-gf"},
+			settings: backend.AppInstanceSettings{JSONData: jsonHost},
+			wantHost: "from-ds-gf:5432",
+		},
+		{
 			name:     "GrafanaCfg store_host",
 			cfg:      map[string]string{"store_host": "from-cfg"},
 			settings: backend.AppInstanceSettings{JSONData: jsonHost},
 			wantHost: "from-cfg:5432",
+		},
+		{
+			name:     "GrafanaCfg datasource plugin section",
+			cfg:      map[string]string{"plugin.eduardkolotushin-forecast-datasource.store_host": "from-ds-cfg"},
+			settings: backend.AppInstanceSettings{JSONData: jsonHost},
+			wantHost: "from-ds-cfg:5432",
 		},
 		{
 			name:     "jsonData last",
@@ -110,6 +129,54 @@ func TestStoreDSN(t *testing.T) {
 				}
 				return
 			}
+			if tt.wantHost == "" {
+				if got != "" {
+					t.Fatalf("got %q want empty", got)
+				}
+				return
+			}
+			if !strings.Contains(got, "@"+tt.wantHost+"/") && !strings.Contains(got, "//"+tt.wantHost+"/") {
+				t.Fatalf("got %q want host %q", got, tt.wantHost)
+			}
+		})
+	}
+}
+
+func TestStoreJSONFromContext(t *testing.T) {
+	dsHost, _ := json.Marshal(map[string]any{"storeHost": "from-ds"})
+	appHost, _ := json.Marshal(map[string]any{"storeHost": "from-app"})
+	emptyObj, _ := json.Marshal(map[string]any{})
+	tests := []struct {
+		name     string
+		dsJSON   []byte
+		dsSecure map[string]string
+		app      *backend.AppInstanceSettings
+		wantHost string
+	}{
+		{name: "empty is persist off"},
+		{
+			name:     "empty object falls through to app",
+			dsJSON:   emptyObj,
+			app:      &backend.AppInstanceSettings{JSONData: appHost},
+			wantHost: "from-app:5432",
+		},
+		{
+			name:     "app jsonData when ds empty",
+			app:      &backend.AppInstanceSettings{JSONData: appHost},
+			wantHost: "from-app:5432",
+		},
+		{
+			name:     "ds jsonData wins over app",
+			dsJSON:   dsHost,
+			app:      &backend.AppInstanceSettings{JSONData: appHost},
+			wantHost: "from-ds:5432",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearStoreEnv(t)
+			jsonData, secure := storeJSONFromContext(tt.dsJSON, tt.dsSecure, tt.app)
+			got := storeDSNFrom(context.Background(), jsonData, secure)
 			if tt.wantHost == "" {
 				if got != "" {
 					t.Fatalf("got %q want empty", got)

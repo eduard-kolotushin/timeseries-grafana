@@ -1,13 +1,26 @@
-; Snapshot store for eduardkolotushin-forecast-app.
-; Merge this section into grafana.ini (or custom.ini). Grafana expands ${VAR}.
+; Snapshot store for eduardkolotushin-forecast-app and the nested
+; eduardkolotushin-forecast-datasource (alerting QueryData is a second process).
+; Merge both sections into grafana.ini (or custom.ini). Grafana expands ${VAR}.
 ; Empty store_host (and no store_url) means persist is off (always needTrain).
 ; CI/CD may substitute the placeholders instead of relying on Grafana expansion.
 ;
-; Precedence in gpx_forecast: FORECAST_STORE_* env, then GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*,
-; then this plugin section via GrafanaCfg, then the app Configuration page (jsonData).
+; Precedence in gpx_forecast: FORECAST_STORE_* env (only if Grafana forwards host
+; env; Grafana 12.4+ does not by default), then GF_PLUGIN_* for this process's
+; plugin id, then this plugin section via GrafanaCfg, then jsonData
+; (app Configuration page, or Forecast datasource jsonData).
 
 [plugin.eduardkolotushin-forecast-app]
 ; Optional full DSN. If set, the fields below are ignored.
+; store_url = ${FORECAST_STORE_URL}
+store_host = ${FORECAST_STORE_HOST}
+store_port = ${FORECAST_STORE_PORT}
+store_database = ${FORECAST_STORE_DATABASE}
+store_user = ${FORECAST_STORE_USER}
+store_ssl_mode = ${FORECAST_STORE_SSLMODE}
+store_password = ${FORECAST_STORE_PASSWORD}
+
+[plugin.eduardkolotushin-forecast-datasource]
+; Same keys as the app. Alerting QueryData does not receive app jsonData.
 ; store_url = ${FORECAST_STORE_URL}
 store_host = ${FORECAST_STORE_HOST}
 store_port = ${FORECAST_STORE_PORT}

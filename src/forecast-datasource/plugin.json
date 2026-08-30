@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "datasource",
+  "name": "Forecast",
+  "id": "eduardkolotushin-forecast-datasource",
+  "metrics": true,
+  "alerting": true,
+  "backend": true,
+  "executable": "gpx_forecast",
+  "info": {
+    "keywords": ["datasource", "forecast", "alerting"],
+    "description": "Forecast and interval series from a fitted overlay snapshot, for Grafana alerting by refId.",
+    "author": {
+      "name": "Eduard Kolotushin"
+    },
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [],
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=12.3.0",
+    "plugins": []
+  }
+}

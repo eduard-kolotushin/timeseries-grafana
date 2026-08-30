@@ -11,6 +11,7 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 | Repo | sibling `timeseries-grafana` |
 | Plugin | Grafana app `eduardkolotushin-forecast-app` with Go backend |
 | Panel | nested `eduardkolotushin-forecast-panel` |
+| Alert queries | nested datasource `eduardkolotushin-forecast-datasource` (Restore + `ForecastRange`; overlay trains) |
 | Models | public `timeseries-forecast` Fit functions (tagged module; no `replace`) |
 | Sandbox | sibling `timeseries-grafana-sandbox` (Compose) |
 | Kubernetes | sibling `timeseries-k8s` (Helm + images) |
@@ -74,11 +75,20 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 
 ## v7 must-have
 
-- Mergeable Grafana `.ini` snippet (`conf/forecast.ini.template`) for proprietary CI/CD that already ships this plugin with Grafana: `[plugin.eduardkolotushin-forecast-app]` snapshot-store keys with `${FORECAST_STORE_*}` placeholders
-- Backend DSN resolution: `FORECAST_STORE_*` env, then Grafana `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / GrafanaCfg, then Configuration `jsonData` / `secureJsonData`. Empty host (and no URL): persist off
+- Backend DSN resolution: `FORECAST_STORE_*` env (Grafana 12.4+ does not forward host env into plugin processes by default), then Grafana `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*` / GrafanaCfg, then jsonData / `secureJsonData`. Empty host (and no URL): persist off
+- Mergeable Grafana `.ini` snippet (`conf/forecast.ini.template`) for proprietary CI/CD that already ships this plugin with Grafana: `[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]` snapshot-store keys with `${FORECAST_STORE_*}` placeholders
 - Panel options stay on the dashboard. Do not put unsigned-plugin allowlist or datasource provisioning in this template
 
-## v1/v2/v3/v4/v5/v6/v7 non-goals
+## v8 must-have
+
+- Nested Grafana datasource `eduardkolotushin-forecast-datasource` (`backend`, `metrics`, `alerting`) so unified alerting and expressions can use forecast / lower / upper by Grafana `refId`
+- Query editor: output kind, model and train-range **strings** (fingerprint only), series name, copy of query A’s datasource uid and inner query; frontend writes the same `cacheKey` as the overlay (canonical SQL/expr, Grafana time macros equivalent to interpolated panel timestamps). No train rewrite and no live train query on this path
+- `QueryData` `Restore`s the snapshot and `ForecastRange`s / `ForecastIntervalRange`s for the request time range. Miss (`needTrain`) is an error frame. Overlay remains the only train/retrain path
+- Snapshot DSN for this process: Forecast datasource jsonData (same keys as the app Configuration page), `[plugin.eduardkolotushin-forecast-datasource]`, or parent `AppInstanceSettings` when Grafana sends them. Overlay train still uses the app process DSN
+- Do not execute the source datasource from `pkg/` on alert eval. Live metric comparison stays Grafana query A
+- This plugin does not ship Grafana alert rules or notification channels
+
+## v1/v2/v3/v4/v5/v6/v7/v8 non-goals
 
 Do not add these without first updating this document:
 
@@ -87,7 +97,7 @@ Do not add these without first updating this document:
 - Publishing or signing on grafana.com
 - Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (pgx snapshot store is v6)
 - Elasticsearch plugin type
-- Alerting
+- Shipping Grafana alert rules or contact points
 - Extra app pages beyond the landing page and existing Configuration page
 - Duplicating Series or forecast algorithms
 - A Druid/Kafka ticker in this plugin (see `timeseries-baselines`)
@@ -97,6 +107,6 @@ Do not add these without first updating this document:
 
 - Backend does not mutate caller series (libraries already return new series)
 - Invalid model/series/level/forecast range map to HTTP 400
-- Table-driven tests cover golden paths for the resource
-- Table-driven frontend tests cover train rewrite, extract/match, and cache fingerprint
+- Table-driven tests cover golden paths for the resource and datasource `QueryData`
+- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, and forecast-query `cacheKey`
 - GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack

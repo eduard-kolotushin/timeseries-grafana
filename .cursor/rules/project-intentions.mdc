@@ -7,9 +7,9 @@ alwaysApply: true
 
 Read [docs/INTENTIONS.md](docs/INTENTIONS.md) before expanding scope.
 
-## Stay in v1/v2/v3/v4/v5/v6/v7
+## Stay in v1/v2/v3/v4/v5/v6/v7/v8
 
-Allowed: app + Go `/forecast` resource, nested overlay panel, prediction interval bands, `showInterval`, training window independent of the panel time range (from/to picker), forecast window (Auto `now` → `now` + model duration) with a reason when empty, type-keyed train-query adapters (Prometheus range, OpenSearch metric+histogram or PPL time series, Postgres time-series SQL) and labeled/wide-frame extract/match, Postgres snapshot store (pgx) and skip-train until Retrain, mergeable `grafana.ini` `[plugin.eduardkolotushin-forecast-app]` snippet for CI/CD.
+Allowed: app + Go `/forecast` resource, nested overlay panel, prediction interval bands, `showInterval`, training window independent of the panel time range (from/to picker), forecast window (Auto `now` → `now` + model duration) with a reason when empty, type-keyed train-query adapters (Prometheus range, OpenSearch metric+histogram or PPL time series, Postgres time-series SQL) and labeled/wide-frame extract/match, Postgres snapshot store (pgx) and skip-train until Retrain, mergeable `grafana.ini` `[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]` snippet for CI/CD, nested forecast datasource (`QueryData` Restore) so Grafana alerting can use forecast / interval by `refId`.
 
 Do **not** add without updating INTENTIONS first:
 
@@ -18,7 +18,7 @@ Do **not** add without updating INTENTIONS first:
 - Grafana.com signing/publish
 - Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/`
 - Elasticsearch plugin type
-- Alerting
+- Shipping Grafana alert rules or contact points
 - A forked Series or forecast implementation
 - Extra app pages beyond landing + Configuration
 - A Druid/Kafka ticker in this plugin (sibling `timeseries-baselines`)

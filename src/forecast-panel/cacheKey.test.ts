@@ -82,6 +82,92 @@ describe('fingerprintPayload', () => {
       })
     ).not.toEqual(base);
   });
+
+  it('matches overlay interpolated timestamps to alert time macros', () => {
+    const fromMs = Date.UTC(2026, 7, 30, 16, 0, 0);
+    const toMs = Date.UTC(2026, 7, 30, 22, 0, 0);
+    const sql = (from: string, to: string) =>
+      `SELECT __time, SUM("value") + 4.0 * SIN(TIMESTAMP_TO_MILLIS(__time) / 1009.0) AS "value" FROM minuteweek WHERE __time >= MILLIS_TO_TIMESTAMP(${from}) AND __time <= MILLIS_TO_TIMESTAMP(${to}) GROUP BY 1 ORDER BY 1`;
+    const overlay = fingerprintPayload({
+      targets: [
+        {
+          refId: 'A',
+          key: 'Q-overlay',
+          datasource: { type: 'grafadruid-druid-datasource', uid: 'druid', apiVersion: 'v1' },
+          maxDataPoints: 15000,
+          interval: '1m',
+          intervalMs: 60000,
+          builder: { queryType: 'sql', query: sql(String(fromMs), String(toMs)) },
+          settings: { contextParameters: [], format: 'wide' },
+        },
+      ],
+      visibleFromMs: fromMs,
+      visibleToMs: toMs,
+      options: baseOptions,
+      seriesName: 'value',
+    });
+    const alert = fingerprintPayload({
+      targets: [
+        {
+          refId: 'A',
+          datasource: { uid: 'druid', type: 'grafadruid-druid-datasource' },
+          builder: {
+            queryType: 'sql',
+            query: sql('${__from}', '${__to}'),
+            aggregations: [{ name: 'value', type: 'doubleSum', fieldName: 'value' }],
+            dataSource: { name: 'minuteweek', type: 'table' },
+            intervals: { type: 'intervals', intervals: ['${__from:date:iso}/${__to:date:iso}'] },
+          },
+          settings: { format: 'wide', queryTimeout: 60 },
+        },
+      ],
+      options: baseOptions,
+      seriesName: 'value',
+    });
+    expect(alert).toEqual(overlay);
+  });
+
+  it('treats Auto empty trainRange the same as a missing trainRange', () => {
+    const target = { refId: 'A', datasource: { uid: 'druid' }, builder: { queryType: 'sql', query: 'SELECT 1' } };
+    const auto = fingerprintPayload({
+      targets: [target],
+      options: { ...baseOptions, trainRange: { from: '', to: '' } },
+      seriesName: 'value',
+    });
+    const missing = fingerprintPayload({
+      targets: [target],
+      options: { ...baseOptions, trainRange: undefined as unknown as ForecastOptions['trainRange'] },
+      seriesName: 'value',
+    });
+    expect(auto).toEqual(missing);
+  });
+
+  it('ignores SQL whitespace wrapping', () => {
+    const a = fingerprintPayload({
+      targets: [
+        {
+          datasource: { uid: 'druid' },
+          builder: { queryType: 'sql', query: 'SELECT __time, value FROM minuteweek GROUP BY 1' },
+        },
+      ],
+      options: baseOptions,
+      seriesName: 'value',
+    });
+    const b = fingerprintPayload({
+      targets: [
+        {
+          datasource: { uid: 'druid' },
+          builder: {
+            queryType: 'sql',
+            query: 'SELECT __time, value\nFROM minuteweek\nGROUP BY 1',
+          },
+        },
+      ],
+      options: baseOptions,
+      seriesName: 'value',
+    });
+    expect(a).toEqual(b);
+  });
 });
 
 describe('cacheKey', () => {

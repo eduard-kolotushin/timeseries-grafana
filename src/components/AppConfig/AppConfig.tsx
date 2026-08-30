@@ -87,8 +87,10 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       </FieldSet>
       <p>Plugin id: {plugin.meta.id}</p>
       <p>
-        Env <code>FORECAST_STORE_*</code> and grafana.ini <code>[plugin.eduardkolotushin-forecast-app]</code> override
-        these fields in the backend process. See <code>conf/forecast.ini.template</code>.
+        Env <code>FORECAST_STORE_*</code> (not forwarded into plugin processes on Grafana 12.4+ by default) and
+        grafana.ini <code>[plugin.eduardkolotushin-forecast-app]</code> override these fields in the overlay backend.
+        Alerting QueryData is a separate process: set the same store on the Forecast datasource, or merge{' '}
+        <code>[plugin.eduardkolotushin-forecast-datasource]</code>. See <code>conf/forecast.ini.template</code>.
       </p>
     </div>
   );

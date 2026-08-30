@@ -14,7 +14,10 @@ const config = async (env: Env): Promise<Configuration> => {
   base.plugins = base.plugins ?? [];
   base.plugins.push(
     new CopyWebpackPlugin({
-      patterns: [{ from: 'forecast-panel/img', to: 'forecast-panel/img', noErrorOnMissing: true }],
+      patterns: [
+        { from: 'forecast-panel/img', to: 'forecast-panel/img', noErrorOnMissing: true },
+        { from: 'img', to: 'forecast-datasource/img', noErrorOnMissing: true },
+      ],
     })
   );
   return base;

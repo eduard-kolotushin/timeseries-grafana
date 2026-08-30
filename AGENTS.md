@@ -7,7 +7,7 @@ Operating manual for agents working in this repository.
 Grafana app plugin that overlays univariate forecasts on dashboard queries. The Go backend calls `timeseries-forecast`; the nested panel draws history plus forecast. Minute-of-week Druid→Kafka baselines are sibling `timeseries-baselines`, not this process.
 
 - **Folder:** `timeseries-grafana`
-- **Plugin ID:** `eduardkolotushin-forecast-app` (nested panel `eduardkolotushin-forecast-panel`)
+- **Plugin ID:** `eduardkolotushin-forecast-app` (nested panel `eduardkolotushin-forecast-panel`, nested datasource `eduardkolotushin-forecast-datasource`)
 - **Go module:** `github.com/eduard-kolotushin/timeseries-grafana`
 - **Go:** 1.26+
 - **Libraries:** tagged `timeseries` and `timeseries-forecast` modules (no `replace`)
@@ -24,9 +24,10 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Do not reimplement Series or forecast models; use the public sibling APIs only
 - Visualization plugin source stays in this repo; the Grafana runtime does not (Compose sandbox or `timeseries-k8s`)
 - Nested panel calls `POST /api/plugins/eduardkolotushin-forecast-app/resources/forecast`
+- Nested datasource `QueryData` Restores snapshots; alerting uses Grafana `refId`s (metric vs forecast / interval)
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
 - No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots
-- Stay within v1–v7 unless `docs/INTENTIONS.md` is updated first
+- Stay within v1–v8 unless `docs/INTENTIONS.md` is updated first
 
 ## v1 in scope
 
@@ -54,16 +55,20 @@ Postgres snapshot store (`forecast.snapshots` via pgx). Skip the train query unt
 
 ## v7 in scope
 
-Mergeable `conf/forecast.ini.template` for CI/CD `grafana.ini`. Backend reads `FORECAST_STORE_*`, then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / GrafanaCfg, then jsonData.
+Mergeable `conf/forecast.ini.template` for CI/CD `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`). Backend reads `FORECAST_STORE_*` (not forwarded into plugin processes on Grafana 12.4+ by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*` / GrafanaCfg, then jsonData. Alerting QueryData uses Forecast datasource jsonData, not the app Configuration page.
 
-## v1/v2/v3/v4/v5/v6/v7 out of scope
+## v8 in scope
 
-Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, alerting, extra app pages, baseline publisher process.
+Nested forecast datasource for Grafana alerting queries (`QueryData` Restore + `ForecastRange`). Overlay stays the train/retrain path. Do not ship alert rules.
+
+## v1/v2/v3/v4/v5/v6/v7/v8 out of scope
+
+Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages, baseline publisher process.
 
 ## Workflow
 
-- Table-driven Go tests for the forecast resource
-- Table-driven frontend tests for train rewrite, extract/match, and cache fingerprint
+- Table-driven Go tests for the forecast resource and datasource `QueryData`
+- Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, and forecast-query `cacheKey`
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`

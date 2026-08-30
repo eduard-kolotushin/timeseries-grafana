@@ -11,7 +11,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - App id `eduardkolotushin-forecast-app`
 - Nested panel id `eduardkolotushin-forecast-panel`
-- Backend executable `gpx_forecast`
+- Nested datasource id `eduardkolotushin-forecast-datasource`
+- Backend executable `gpx_forecast` (app process and a copy under `forecast-datasource/`)
 - Go 1.26+
 
 ## API
@@ -21,12 +22,13 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Panel forecasts each numeric series independently
 - Panel `showInterval` gates `level`; training uses a from/to query, not the visible range; forecast uses a from/to window (`ForecastRange`)
 - Train rewrite is type-keyed in the overlay frontend (Prom / OpenSearch / Postgres / Druid); `pkg/` has no Prom/OS/PG **datasource** clients (pgx snapshot store is allowed)
-- Snapshot DSN: `FORECAST_STORE_*`, then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / GrafanaCfg, then jsonData; CI merges `conf/forecast.ini.template`
+- Snapshot DSN: `FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*` / GrafanaCfg, then jsonData; CI merges `conf/forecast.ini.template` (app and datasource plugin sections)
+- Datasource `QueryData` Restores by `cacheKey` and emits forecast / lower / upper; miss is an error (overlay trains). Do not query other datasources from `pkg/`
 - Pre-size Go slices to the request/window length
 
 ## Quality
 
-- Table-driven tests next to the resource handler
-- Table-driven frontend tests next to train rewrite, extract, and cache fingerprint
+- Table-driven tests next to the resource handler and `QueryData`
+- Table-driven frontend tests next to train rewrite, extract, cache fingerprint, and forecast-query `cacheKey`
 - No drive-by refactors
 - Keep Grafana scaffold files under `.config/` unless a plugin-tools upgrade requires it

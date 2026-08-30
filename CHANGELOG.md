@@ -4,3 +4,4 @@
 
 - App plugin with Go `/forecast` resource
 - Nested Forecast overlay panel
+- Nested Forecast datasource for Grafana alerting (`QueryData` Restore of overlay snapshots)

@@ -29,4 +29,4 @@ services:
       GF_LOG_FILTERS: plugin.eduardkolotushin-forecast-app:debug
       GF_LOG_LEVEL: debug
       GF_DATAPROXY_LOGGING: 1
-      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: eduardkolotushin-forecast-app,eduardkolotushin-forecast-panel
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: eduardkolotushin-forecast-app,eduardkolotushin-forecast-panel,eduardkolotushin-forecast-datasource

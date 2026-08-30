@@ -6,7 +6,6 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
-	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource/httpadapter"
 )
 
@@ -31,17 +30,7 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 func newApp(ctx context.Context, settings backend.AppInstanceSettings, store SnapshotStore) (*App, error) {
 	app := &App{store: store}
 	if store == nil {
-		dsn := storeDSN(ctx, settings)
-		if dsn != "" {
-			pg, err := openPostgresStore(ctx, dsn)
-			if err != nil {
-				log.DefaultLogger.Error("forecast store", "err", err.Error())
-				app.store = errStore{err: err}
-			} else {
-				app.store = withCache(pg)
-				app.close = pg.Close
-			}
-		}
+		app.store, app.close = connectStore(ctx, storeDSN(ctx, settings))
 	}
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)

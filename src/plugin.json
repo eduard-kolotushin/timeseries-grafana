@@ -33,6 +33,10 @@
       "name": "Forecast overlay"
     },
     {
+      "type": "datasource",
+      "name": "Forecast"
+    },
+    {
       "type": "page",
       "icon": "cog",
       "name": "Configuration",
