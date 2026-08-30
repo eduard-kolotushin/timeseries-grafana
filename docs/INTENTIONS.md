@@ -72,7 +72,13 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 - Configuration page (existing) and env `FORECAST_STORE_*` for the DSN. No DSN: persist off (always `needTrain`)
 - Overlay Retrain control; status when a saved model is used
 
-## v1/v2/v3/v4/v5/v6 non-goals
+## v7 must-have
+
+- Mergeable Grafana `.ini` snippet (`conf/forecast.ini.template`) for proprietary CI/CD that already ships this plugin with Grafana: `[plugin.eduardkolotushin-forecast-app]` snapshot-store keys with `${FORECAST_STORE_*}` placeholders
+- Backend DSN resolution: `FORECAST_STORE_*` env, then Grafana `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / GrafanaCfg, then Configuration `jsonData` / `secureJsonData`. Empty host (and no URL): persist off
+- Panel options stay on the dashboard. Do not put unsigned-plugin allowlist or datasource provisioning in this template
+
+## v1/v2/v3/v4/v5/v6/v7 non-goals
 
 Do not add these without first updating this document:
 

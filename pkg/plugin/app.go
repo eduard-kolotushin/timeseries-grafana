@@ -31,7 +31,7 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 func newApp(ctx context.Context, settings backend.AppInstanceSettings, store SnapshotStore) (*App, error) {
 	app := &App{store: store}
 	if store == nil {
-		dsn := storeDSN(settings)
+		dsn := storeDSN(ctx, settings)
 		if dsn != "" {
 			pg, err := openPostgresStore(ctx, dsn)
 			if err != nil {

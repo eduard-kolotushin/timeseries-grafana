@@ -12,6 +12,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/forecast-panel/extract.ts` | Time+numeric series from frames; train ↔ visible match |
 | `src/forecast-panel/cacheKey.ts` | Train-cache fingerprint (SHA-256) |
 | `src/components/AppConfig/` | Overlay Postgres DSN for the snapshot store |
+| `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]`) |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules |
 | `pkg/plugin/store.go` | SnapshotStore; pgx `forecast.snapshots` |
 | `pkg/plugin/resources.go` | `POST /forecast`, `GET /ping` |
@@ -49,7 +50,13 @@ Invalid (reason, history only, no POST): Prometheus instant; OpenSearch logs/raw
 
 ## Snapshot store
 
-DSN from env `FORECAST_STORE_URL` or `FORECAST_STORE_*` (overrides) and app `jsonData` / `secureJsonData` (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`). On connect: `CREATE SCHEMA IF NOT EXISTS forecast` and table `forecast.snapshots (org_id, cache_key, snapshot JSONB, updated_at)` PK `(org_id, cache_key)`. `org_id` comes from plugin context. No DSN: persist off.
+DSN resolution (first non-empty wins per field; URL short-circuits the rest):
+
+1. Process env `FORECAST_STORE_URL` / `FORECAST_STORE_*` (Compose, Helm, systemd)
+2. Grafana ini-to-env `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` and `GrafanaCfg` keys (`store_host`, `store_port`, …) from `[plugin.eduardkolotushin-forecast-app]`
+3. App `jsonData` / `secureJsonData` (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`) from the Configuration page
+
+CI/CD merges [`conf/forecast.ini.template`](../conf/forecast.ini.template) into `grafana.ini` (Grafana expands `${FORECAST_STORE_*}`). On connect: `CREATE SCHEMA IF NOT EXISTS forecast` and table `forecast.snapshots (org_id, cache_key, snapshot JSONB, updated_at)` PK `(org_id, cache_key)`. `org_id` comes from plugin context. No DSN: persist off.
 
 ## Train step
 

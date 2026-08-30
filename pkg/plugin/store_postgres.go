@@ -81,37 +81,44 @@ func openPostgresStore(ctx context.Context, dsn string) (*postgresStore, error) 
 	return &postgresStore{pool: pool}, nil
 }
 
-func storeDSN(settings backend.AppInstanceSettings) string {
-	if u := strings.TrimSpace(os.Getenv("FORECAST_STORE_URL")); u != "" {
-		return u
-	}
+const gfPluginPrefix = "GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_"
+
+func storeDSN(ctx context.Context, settings backend.AppInstanceSettings) string {
 	jd := map[string]any{}
 	if len(settings.JSONData) > 0 {
 		_ = json.Unmarshal(settings.JSONData, &jd)
 	}
-	host := envOrJSON("FORECAST_STORE_HOST", jd, "storeHost")
+	look := storeLookup{
+		getenv: os.Getenv,
+		cfg:    backend.GrafanaConfigFromContext(ctx),
+		json:   jd,
+	}
+	if u := look.get("FORECAST_STORE_URL", "STORE_URL", "store_url", ""); u != "" {
+		return u
+	}
+	host := look.get("FORECAST_STORE_HOST", "STORE_HOST", "store_host", "storeHost")
 	if host == "" {
 		return ""
 	}
-	port := envOrJSON("FORECAST_STORE_PORT", jd, "storePort")
+	port := look.get("FORECAST_STORE_PORT", "STORE_PORT", "store_port", "storePort")
 	if port == "" {
 		port = "5432"
 	}
-	db := envOrJSON("FORECAST_STORE_DATABASE", jd, "storeDatabase")
+	db := look.get("FORECAST_STORE_DATABASE", "STORE_DATABASE", "store_database", "storeDatabase")
 	if db == "" {
 		db = "overlay"
 	}
-	user := envOrJSON("FORECAST_STORE_USER", jd, "storeUser")
+	user := look.get("FORECAST_STORE_USER", "STORE_USER", "store_user", "storeUser")
 	if user == "" {
 		user = "overlay"
 	}
-	ssl := envOrJSON("FORECAST_STORE_SSLMODE", jd, "storeSslMode")
+	ssl := look.get("FORECAST_STORE_SSLMODE", "STORE_SSL_MODE", "store_ssl_mode", "storeSslMode")
 	if ssl == "" {
 		ssl = "disable"
 	}
-	pass := strings.TrimSpace(os.Getenv("FORECAST_STORE_PASSWORD"))
+	pass := look.get("FORECAST_STORE_PASSWORD", "STORE_PASSWORD", "store_password", "")
 	if pass == "" && settings.DecryptedSecureJSONData != nil {
-		pass = settings.DecryptedSecureJSONData["storePassword"]
+		pass = strings.TrimSpace(settings.DecryptedSecureJSONData["storePassword"])
 	}
 	u := &url.URL{
 		Scheme: "postgres",
@@ -131,10 +138,34 @@ func storeDSN(settings backend.AppInstanceSettings) string {
 	return u.String()
 }
 
-func envOrJSON(env string, jd map[string]any, key string) string {
-	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+type storeLookup struct {
+	getenv func(string) string
+	cfg    *backend.GrafanaCfg
+	json   map[string]any
+}
+
+func (s storeLookup) get(forecastEnv, gfSuffix, iniKey, jsonKey string) string {
+	if v := strings.TrimSpace(s.getenv(forecastEnv)); v != "" {
 		return v
 	}
+	gf := gfPluginPrefix + gfSuffix
+	if v := strings.TrimSpace(s.getenv(gf)); v != "" {
+		return v
+	}
+	if s.cfg != nil {
+		for _, k := range []string{iniKey, gf, "plugin.eduardkolotushin-forecast-app." + iniKey} {
+			if v := strings.TrimSpace(s.cfg.Get(k)); v != "" {
+				return v
+			}
+		}
+	}
+	if jsonKey == "" {
+		return ""
+	}
+	return jsonField(s.json, jsonKey)
+}
+
+func jsonField(jd map[string]any, key string) string {
 	raw, ok := jd[key]
 	if !ok || raw == nil {
 		return ""

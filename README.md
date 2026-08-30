@@ -8,6 +8,8 @@ Grafana app plugin that overlays forecasts from [`timeseries-forecast`](https://
 
 This repo is plugin source only. Local Grafana is [`timeseries-grafana-sandbox`](../timeseries-grafana-sandbox). Cluster Helm and images are [`timeseries-k8s`](../timeseries-k8s). Open all siblings with [`../timeseries-workspace.code-workspace`](../timeseries-workspace.code-workspace).
 
+CI/CD that already ships Grafana plus plugins: merge [`conf/forecast.ini.template`](conf/forecast.ini.template) into `grafana.ini`. See [`conf/README.md`](conf/README.md).
+
 See [docs/INTENTIONS.md](docs/INTENTIONS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 The Go backend depends on tagged `timeseries` and `timeseries-forecast` modules.

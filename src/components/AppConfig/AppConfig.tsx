@@ -86,7 +86,10 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         </Button>
       </FieldSet>
       <p>Plugin id: {plugin.meta.id}</p>
-      <p>Env <code>FORECAST_STORE_*</code> overrides these fields in the backend process.</p>
+      <p>
+        Env <code>FORECAST_STORE_*</code> and grafana.ini <code>[plugin.eduardkolotushin-forecast-app]</code> override
+        these fields in the backend process. See <code>conf/forecast.ini.template</code>.
+      </p>
     </div>
   );
 };

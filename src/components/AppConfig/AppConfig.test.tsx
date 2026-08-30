@@ -20,6 +20,7 @@ describe('Components/AppConfig', () => {
 
     render(<AppConfig plugin={props.plugin} query={props.query} />);
     expect(screen.getByText(/snapshot store/i)).toBeInTheDocument();
-    expect(screen.getByText(/eduardkolotushin-forecast-app/)).toBeInTheDocument();
+    expect(screen.getByText(/forecast\.ini\.template/)).toBeInTheDocument();
+    expect(screen.getAllByText(/eduardkolotushin-forecast-app/).length).toBeGreaterThan(0);
   });
 });

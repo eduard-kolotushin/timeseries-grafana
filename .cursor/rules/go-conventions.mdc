@@ -21,6 +21,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Panel forecasts each numeric series independently
 - Panel `showInterval` gates `level`; training uses a from/to query, not the visible range; forecast uses a from/to window (`ForecastRange`)
 - Train rewrite is type-keyed in the overlay frontend (Prom / OpenSearch / Postgres / Druid); `pkg/` has no Prom/OS/PG **datasource** clients (pgx snapshot store is allowed)
+- Snapshot DSN: `FORECAST_STORE_*`, then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / GrafanaCfg, then jsonData; CI merges `conf/forecast.ini.template`
 - Pre-size Go slices to the request/window length
 
 ## Quality
