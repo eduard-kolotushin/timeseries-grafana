@@ -94,7 +94,12 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 - Forecast query editor stays manual (kind, model, train-range strings, series name, source query). Do not auto-fill from siblings or overlay options. An optional **Copy source from query A** button may copy `sourceTargets` for the fingerprint only
 - Grafana shows the panel **Alert** tab only for Time series and Graph, and only if that visualization was current when the editor data pane was created. Switching from this overlay to Time series in the same edit session does not add the tab. Working paths: Time series panel opened as Time series (or leave edit and re-open after switching); panel menu More → New alert rule; Alerting → New alert rule. Do not ship alert rules
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9 non-goals
+## v10 must-have
+
+- Overlay options **Alerting** with **New alert rule**: navigate to Grafana `/alerting/new` with live panel queries (including Mixed Forecast rows), default reduce + threshold expressions, and `__dashboardUid__` / `__panelId__` annotations so the rule stays linked to this overlay. Dashboard must be saved first. Rows whose datasource `meta.alerting` is off are dropped (Grafana’s “no alerting capable query” reason). Grafana 13 TestData and the nested Forecast datasource are both alerting-capable.
+- This is not Grafana’s data-pane Alert tab (still Time series / Graph only). Do not rename the overlay plugin id. Do not ship alert rules or contact points
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10 non-goals
 
 Do not add these without first updating this document:
 
@@ -114,5 +119,5 @@ Do not add these without first updating this document:
 - Backend does not mutate caller series (libraries already return new series)
 - Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource and datasource `QueryData`
-- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, and forecast-query `cacheKey`
+- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, and overlay New alert rule defaults
 - GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack

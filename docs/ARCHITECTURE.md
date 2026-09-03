@@ -12,6 +12,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/forecast-panel/extract.ts` | Time+numeric series from frames; train ↔ visible match |
 | `src/forecast-panel/cacheKey.ts` | Train-cache fingerprint (SHA-256); overlay and forecast datasource share this. SQL/expr identity; time macros match interpolated panel timestamps |
 | `src/forecast-panel/mixed.ts` | Metric vs Forecast datasource targets/frames on Mixed overlay |
+| `src/forecast-panel/alertFromPanel.ts` | Overlay options New alert rule: Grafana `/alerting/new` defaults from live panel queries |
 | `src/forecast-datasource/` | Nested queryable datasource for alerting (`kind` forecast / lower / upper) |
 | `src/components/AppConfig/` | Overlay Postgres DSN for the snapshot store |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
@@ -119,7 +120,7 @@ Grafana unified alerting evaluates backend datasource queries, not overlay panel
 
 `QueryData` looks up the snapshot and emits one time series frame. On miss it returns an error (`needTrain`); it does not fit and does not query other datasources. Train on the overlay first. If the store DSN is missing in this process, the error is `snapshot store not configured (needTrain)` — that is not a cache miss.
 
-Mixed overlay + Forecast query: the overlay plots POST forecast only. The Forecast query editor does not auto-fill; **Copy source from query A** is opt-in for the fingerprint. Grafana’s panel Alert tab exists only for Time series / Graph, and only if that visualization was current when the editor opened (switching from this overlay in the same session does not add the tab; a new unsaved dashboard may also omit it until you save and re-open as Time series). Create an alert via Time series (re-open edit after switching), panel menu More → New alert rule (including this overlay), or Alerting → New alert rule.
+Mixed overlay + Forecast query: the overlay plots POST forecast only. The Forecast query editor does not auto-fill; **Copy source from query A** is opt-in for the fingerprint. Grafana’s panel Alert tab exists only for Time series / Graph. Overlay options **New alert rule** navigates to `/alerting/new` with live queries (including Mixed Forecast rows), default reduce + threshold, and dashboard/panel annotations. On Grafana 13 scenes, live targets come from the editor scene query runner (`__grafanaSceneContext`), not `getDashboardSaveModel` (that helper still calls `getSaveModelCloneOld`). Dashboard must be saved. Panel menu More → New alert rule and Alerting → New alert rule remain. Do not ship alert rules.
 
 ## Horizon clock
 

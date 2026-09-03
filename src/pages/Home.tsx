@@ -19,12 +19,10 @@ function Home() {
           only.
         </p>
         <p>
-          For Grafana alerting, query A stays the live metric and query B Restores the saved snapshot. Grafana shows the
-          panel Alert tab only for Time series and Graph, and only if that visualization was current when the editor
-          data pane was created. Switching from this overlay to Time series without leaving edit does not add the tab. A
-          new unsaved dashboard may also omit it until you save and Edit again as Time series. Working paths: open or
-          re-open the editor as Time series (Back to dashboard, then Edit); panel menu More → New alert rule (any panel
-          type, including this overlay); Alerting → New alert rule.
+          For Grafana alerting, query A stays the live metric and query B Restores the saved snapshot. Save the dashboard,
+          then use overlay options <strong>New alert rule</strong> to open Grafana&apos;s alerting editor with the live
+          panel queries (including Mixed Forecast rows). Grafana still shows the data-pane Alert tab only for Time series
+          and Graph. Panel menu More → New alert rule and Alerting → New alert rule remain.
         </p>
         <p>The Docker Grafana sandbox (TestData demo dashboard) is the sibling repo timeseries-grafana-sandbox.</p>
       </div>

@@ -3,6 +3,7 @@ import { ForecastOptions } from './types';
 import { ForecastPanel } from './ForecastPanel';
 import { TrainRangeEditor } from './TrainRangeEditor';
 import { RetrainEditor } from './RetrainEditor';
+import { AlertEditor } from './AlertEditor';
 
 export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOptions((builder) => {
   return builder
@@ -113,5 +114,14 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       description: 'Reuse the fitted snapshot until Retrain or a query, model, or training-period change. Auto train windows do not re-query as time moves.',
       defaultValue: { from: '', to: '' },
       editor: RetrainEditor,
+    })
+    .addCustomEditor({
+      id: 'alertFromPanel',
+      path: 'trainRange',
+      name: 'New alert rule',
+      description: 'Open Grafana alerting with this panel’s live queries (including Mixed Forecast rows). Save the dashboard first. Existing rules stay on the Alerting page.',
+      category: ['Alerting'],
+      defaultValue: { from: '', to: '' },
+      editor: AlertEditor,
     });
 });

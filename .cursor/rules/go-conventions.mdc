@@ -26,11 +26,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Datasource `QueryData` Restores by `cacheKey` and emits forecast / lower / upper; miss is an error (overlay trains). Do not query other datasources from `pkg/`
 - Overlay Mixed: cacheKey and train use metric targets only; Forecast datasource frames are not fitted or plotted
 - Forecast query editor does not auto-fill; Copy source from query A is opt-in for `sourceTargets` only
+- Overlay options New alert rule navigates to Grafana `/alerting/new` with live panel queries and dashboard/panel annotations; do not ship rules
 - Pre-size Go slices to the request/window length
 
 ## Quality
 
 - Table-driven tests next to the resource handler and `QueryData`
-- Table-driven frontend tests next to train rewrite, extract, cache fingerprint, mixed frames, and forecast-query `cacheKey`
+- Table-driven frontend tests next to train rewrite, extract, cache fingerprint, mixed frames, forecast-query `cacheKey`, and overlay New alert rule defaults
 - No drive-by refactors
 - Keep Grafana scaffold files under `.config/` unless a plugin-tools upgrade requires it
