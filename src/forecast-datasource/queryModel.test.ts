@@ -1,8 +1,14 @@
 import { webcrypto } from 'crypto';
 import { cacheKey, fingerprintPayload } from '../forecast-panel/cacheKey';
 import { ForecastOptions } from '../forecast-panel/types';
-import { cacheKeyInputFromQuery, optionsFromQuery, withCacheKey } from './queryModel';
-import { defaultForecastQuery, ForecastDataQuery } from './types';
+import {
+  cacheKeyInputFromQuery,
+  copySourceFromSibling,
+  optionsFromQuery,
+  siblingMetricQueries,
+  withCacheKey,
+} from './queryModel';
+import { defaultForecastQuery, ForecastDataQuery, FORECAST_DATASOURCE_TYPE } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -85,5 +91,63 @@ describe('optionsFromQuery', () => {
     const opts = optionsFromQuery(query());
     expect(opts.model).toBe('holt');
     expect(opts.trainRange).toEqual({ from: 'now-7d', to: 'now' });
+  });
+});
+
+describe('siblingMetricQueries', () => {
+  it('drops self, hidden, and Forecast datasource rows', () => {
+    expect(
+      siblingMetricQueries(
+        [
+          { refId: 'A', datasource: { uid: 'prom', type: 'prometheus' } },
+          { refId: 'B', datasource: { uid: 'fc', type: FORECAST_DATASOURCE_TYPE } },
+          { refId: 'C', hide: true, datasource: { uid: 'prom', type: 'prometheus' } },
+        ],
+        'B'
+      ).map((q) => q.refId)
+    ).toEqual(['A']);
+  });
+});
+
+describe('copySourceFromSibling', () => {
+  it('copies sourceTargets only', () => {
+    const sibling = {
+      refId: 'A',
+      datasource: { uid: 'druid', type: 'grafadruid-druid-datasource' },
+      rawSql: 'SELECT 1',
+    };
+    const q = query({
+      model: 'baseline',
+      season: 'minute-week',
+      seriesName: 'keep',
+      trainRange: { from: 'now-21d', to: 'now' },
+      sourceTargets: [],
+    });
+    const next = copySourceFromSibling(q, sibling);
+    expect(next.model).toBe('baseline');
+    expect(next.season).toBe('minute-week');
+    expect(next.seriesName).toBe('keep');
+    expect(next.trainRange).toEqual({ from: 'now-21d', to: 'now' });
+    expect(next.sourceTargets).toEqual([
+      {
+        refId: 'A',
+        rawSql: 'SELECT 1',
+        datasource: { uid: 'druid', type: 'grafadruid-druid-datasource' },
+      },
+    ]);
+  });
+
+  it('fingerprint matches overlay for the same A after copy', () => {
+    const copied = copySourceFromSibling(
+      query({ sourceTargets: [], seriesName: 'up', model: 'holt', trainRange: overlayOptions.trainRange }),
+      target
+    );
+    expect(fingerprintPayload(cacheKeyInputFromQuery(copied))).toEqual(
+      fingerprintPayload({
+        targets: [target],
+        options: overlayOptions,
+        seriesName: 'up',
+      })
+    );
   });
 });

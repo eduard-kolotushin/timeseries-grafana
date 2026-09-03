@@ -11,6 +11,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/forecast-panel/trainRewrite.ts` | Type-keyed training-query rewrite (Prom / OpenSearch / Postgres / Druid) |
 | `src/forecast-panel/extract.ts` | Time+numeric series from frames; train ↔ visible match |
 | `src/forecast-panel/cacheKey.ts` | Train-cache fingerprint (SHA-256); overlay and forecast datasource share this. SQL/expr identity; time macros match interpolated panel timestamps |
+| `src/forecast-panel/mixed.ts` | Metric vs Forecast datasource targets/frames on Mixed overlay |
 | `src/forecast-datasource/` | Nested queryable datasource for alerting (`kind` forecast / lower / upper) |
 | `src/components/AppConfig/` | Overlay Postgres DSN for the snapshot store |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
@@ -26,8 +27,8 @@ Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeserie
 
 ## Overlay data flow
 
-1. Grafana queries the **visible** panel time range. The nested panel draws those frames as history (time + every numeric field per frame).
-2. Per visible series it POSTs `{ cacheKey, from, to, model, ... }` without training points. `cacheKey` is SHA-256 of datasource uid, canonical query (SQL / PromQL `expr` / redacted native body), model options, raw train-range strings, and series name. Grafana time macros and interpolated visible timestamps are `__TIME__`. Volatile query-row fields (`key`, interval, maxDataPoints) are omitted. Dashboard range and forecast window are not in the key.
+1. Grafana queries the **visible** panel time range. The nested panel draws **metric** frames as history (time + every numeric field per frame). Mixed Forecast datasource frames are not history, are not fitted, and are not plotted.
+2. Per visible metric series it POSTs `{ cacheKey, from, to, model, ... }` without training points. `cacheKey` is SHA-256 of **metric** datasource uid, canonical query (SQL / PromQL `expr` / redacted native body), model options, raw train-range strings, and series name. Forecast datasource queries are omitted from the fingerprint so adding query B does not invalidate the overlay snapshot. Grafana time macros and interpolated visible timestamps are `__TIME__`. Volatile query-row fields (`key`, interval, maxDataPoints) are omitted. Dashboard range and forecast window are not in the key.
 3. On a hit the backend `Restore`s the snapshot and `ForecastRange`s. The panel skips the training datasource query.
 4. On `needTrain` or Retrain, the panel issues one training query (rewritten for the train window and a model-aware step), then POSTs `{ times, values, cacheKey, ... }`. The backend fits, upserts JSONB, and returns the window.
 5. Auto/relative train strings do not re-query until Retrain; the saved model can lag `now`.
@@ -117,6 +118,8 @@ Grafana unified alerting evaluates backend datasource queries, not overlay panel
 4. Expression: A vs B, or A vs C.
 
 `QueryData` looks up the snapshot and emits one time series frame. On miss it returns an error (`needTrain`); it does not fit and does not query other datasources. Train on the overlay first. If the store DSN is missing in this process, the error is `snapshot store not configured (needTrain)` — that is not a cache miss.
+
+Mixed overlay + Forecast query: the overlay plots POST forecast only. The Forecast query editor does not auto-fill; **Copy source from query A** is opt-in for the fingerprint. Grafana’s panel Alert tab exists only for Time series / Graph, and only if that visualization was current when the editor opened (switching from this overlay in the same session does not add the tab; a new unsaved dashboard may also omit it until you save and re-open as Time series). Create an alert via Time series (re-open edit after switching), panel menu More → New alert rule (including this overlay), or Alerting → New alert rule.
 
 ## Horizon clock
 

@@ -1,9 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { DataSourceApi, QueryEditorProps, SelectableValue } from '@grafana/data';
+import { DataQuery, DataSourceApi, QueryEditorProps, SelectableValue } from '@grafana/data';
 import { DataSourcePicker, getDataSourceSrv } from '@grafana/runtime';
-import { Field, InlineField, InlineFieldRow, Input, Select } from '@grafana/ui';
+import { Button, Field, InlineField, InlineFieldRow, Input, Select } from '@grafana/ui';
 import { ForecastDataSource } from './datasource';
-import { innerSourceQuery, sourceDatasource, withCacheKey, withSourceTarget } from './queryModel';
+import {
+  copySourceFromSibling,
+  innerSourceQuery,
+  siblingMetricQueries,
+  sourceDatasource,
+  withCacheKey,
+  withSourceTarget,
+} from './queryModel';
 import {
   FORECAST_DATASOURCE_TYPE,
   ForecastDataQuery,
@@ -41,7 +48,7 @@ const CALENDAR_OPTIONS: Array<SelectableValue<ForecastDataQuery['calendar']>> = 
   { value: 'ru', label: 'RU' },
 ];
 
-export function QueryEditor({ query, onChange, onRunQuery }: Props) {
+export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
   const [sourceDs, setSourceDs] = useState<DataSourceApi | null>(null);
   const dsRef = sourceDatasource(query);
 
@@ -103,6 +110,8 @@ export function QueryEditor({ query, onChange, onRunQuery }: Props) {
 
   const SourceEditor = sourceDs?.components?.QueryEditor;
   const inner = innerSourceQuery(query);
+  const siblings = siblingMetricQueries(queries as DataQuery[] | undefined, query.refId);
+  const sourceSibling = siblings.find((q) => q.refId === 'A') ?? siblings[0];
 
   return (
     <div>
@@ -226,20 +235,34 @@ export function QueryEditor({ query, onChange, onRunQuery }: Props) {
         label="Source query"
         description="Same datasource and SQL/expr as overlay query A. Time macros (${__from}) do not need to match interpolated panel timestamps. Auto train from/to must stay Auto if the overlay used Auto. Used only for the cacheKey fingerprint; this plugin does not run it."
       >
-        <DataSourcePicker
-          noDefault
-          current={dsRef?.uid}
-          filter={(ds) => ds.type !== FORECAST_DATASOURCE_TYPE}
-          onChange={(ds) => {
-            const innerQ = innerSourceQuery(query);
-            update(
-              withSourceTarget(query, { uid: ds.uid, type: ds.type }, {
-                ...(innerQ as unknown as Record<string, unknown>),
-                refId: innerQ.refId || 'A',
-              })
-            );
-          }}
-        />
+        <>
+          {sourceSibling && (
+            <div style={{ marginBottom: 8 }}>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={() => update(copySourceFromSibling(query, sourceSibling))}
+              >
+                Copy source from query {sourceSibling.refId || 'A'}
+              </Button>
+            </div>
+          )}
+          <DataSourcePicker
+            noDefault
+            current={dsRef?.uid}
+            filter={(ds) => ds.type !== FORECAST_DATASOURCE_TYPE}
+            onChange={(ds) => {
+              const innerQ = innerSourceQuery(query);
+              update(
+                withSourceTarget(query, { uid: ds.uid, type: ds.type }, {
+                  ...(innerQ as unknown as Record<string, unknown>),
+                  refId: innerQ.refId || 'A',
+                })
+              );
+            }}
+          />
+        </>
       </Field>
       {SourceEditor && sourceDs && (
         <SourceEditor

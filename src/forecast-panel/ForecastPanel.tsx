@@ -22,6 +22,7 @@ import {
   trainStepMs,
 } from './lookback';
 import { loadOverlayForecasts } from './overlayLoad';
+import { metricTargets, splitPanelFrames } from './mixed';
 import { REASON_INVALID_RANGE } from './reasons';
 import { queueRetrain, takeRetrain } from './retrain';
 import { queryTrainingFrames } from './trainQuery';
@@ -41,7 +42,9 @@ export const ForecastPanel: React.FC<Props> = ({
   id,
 }) => {
   const theme = useTheme2();
-  const [frames, setFrames] = useState<DataFrame[]>(data.series);
+  const [frames, setFrames] = useState<DataFrame[]>(() =>
+    splitPanelFrames(data.series, data.request?.targets ?? []).history
+  );
   const [error, setError] = useState<string | null>(null);
   const [forecastToMs, setForecastToMs] = useState<number | undefined>();
   const [usedSaved, setUsedSaved] = useState(false);
@@ -58,7 +61,9 @@ export const ForecastPanel: React.FC<Props> = ({
       const nowMs = dashboardNowMs(timeZone);
       const window = resolveForecastWindow(options, nowMs, timeZone);
 
-      const visible = data.series.flatMap((series) => extractSeries(series, data.series));
+      const allTargets = data.request?.targets ?? [];
+      const { history: historyFrames } = splitPanelFrames(data.series, allTargets);
+      const visible = historyFrames.flatMap((series) => extractSeries(series, historyFrames));
       for (const points of visible) {
         history.push(toFrame(points.name, points.times, points.values));
       }
@@ -85,7 +90,7 @@ export const ForecastPanel: React.FC<Props> = ({
       );
       const visibleFromMs = data.request?.range?.from?.valueOf();
       const visibleToMs = data.request?.range?.to?.valueOf();
-      const targets = data.request?.targets?.filter((t) => !t.hide) ?? [];
+      const targets = metricTargets(allTargets);
       const result = await loadOverlayForecasts({
         visible,
         fromMs: window.fromMs,
@@ -168,7 +173,8 @@ export const ForecastPanel: React.FC<Props> = ({
     [frames, fieldConfig, replaceVariables, theme, timeZone]
   );
 
-  if (data.series.length === 0) {
+  const { history: historyFrames } = splitPanelFrames(data.series, data.request?.targets ?? []);
+  if (historyFrames.length === 0 && data.series.length === 0) {
     return <PanelDataErrorView fieldConfig={fieldConfig} panelId={id} data={data} needsTimeField needsNumberField />;
   }
 

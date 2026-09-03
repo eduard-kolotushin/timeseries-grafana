@@ -9,6 +9,7 @@ import {
 import { getDataSourceSrv } from '@grafana/runtime';
 import { from, lastValueFrom } from 'rxjs';
 import { trainMaxDataPoints, trainStepInterval } from './lookback';
+import { metricTargets } from './mixed';
 import { rewriteTrainTargets, TrainRewriteWindow } from './trainRewrite';
 
 export type TrainQueryResult = {
@@ -21,7 +22,7 @@ export async function queryTrainingFrames(
   window: TrainRewriteWindow
 ): Promise<TrainQueryResult> {
   const { fromMs, toMs, intervalMs } = window;
-  const targets = request?.targets?.filter((t) => !t.hide) ?? [];
+  const targets = metricTargets(request?.targets ?? []);
   if (!request || targets.length === 0 || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
     return { frames: null };
   }

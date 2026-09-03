@@ -27,7 +27,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Nested datasource `QueryData` Restores snapshots; alerting uses Grafana `refId`s (metric vs forecast / interval)
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
 - No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots
-- Stay within v1–v8 unless `docs/INTENTIONS.md` is updated first
+- Stay within v1–v9 unless `docs/INTENTIONS.md` is updated first
 
 ## v1 in scope
 
@@ -61,14 +61,18 @@ Mergeable `conf/forecast.ini.template` for CI/CD `grafana.ini` (`[plugin.eduardk
 
 Nested forecast datasource for Grafana alerting queries (`QueryData` Restore + `ForecastRange`). Overlay stays the train/retrain path. Do not ship alert rules.
 
-## v1/v2/v3/v4/v5/v6/v7/v8 out of scope
+## v9 in scope
+
+Mixed metric + Forecast datasource on the overlay: ignore Forecast frames for fit/plot/cacheKey; no draw-mode option; Forecast query editor stays manual (optional Copy source from query A). Grafana Alert tab only on Time series / Graph when that viz opened the editor; use re-open, panel menu New alert rule, or the Alerting page. Do not ship alert rules.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9 out of scope
 
 Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages, baseline publisher process.
 
 ## Workflow
 
 - Table-driven Go tests for the forecast resource and datasource `QueryData`
-- Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, and forecast-query `cacheKey`
+- Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, mixed frames, and forecast-query `cacheKey`
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`

@@ -24,11 +24,13 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Train rewrite is type-keyed in the overlay frontend (Prom / OpenSearch / Postgres / Druid); `pkg/` has no Prom/OS/PG **datasource** clients (pgx snapshot store is allowed)
 - Snapshot DSN: `FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*` / GrafanaCfg, then jsonData; CI merges `conf/forecast.ini.template` (app and datasource plugin sections)
 - Datasource `QueryData` Restores by `cacheKey` and emits forecast / lower / upper; miss is an error (overlay trains). Do not query other datasources from `pkg/`
+- Overlay Mixed: cacheKey and train use metric targets only; Forecast datasource frames are not fitted or plotted
+- Forecast query editor does not auto-fill; Copy source from query A is opt-in for `sourceTargets` only
 - Pre-size Go slices to the request/window length
 
 ## Quality
 
 - Table-driven tests next to the resource handler and `QueryData`
-- Table-driven frontend tests next to train rewrite, extract, cache fingerprint, and forecast-query `cacheKey`
+- Table-driven frontend tests next to train rewrite, extract, cache fingerprint, mixed frames, and forecast-query `cacheKey`
 - No drive-by refactors
 - Keep Grafana scaffold files under `.config/` unless a plugin-tools upgrade requires it

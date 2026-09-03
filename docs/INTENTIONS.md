@@ -88,7 +88,13 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 - Do not execute the source datasource from `pkg/` on alert eval. Live metric comparison stays Grafana query A
 - This plugin does not ship Grafana alert rules or notification channels
 
-## v1/v2/v3/v4/v5/v6/v7/v8 non-goals
+## v9 must-have
+
+- Mixed panel (metric query A + Forecast datasource query B) is a supported overlay scenario. Overlay history, cacheKey, and train rewrite use only metric targets; Forecast datasource frames are not fitted and are not plotted (overlay POST is the overlay forecast). No Overlay/Query/Compare draw mode
+- Forecast query editor stays manual (kind, model, train-range strings, series name, source query). Do not auto-fill from siblings or overlay options. An optional **Copy source from query A** button may copy `sourceTargets` for the fingerprint only
+- Grafana shows the panel **Alert** tab only for Time series and Graph, and only if that visualization was current when the editor data pane was created. Switching from this overlay to Time series in the same edit session does not add the tab. Working paths: Time series panel opened as Time series (or leave edit and re-open after switching); panel menu More → New alert rule; Alerting → New alert rule. Do not ship alert rules
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9 non-goals
 
 Do not add these without first updating this document:
 
@@ -108,5 +114,5 @@ Do not add these without first updating this document:
 - Backend does not mutate caller series (libraries already return new series)
 - Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource and datasource `QueryData`
-- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, and forecast-query `cacheKey`
+- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, and forecast-query `cacheKey`
 - GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack

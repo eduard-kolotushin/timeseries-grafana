@@ -1,5 +1,6 @@
 import { DataQuery } from '@grafana/data';
 import { cacheKey, CacheKeyInput } from '../forecast-panel/cacheKey';
+import { isForecastTarget } from '../forecast-panel/mixed';
 import { ForecastOptions } from '../forecast-panel/types';
 import { defaultForecastQuery, ForecastDataQuery } from './types';
 
@@ -30,6 +31,13 @@ export function cacheKeyInputFromQuery(query: ForecastDataQuery): CacheKeyInput 
 export async function withCacheKey(query: ForecastDataQuery): Promise<ForecastDataQuery> {
   const key = await cacheKey(cacheKeyInputFromQuery(query));
   return { ...query, cacheKey: key };
+}
+
+export function siblingMetricQueries(
+  queries: Array<DataQuery & { hide?: boolean }> | undefined,
+  selfRefId?: string
+): DataQuery[] {
+  return (queries ?? []).filter((q) => q.refId !== selfRefId && !q.hide && !isForecastTarget(q));
 }
 
 export type DataSourceRef = { uid?: string; type?: string };
@@ -67,4 +75,12 @@ export function withSourceTarget(
     ...query,
     sourceTargets: [{ ...inner, datasource: { uid: ds.uid, type: ds.type } }],
   };
+}
+
+/** Copy sibling A's datasource and inner query into sourceTargets. Does not copy model, train range, or series name. */
+export function copySourceFromSibling(query: ForecastDataQuery, sibling: DataQuery): ForecastDataQuery {
+  const ds = sibling.datasource;
+  const uid = typeof ds === 'string' ? ds : ds?.uid;
+  const type = typeof ds === 'string' ? undefined : ds?.type;
+  return withSourceTarget(query, { uid, type }, sibling as unknown as Record<string, unknown>);
 }
