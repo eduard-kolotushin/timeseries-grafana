@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"regexp"
 	"time"
 
@@ -72,25 +73,32 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	if in.CacheKey != "" && !cacheKeyPattern.MatchString(in.CacheKey) {
 		return ForecastResponse{}, errInvalidCacheKey
 	}
+	if err := checkTrainLen(len(in.Times), len(in.Values)); err != nil {
+		return ForecastResponse{}, err
+	}
 	hasTimes := len(in.Times) > 0 || len(in.Values) > 0
 	if in.CacheKey == "" {
-		return runForecast(in)
+		return runLimited(ctx, a.computeLimit(), func() (ForecastResponse, error) {
+			return runForecast(in)
+		})
 	}
 	if hasTimes {
-		fitted, err := fitRequest(in)
-		if err != nil {
-			return ForecastResponse{}, err
-		}
-		if a.store != nil {
-			snap, err := forecast.SnapshotOf(fitted)
+		return runLimited(ctx, a.computeLimit(), func() (ForecastResponse, error) {
+			fitted, err := fitRequest(in)
 			if err != nil {
 				return ForecastResponse{}, err
 			}
-			if err := a.store.Put(ctx, orgID, in.CacheKey, snap); err != nil {
-				return ForecastResponse{}, err
+			if a.store != nil {
+				snap, err := forecast.SnapshotOf(fitted)
+				if err != nil {
+					return ForecastResponse{}, err
+				}
+				if err := a.store.Put(ctx, orgID, in.CacheKey, snap); err != nil {
+					return ForecastResponse{}, err
+				}
 			}
-		}
-		return emitForecast(fitted, in)
+			return emitForecast(fitted, in)
+		})
 	}
 	if in.Retrain || a.store == nil {
 		return ForecastResponse{NeedTrain: true}, nil
@@ -102,16 +110,18 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	if !ok {
 		return ForecastResponse{NeedTrain: true}, nil
 	}
-	fitted, err := forecast.Restore(snap)
-	if err != nil {
-		return ForecastResponse{}, err
-	}
-	out, err := emitForecast(fitted, in)
-	if err != nil {
-		return ForecastResponse{}, err
-	}
-	out.Cached = true
-	return out, nil
+	return runLimited(ctx, a.computeLimit(), func() (ForecastResponse, error) {
+		fitted, err := forecast.Restore(snap)
+		if err != nil {
+			return ForecastResponse{}, err
+		}
+		out, err := emitForecast(fitted, in)
+		if err != nil {
+			return ForecastResponse{}, err
+		}
+		out.Cached = true
+		return out, nil
+	})
 }
 
 func runForecast(in ForecastRequest) (ForecastResponse, error) {
@@ -238,6 +248,14 @@ func parseSeason(s string) forecast.Seasonality {
 
 func httpStatusFor(err error) int {
 	switch {
+	case errors.Is(err, errBusy):
+		return http.StatusTooManyRequests
+	case errors.Is(err, errTrainTooLong), errors.Is(err, errBodyTooLarge):
+		return http.StatusRequestEntityTooLarge
+	case errors.Is(err, context.Canceled):
+		return 499
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusRequestTimeout
 	case errors.Is(err, errUnknownModel),
 		errors.Is(err, errInvalidCacheKey),
 		errors.Is(err, forecast.ErrEmpty),

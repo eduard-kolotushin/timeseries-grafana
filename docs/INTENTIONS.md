@@ -99,7 +99,16 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 - Overlay options **Alerting** with **New alert rule**: navigate to Grafana `/alerting/new` with live panel queries (including Mixed Forecast rows), default reduce + threshold expressions, and `__dashboardUid__` / `__panelId__` annotations so the rule stays linked to this overlay. Dashboard must be saved first. Rows whose datasource `meta.alerting` is off are dropped (Grafana’s “no alerting capable query” reason). Grafana 13 TestData and the nested Forecast datasource are both alerting-capable.
 - This is not Grafana’s data-pane Alert tab (still Time series / Graph only). Do not rename the overlay plugin id. Do not ship alert rules or contact points
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10 non-goals
+## v11 must-have
+
+High load must not crash `gpx_forecast` or Grafana. Prefer a reason (or HTTP 413/429) over unbounded work.
+
+- **Backend (`POST /forecast` and Forecast `QueryData`)**: cap the request body and `len(times)` / `len(values)` at the existing `MAX_TRAIN_POINTS` (100k). Reject oversize with 400/413. Limit concurrent Fit / ForecastRange work (default a small fixed inflight cap, env-overridable). When the cap is full, return 429; do not queue unbounded goroutines. Honor request context cancel. Recover panics in resource and `QueryData` handlers so one bad request cannot kill the plugin process
+- **Overlay frontend**: do not POST a train body longer than that cap. Do not fan-out one POST per series in parallel. Max in-flight overlay loads per panel instance is a panel option (default 1, minimum 1). When the cap is full, drop or cancel a stale refresh. On 413/429/5xx show a reason; no tight retry loop
+- **Grafana process**: training queries stay in Grafana datasource plugins and stay clamped by `maxDataPoints` ≤ 100k. This plugin does not add a second train query per series. Snapshot Restore stays the cheap path; load limits apply there too so an alert-eval burst cannot grow without bound
+- Do not add a job queue, extra `gpx_forecast` replicas, Grafana core changes, SIMD, or a parallel public API
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11 non-goals
 
 Do not add these without first updating this document:
 
@@ -118,6 +127,6 @@ Do not add these without first updating this document:
 
 - Backend does not mutate caller series (libraries already return new series)
 - Invalid model/series/level/forecast range map to HTTP 400
-- Table-driven tests cover golden paths for the resource and datasource `QueryData`
-- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, and overlay New alert rule defaults
+- Table-driven tests cover golden paths for the resource and datasource `QueryData`, plus oversize / busy (413/429) load limits
+- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, overlay New alert rule defaults, and overlay load limits
 - GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack

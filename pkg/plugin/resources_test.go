@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -477,4 +478,123 @@ func TestForecastCache(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("bad key status=%d", status)
 	}
+}
+
+func TestForecastLoadLimits(t *testing.T) {
+	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	call := func(body []byte) int {
+		t.Helper()
+		var r mockCallResourceResponseSender
+		if err := app.CallResource(context.Background(), &backend.CallResourceRequest{
+			Method: http.MethodPost,
+			Path:   "forecast",
+			Body:   body,
+		}, &r); err != nil {
+			t.Fatal(err)
+		}
+		return r.response.Status
+	}
+
+	t.Run("train too long 413", func(t *testing.T) {
+		prev := maxTrainPoints
+		maxTrainPoints = 2
+		t.Cleanup(func() { maxTrainPoints = prev })
+		body, _ := json.Marshal(ForecastRequest{
+			Times:  []int64{0, 1000, 2000},
+			Values: []nullableFloat{1, 2, 3},
+			Model:  "naive",
+			From:   3000,
+			To:     3000,
+		})
+		if status := call(body); status != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status=%d", status)
+		}
+	})
+
+	t.Run("body too large 413", func(t *testing.T) {
+		app.maxBody = 32
+		t.Cleanup(func() { app.maxBody = maxForecastBodyBytes })
+		body := []byte(`{"model":"naive","from":1,"to":2,"times":[0,1],"values":[1,2],"pad":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}`)
+		if status := call(body); status != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status=%d body too small to trip cap? len=%d", status, len(body))
+		}
+	})
+
+	t.Run("busy 429", func(t *testing.T) {
+		app.limit = newWorkLimiter(1)
+		release, err := app.limit.try(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		body, _ := json.Marshal(ForecastRequest{
+			Times:  []int64{0, 1000, 2000, 3000},
+			Values: []nullableFloat{1, 2, 3, 4},
+			Model:  "naive",
+			From:   4000,
+			To:     4000,
+		})
+		if status := call(body); status != http.StatusTooManyRequests {
+			t.Fatalf("status=%d", status)
+		}
+	})
+
+	t.Run("needTrain skip limiter", func(t *testing.T) {
+		store := newMemoryStore()
+		cached, err := newApp(context.Background(), backend.AppInstanceSettings{}, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cached.limit = newWorkLimiter(1)
+		release, err := cached.limit.try(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		body, _ := json.Marshal(ForecastRequest{
+			Model:    "naive",
+			From:     4000,
+			To:       5000,
+			CacheKey: key,
+		})
+		var r mockCallResourceResponseSender
+		if err := cached.CallResource(context.Background(), &backend.CallResourceRequest{
+			PluginContext: backend.PluginContext{OrgID: 1},
+			Method:        http.MethodPost,
+			Path:          "forecast",
+			Body:          body,
+		}, &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.response.Status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.response.Status, r.response.Body)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(r.response.Body), &got); err != nil {
+			t.Fatal(err)
+		}
+		if !got.NeedTrain {
+			t.Fatalf("got=%+v", got)
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := app.dispatchForecast(ctx, 1, ForecastRequest{
+			Times:  []int64{0, 1000, 2000, 3000},
+			Values: []nullableFloat{1, 2, 3, 4},
+			Model:  "naive",
+			From:   4000,
+			To:     4000,
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }

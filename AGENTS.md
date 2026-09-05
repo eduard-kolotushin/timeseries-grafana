@@ -27,7 +27,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Nested datasource `QueryData` Restores snapshots; alerting uses Grafana `refId`s (metric vs forecast / interval)
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
 - No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots
-- Stay within v1–v10 unless `docs/INTENTIONS.md` is updated first
+- Stay within v1–v11 unless `docs/INTENTIONS.md` is updated first
 
 ## v1 in scope
 
@@ -69,14 +69,18 @@ Mixed metric + Forecast datasource on the overlay: ignore Forecast frames for fi
 
 Overlay options New alert rule: Grafana `/alerting/new` with live panel queries (including Mixed Forecast), dashboard/panel annotations, default reduce + threshold. Not Grafana’s data-pane Alert tab. Do not ship alert rules.
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10 out of scope
+## v11 in scope
+
+Bound `POST /forecast` / `QueryData` body and train length, and concurrent Fit / ForecastRange work, so high load returns 413/429 or a panel reason instead of crashing `gpx_forecast` or Grafana. Overlay: max in-flight loads per panel is a panel option (default 1), sequential series POSTs, no tight retry. No job queue or extra plugin replicas.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11 out of scope
 
 Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages, baseline publisher process.
 
 ## Workflow
 
 - Table-driven Go tests for the forecast resource and datasource `QueryData`
-- Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, mixed frames, forecast-query `cacheKey`, and overlay New alert rule defaults
+- Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, mixed frames, forecast-query `cacheKey`, overlay New alert rule defaults, and overlay load limits
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`

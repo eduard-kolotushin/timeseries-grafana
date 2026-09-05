@@ -17,6 +17,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/components/AppConfig/` | Overlay Postgres DSN for the snapshot store |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules |
+| `pkg/plugin/limits.go` | Train-length / body caps and Fit / ForecastRange inflight semaphore |
 | `pkg/plugin/store.go` | SnapshotStore; pgx `forecast.snapshots` |
 | `pkg/plugin/resources.go` | `POST /forecast`, `GET /ping` |
 | `pkg/plugin/datasource.go` | `QueryData`: Restore snapshot, one frame per query `refId` |
@@ -125,6 +126,16 @@ Mixed overlay + Forecast query: the overlay plots POST forecast only. The Foreca
 ## Horizon clock
 
 Same as `timeseries-forecast`: grid `last + k * step` for `k ≥ 1`, clipped to the request `[from, to]`.
+
+## Load
+
+`gpx_forecast` is a separate process from Grafana, but a large train body or many concurrent Fit / `ForecastRange` calls can still OOM the plugin or stall Grafana’s plugin proxy. v11 bounds that:
+
+- Decode `POST /forecast` with a max body (16 MiB); reject `len(times)` / `len(values)` above `MAX_TRAIN_POINTS` (100k) with 413
+- Inflight semaphore around Fit / ForecastRange (overlay) and Restore + ForecastRange (`QueryData`). Default 4, from `FORECAST_MAX_INFLIGHT` / `GF_PLUGIN_*_MAX_INFLIGHT` / GrafanaCfg `max_inflight` / jsonData `maxInflight`. Excess is 429, not an unbounded queue. NeedTrain probes without a snapshot do not take a slot
+- Overlay: `maxInflightLoads` panel option (default 1); series POSTs stay sequential; 413/429/5xx set a reason and stop further series POSTs; no automatic retry
+- Train `maxDataPoints` stays `min(100000, …)` so Grafana datasource queries are not a second unbounded path
+- Resource and `QueryData` handlers recover panics
 
 ## Modules
 

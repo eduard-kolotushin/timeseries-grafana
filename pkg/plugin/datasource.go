@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ type Datasource struct {
 	jsonData []byte
 	secure   map[string]string
 	connect  func(context.Context, string) (SnapshotStore, func())
+	limit    *workLimiter
 }
 
 var (
@@ -50,6 +52,7 @@ func newDatasource(ctx context.Context, settings backend.DataSourceInstanceSetti
 		store:    store,
 		jsonData: settings.JSONData,
 		secure:   settings.DecryptedSecureJSONData,
+		limit:    newWorkLimiter(maxInflightFrom(ctx, settings.JSONData)),
 	}
 	if store == nil {
 		ds.store, ds.close = ds.connectFn()(ctx, storeDSNFrom(ctx, settings.JSONData, settings.DecryptedSecureJSONData))
@@ -113,8 +116,24 @@ type forecastQueryJSON struct {
 	Level    float64 `json:"level"`
 }
 
-func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
-	resp := backend.NewQueryDataResponse()
+func (d *Datasource) computeLimit() *workLimiter {
+	if d != nil && d.limit != nil {
+		return d.limit
+	}
+	return newWorkLimiter(defaultMaxInflight)
+}
+
+func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (resp *backend.QueryDataResponse, err error) {
+	resp = backend.NewQueryDataResponse()
+	defer func() {
+		if rec := recover(); rec != nil {
+			for _, q := range req.Queries {
+				if _, ok := resp.Responses[q.RefID]; !ok {
+					resp.Responses[q.RefID] = backend.ErrDataResponse(backend.StatusInternal, "forecast: panic")
+				}
+			}
+		}
+	}()
 	orgID := req.PluginContext.OrgID
 	store := d.ensureStore(ctx, req.PluginContext)
 	for _, q := range req.Queries {
@@ -123,7 +142,15 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 	return resp, nil
 }
 
-func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID int64, q backend.DataQuery) backend.DataResponse {
+func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID int64, q backend.DataQuery) (out backend.DataResponse) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			out = backend.ErrDataResponse(backend.StatusInternal, "forecast: panic")
+		}
+	}()
+	if len(q.JSON) > maxQueryJSONBytes {
+		return backend.ErrDataResponse(backend.Status(http.StatusRequestEntityTooLarge), errBodyTooLarge.Error())
+	}
 	var in forecastQueryJSON
 	if err := json.Unmarshal(q.JSON, &in); err != nil {
 		return backend.ErrDataResponse(backend.StatusBadRequest, err.Error())
@@ -141,42 +168,44 @@ func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID in
 	if store == nil {
 		return backend.ErrDataResponseWithSource(backend.StatusBadRequest, backend.ErrorSourcePlugin, msgStoreOff)
 	}
-	snap, ok, err := store.Get(ctx, orgID, in.CacheKey)
-	if err != nil {
-		return backend.ErrDataResponse(backend.StatusInternal, err.Error())
-	}
-	if !ok {
-		return backend.ErrDataResponseWithSource(backend.StatusBadRequest, backend.ErrorSourcePlugin, msgNeedTrain)
-	}
-	fitted, err := forecast.Restore(snap)
-	if err != nil {
-		return backend.ErrDataResponse(backend.StatusBadRequest, err.Error())
-	}
 	level := in.Level
 	if kind != queryKindForecast && level == 0 {
 		level = 0.95
 	}
-	out, err := emitForecast(fitted, ForecastRequest{
-		From:  q.TimeRange.From.UTC().UnixMilli(),
-		To:    q.TimeRange.To.UTC().UnixMilli(),
-		Level: level,
+	resp, err := runLimited(ctx, d.computeLimit(), func() (backend.DataResponse, error) {
+		snap, ok, err := store.Get(ctx, orgID, in.CacheKey)
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusInternal, err.Error()), nil
+		}
+		if !ok {
+			return backend.ErrDataResponseWithSource(backend.StatusBadRequest, backend.ErrorSourcePlugin, msgNeedTrain), nil
+		}
+		fitted, err := forecast.Restore(snap)
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusBadRequest, err.Error()), nil
+		}
+		out, err := emitForecast(fitted, ForecastRequest{
+			From:  q.TimeRange.From.UTC().UnixMilli(),
+			To:    q.TimeRange.To.UTC().UnixMilli(),
+			Level: level,
+		})
+		if err != nil {
+			return backend.ErrDataResponse(dataStatusFor(err), err.Error()), nil
+		}
+		values, err := seriesForKind(out, kind)
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusBadRequest, err.Error()), nil
+		}
+		frame, err := frameFromSeries(q.RefID, out.Times, values)
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusInternal, err.Error()), nil
+		}
+		return backend.DataResponse{Frames: data.Frames{frame}}, nil
 	})
 	if err != nil {
-		st := backend.StatusInternal
-		if httpStatusFor(err) == 400 {
-			st = backend.StatusBadRequest
-		}
-		return backend.ErrDataResponse(st, err.Error())
+		return backend.ErrDataResponse(dataStatusFor(err), err.Error())
 	}
-	values, err := seriesForKind(out, kind)
-	if err != nil {
-		return backend.ErrDataResponse(backend.StatusBadRequest, err.Error())
-	}
-	frame, err := frameFromSeries(q.RefID, out.Times, values)
-	if err != nil {
-		return backend.ErrDataResponse(backend.StatusInternal, err.Error())
-	}
-	return backend.DataResponse{Frames: data.Frames{frame}}
+	return resp
 }
 
 func seriesForKind(out ForecastResponse, kind string) ([]nullableFloat, error) {

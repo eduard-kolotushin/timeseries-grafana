@@ -1,10 +1,14 @@
 import { DataFrame } from '@grafana/data';
 import { extractSeries, SeriesPoints, trainingForFit } from './extract';
+import { MAX_TRAIN_POINTS } from './lookback';
 import {
   REASON_ALL_NAN,
   REASON_EMPTY_WINDOW,
   REASON_TRAIN_EMPTY,
+  REASON_TRAIN_TOO_LONG,
   hasDrawableValues,
+  httpStatusFromUnknown,
+  isAbortError,
   reasonFromUnknown,
 } from './reasons';
 import { TrainQueryResult } from './trainQuery';
@@ -30,6 +34,7 @@ export type OverlayLoadArgs = {
   cacheKeyFor: (seriesName: string) => Promise<string>;
   queryTrain: () => Promise<TrainQueryResult>;
   post: (body: OverlayPostBody) => Promise<ForecastResponse>;
+  signal?: AbortSignal;
 };
 
 export type OverlayLoadResult = {
@@ -47,6 +52,7 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
   if (!args.retrain) {
     for (const points of args.visible) {
       try {
+        throwIfAborted(args.signal);
         const key = await args.cacheKeyFor(points.name);
         const resp = await args.post({
           ...args.fitBody,
@@ -66,7 +72,13 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
           overlayError = overlayError ?? drawn.reason;
         }
       } catch (e) {
+        if (isAbortError(e)) {
+          return { forecasts, error: overlayError, usedSaved };
+        }
         overlayError = overlayError ?? reasonFromUnknown(e);
+        if (isLoadLimitStatus(httpStatusFromUnknown(e))) {
+          return { forecasts, error: overlayError, usedSaved };
+        }
       }
     }
   } else {
@@ -79,8 +91,12 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
 
   let train: TrainQueryResult;
   try {
+    throwIfAborted(args.signal);
     train = await args.queryTrain();
   } catch (e) {
+    if (isAbortError(e)) {
+      return { forecasts, error: overlayError, usedSaved };
+    }
     return { forecasts, error: overlayError ?? reasonFromUnknown(e), usedSaved };
   }
   if (train.reason && !train.frames?.length) {
@@ -96,7 +112,12 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
     if (!fit) {
       continue;
     }
+    if (fit.times.length > MAX_TRAIN_POINTS || fit.values.length > MAX_TRAIN_POINTS) {
+      overlayError = overlayError ?? REASON_TRAIN_TOO_LONG;
+      continue;
+    }
     try {
+      throwIfAborted(args.signal);
       const key = await args.cacheKeyFor(points.name);
       const resp = await args.post({
         ...args.fitBody,
@@ -112,10 +133,32 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
         overlayError = overlayError ?? drawn.reason;
       }
     } catch (e) {
+      if (isAbortError(e)) {
+        return { forecasts, error: overlayError, usedSaved };
+      }
       overlayError = overlayError ?? reasonFromUnknown(e);
+      if (isLoadLimitStatus(httpStatusFromUnknown(e))) {
+        return { forecasts, error: overlayError, usedSaved };
+      }
     }
   }
   return { forecasts, error: overlayError, usedSaved };
+}
+
+function isLoadLimitStatus(status: number | undefined): boolean {
+  return status === 413 || status === 429 || (status != null && status >= 500);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  if (signal.reason instanceof Error) {
+    throw signal.reason;
+  }
+  const err = new Error('Aborted');
+  err.name = 'AbortError';
+  throw err;
 }
 
 function pushForecast(

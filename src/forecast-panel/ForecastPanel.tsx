@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   applyFieldOverrides,
   DataFrame,
@@ -21,6 +21,7 @@ import {
   resolveTrainWindow,
   trainStepMs,
 } from './lookback';
+import { OverlayLoadGate } from './overlayInflight';
 import { loadOverlayForecasts } from './overlayLoad';
 import { metricTargets, splitPanelFrames } from './mixed';
 import { REASON_INVALID_RANGE } from './reasons';
@@ -49,11 +50,15 @@ export const ForecastPanel: React.FC<Props> = ({
   const [forecastToMs, setForecastToMs] = useState<number | undefined>();
   const [usedSaved, setUsedSaved] = useState(false);
   const [retrainNonce, setRetrainNonce] = useState(0);
+  const loadGate = useRef(new OverlayLoadGate());
+
+  useEffect(() => () => loadGate.current.abortAll(), []);
 
   useEffect(() => {
     let cancelled = false;
     let finished = false;
     let retrain = false;
+    const ac = loadGate.current.start(options.maxInflightLoads);
 
     async function load() {
       setError(null);
@@ -114,9 +119,15 @@ export const ForecastPanel: React.FC<Props> = ({
             visibleToMs,
             intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
           }),
-        post: (body) => getBackendSrv().post<ForecastResponse>(FORECAST_RESOURCE, body),
+        signal: ac.signal,
+        post: async (body) => {
+          if (ac.signal.aborted) {
+            throw new DOMException('Aborted', 'AbortError');
+          }
+          return getBackendSrv().post<ForecastResponse>(FORECAST_RESOURCE, body);
+        },
       });
-      if (cancelled) {
+      if (cancelled || ac.signal.aborted) {
         return;
       }
       finished = true;
@@ -130,7 +141,7 @@ export const ForecastPanel: React.FC<Props> = ({
       ]);
     }
 
-    load();
+    load().finally(() => loadGate.current.finish(ac));
     return () => {
       cancelled = true;
       if (retrain && !finished) {
@@ -158,6 +169,7 @@ export const ForecastPanel: React.FC<Props> = ({
     options.trainRange?.to,
     options.forecastRange?.from,
     options.forecastRange?.to,
+    options.maxInflightLoads,
     theme.colors.warning.main,
   ]);
 

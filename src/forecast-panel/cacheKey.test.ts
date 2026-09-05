@@ -171,6 +171,17 @@ describe('fingerprintPayload', () => {
 });
 
 describe('cacheKey', () => {
+  it('does not change when only maxInflightLoads changes', () => {
+    const input = {
+      targets: [{ refId: 'A', datasource: { uid: 'prom' }, expr: 'up' }],
+      options: baseOptions,
+      seriesName: 'up',
+    };
+    expect(fingerprintPayload({ ...input, options: { ...baseOptions, maxInflightLoads: 4 } })).toEqual(
+      fingerprintPayload(input)
+    );
+  });
+
   it('returns 64 hex chars', async () => {
     const key = await cacheKey({
       targets: [{ refId: 'A', datasource: { uid: 'prom' }, expr: 'up' }],

@@ -107,6 +107,13 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       editor: TrainRangeEditor,
       settings: { kind: 'train' },
     })
+    .addNumberInput({
+      path: 'maxInflightLoads',
+      name: 'Max in-flight loads',
+      description: 'How many overlay forecast loads this panel may run at once. Extra refreshes cancel the oldest. Minimum 1.',
+      defaultValue: 1,
+      settings: { min: 1, integer: true },
+    })
     .addCustomEditor({
       id: 'retrain',
       path: 'trainRange',

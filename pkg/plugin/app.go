@@ -18,8 +18,10 @@ var (
 // App is the Grafana app backend: overlay /forecast.
 type App struct {
 	backend.CallResourceHandler
-	store SnapshotStore
-	close func()
+	store   SnapshotStore
+	close   func()
+	limit   *workLimiter
+	maxBody int64
 }
 
 // NewApp creates a new *App instance.
@@ -28,7 +30,11 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 }
 
 func newApp(ctx context.Context, settings backend.AppInstanceSettings, store SnapshotStore) (*App, error) {
-	app := &App{store: store}
+	app := &App{
+		store:   store,
+		limit:   newWorkLimiter(maxInflightFrom(ctx, settings.JSONData)),
+		maxBody: maxForecastBodyBytes,
+	}
 	if store == nil {
 		app.store, app.close = connectStore(ctx, storeDSN(ctx, settings))
 	}
@@ -43,6 +49,20 @@ func (a *App) Dispose() {
 	if a.close != nil {
 		a.close()
 	}
+}
+
+func (a *App) computeLimit() *workLimiter {
+	if a != nil && a.limit != nil {
+		return a.limit
+	}
+	return newWorkLimiter(defaultMaxInflight)
+}
+
+func (a *App) bodyLimit() int64 {
+	if a != nil && a.maxBody > 0 {
+		return a.maxBody
+	}
+	return maxForecastBodyBytes
 }
 
 // CheckHealth handles health checks sent from Grafana to the plugin.

@@ -232,6 +232,64 @@ func TestQueryData(t *testing.T) {
 		assertFrameValues(t, resp.Responses["C"], want.Lower)
 		assertFrameValues(t, resp.Responses["D"], want.Upper)
 	})
+
+	t.Run("busy is 429", func(t *testing.T) {
+		store := newMemoryStore()
+		seedSnapshot(t, store, orgID, key, fit)
+		ds, err := newDatasource(ctx, backend.DataSourceInstanceSettings{}, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ds.limit = newWorkLimiter(1)
+		release, err := ds.limit.try(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		resp, err := ds.QueryData(ctx, &backend.QueryDataRequest{
+			PluginContext: backend.PluginContext{OrgID: orgID},
+			Queries: []backend.DataQuery{{
+				RefID:     "B",
+				JSON:      queryJSON(t, "forecast", key, 0),
+				TimeRange: backend.TimeRange{From: from, To: to},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := resp.Responses["B"]
+		if got.Error == nil || !strings.Contains(got.Error.Error(), "busy") {
+			t.Fatalf("error=%v", got.Error)
+		}
+		if got.Status != backend.StatusTooManyRequests {
+			t.Fatalf("status=%v", got.Status)
+		}
+	})
+
+	t.Run("oversize query JSON", func(t *testing.T) {
+		prev := maxQueryJSONBytes
+		maxQueryJSONBytes = 8
+		t.Cleanup(func() { maxQueryJSONBytes = prev })
+		ds, err := newDatasource(ctx, backend.DataSourceInstanceSettings{}, newMemoryStore())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := ds.QueryData(ctx, &backend.QueryDataRequest{
+			PluginContext: backend.PluginContext{OrgID: orgID},
+			Queries: []backend.DataQuery{{
+				RefID:     "B",
+				JSON:      queryJSON(t, "forecast", key, 0),
+				TimeRange: backend.TimeRange{From: from, To: to},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := resp.Responses["B"]
+		if got.Error == nil || !strings.Contains(got.Error.Error(), "too large") {
+			t.Fatalf("error=%v", got.Error)
+		}
+	})
 }
 
 func assertFrameValues(t *testing.T, dr backend.DataResponse, want []nullableFloat) {

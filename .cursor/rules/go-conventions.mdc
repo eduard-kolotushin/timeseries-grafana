@@ -27,11 +27,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Overlay Mixed: cacheKey and train use metric targets only; Forecast datasource frames are not fitted or plotted
 - Forecast query editor does not auto-fill; Copy source from query A is opt-in for `sourceTargets` only
 - Overlay options New alert rule navigates to Grafana `/alerting/new` with live panel queries and dashboard/panel annotations; do not ship rules
+- Cap `POST /forecast` / `QueryData` body and train length (`MAX_TRAIN_POINTS`); bound concurrent Fit / ForecastRange; 413/429 instead of unbounded queues. Overlay: max in-flight loads is a panel option (default 1); sequential series POSTs; no tight retry
 - Pre-size Go slices to the request/window length
 
 ## Quality
 
-- Table-driven tests next to the resource handler and `QueryData`
-- Table-driven frontend tests next to train rewrite, extract, cache fingerprint, mixed frames, forecast-query `cacheKey`, and overlay New alert rule defaults
+- Table-driven tests next to the resource handler and `QueryData` (including oversize / busy load limits)
+- Table-driven frontend tests next to train rewrite, extract, cache fingerprint, mixed frames, forecast-query `cacheKey`, overlay New alert rule defaults, and overlay load limits
 - No drive-by refactors
 - Keep Grafana scaffold files under `.config/` unless a plugin-tools upgrade requires it

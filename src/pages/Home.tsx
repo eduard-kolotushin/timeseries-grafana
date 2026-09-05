@@ -24,6 +24,11 @@ function Home() {
           panel queries (including Mixed Forecast rows). Grafana still shows the data-pane Alert tab only for Time series
           and Graph. Panel menu More → New alert rule and Alerting → New alert rule remain.
         </p>
+        <p>
+          High load is bounded: the backend rejects oversize train bodies and returns 429 when too many Fit /
+          ForecastRange calls are already running. The overlay posts one series at a time and limits in-flight loads
+          (panel option, default 1).
+        </p>
         <p>The Docker Grafana sandbox (TestData demo dashboard) is the sibling repo timeseries-grafana-sandbox.</p>
       </div>
     </PluginPage>

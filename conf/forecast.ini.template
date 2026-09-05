@@ -18,6 +18,8 @@ store_database = ${FORECAST_STORE_DATABASE}
 store_user = ${FORECAST_STORE_USER}
 store_ssl_mode = ${FORECAST_STORE_SSLMODE}
 store_password = ${FORECAST_STORE_PASSWORD}
+; Concurrent Fit / ForecastRange slots in this process (default 4).
+max_inflight = ${FORECAST_MAX_INFLIGHT}
 
 [plugin.eduardkolotushin-forecast-datasource]
 ; Same keys as the app. Alerting QueryData does not receive app jsonData.
@@ -28,3 +30,5 @@ store_database = ${FORECAST_STORE_DATABASE}
 store_user = ${FORECAST_STORE_USER}
 store_ssl_mode = ${FORECAST_STORE_SSLMODE}
 store_password = ${FORECAST_STORE_PASSWORD}
+; Concurrent Restore / ForecastRange slots in this process (default 4).
+max_inflight = ${FORECAST_MAX_INFLIGHT}
