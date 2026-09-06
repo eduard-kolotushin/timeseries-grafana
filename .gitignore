@@ -46,6 +46,3 @@ ci/
 .idea
 
 .eslintcache
-
-# Local architecture diagrams (not published)
-/diagrams/
