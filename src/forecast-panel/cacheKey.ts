@@ -1,4 +1,5 @@
 import { isoUtc, rfc3339Utc } from './lookback';
+import { sha256Hex } from './sha256';
 import { ForecastOptions } from './types';
 
 const DROP_KEYS = new Set(['interval', 'intervalMs', 'maxDataPoints', 'key', 'hide', 'exemplar', 'refId']);
@@ -35,9 +36,7 @@ export function fingerprintPayload(input: CacheKeyInput): unknown {
 }
 
 export async function cacheKey(input: CacheKeyInput): Promise<string> {
-  const json = JSON.stringify(fingerprintPayload(input));
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(json));
-  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return sha256Hex(JSON.stringify(fingerprintPayload(input)));
 }
 
 function datasourceUids(targets: unknown[]): string[] {

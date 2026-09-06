@@ -7,10 +7,11 @@ import {
   MutableDataFrame,
   PanelProps,
 } from '@grafana/data';
-import { getBackendSrv, PanelDataErrorView } from '@grafana/runtime';
+import { PanelDataErrorView } from '@grafana/runtime';
 import { LegendDisplayMode, TooltipDisplayMode } from '@grafana/schema';
-import { Alert, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
+import { Alert, Button, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
 import { FORECAST_RESOURCE } from '../constants';
+import { postResource } from './abortable';
 import { cacheKey, fitOptions } from './cacheKey';
 import { extractSeries } from './extract';
 import {
@@ -43,9 +44,13 @@ export const ForecastPanel: React.FC<Props> = ({
   id,
 }) => {
   const theme = useTheme2();
-  const [frames, setFrames] = useState<DataFrame[]>(() =>
-    splitPanelFrames(data.series, data.request?.targets ?? []).history
+  const allTargets = data.request?.targets;
+  // Metric frames only; Mixed Forecast datasource frames are neither fitted nor plotted.
+  const historyFrames = useMemo(
+    () => splitPanelFrames(data.series, allTargets ?? []).history,
+    [data.series, allTargets]
   );
+  const [frames, setFrames] = useState<DataFrame[]>(historyFrames);
   const [error, setError] = useState<string | null>(null);
   const [forecastToMs, setForecastToMs] = useState<number | undefined>();
   const [usedSaved, setUsedSaved] = useState(false);
@@ -66,8 +71,6 @@ export const ForecastPanel: React.FC<Props> = ({
       const nowMs = dashboardNowMs(timeZone);
       const window = resolveForecastWindow(options, nowMs, timeZone);
 
-      const allTargets = data.request?.targets ?? [];
-      const { history: historyFrames } = splitPanelFrames(data.series, allTargets);
       const visible = historyFrames.flatMap((series) => extractSeries(series, historyFrames));
       for (const points of visible) {
         history.push(toFrame(points.name, points.times, points.values));
@@ -95,7 +98,7 @@ export const ForecastPanel: React.FC<Props> = ({
       );
       const visibleFromMs = data.request?.range?.from?.valueOf();
       const visibleToMs = data.request?.range?.to?.valueOf();
-      const targets = metricTargets(allTargets);
+      const targets = metricTargets(allTargets ?? []);
       const result = await loadOverlayForecasts({
         visible,
         fromMs: window.fromMs,
@@ -112,20 +115,19 @@ export const ForecastPanel: React.FC<Props> = ({
             seriesName,
           }),
         queryTrain: () =>
-          queryTrainingFrames(data.request, {
-            fromMs: trainFromMs,
-            toMs: trainToMs,
-            visibleFromMs,
-            visibleToMs,
-            intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
-          }),
+          queryTrainingFrames(
+            data.request,
+            {
+              fromMs: trainFromMs,
+              toMs: trainToMs,
+              visibleFromMs,
+              visibleToMs,
+              intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
+            },
+            ac.signal
+          ),
         signal: ac.signal,
-        post: async (body) => {
-          if (ac.signal.aborted) {
-            throw new DOMException('Aborted', 'AbortError');
-          }
-          return getBackendSrv().post<ForecastResponse>(FORECAST_RESOURCE, body);
-        },
+        post: (body) => postResource<ForecastResponse>(FORECAST_RESOURCE, body, ac.signal),
       });
       if (cancelled || ac.signal.aborted) {
         return;
@@ -148,30 +150,8 @@ export const ForecastPanel: React.FC<Props> = ({
         queueRetrain(id);
       }
     };
-  }, [
-    id,
-    retrainNonce,
-    data.series,
-    data.request,
-    timeRange.to,
-    timeZone,
-    options,
-    options.model,
-    options.alpha,
-    options.beta,
-    options.period,
-    options.season,
-    options.calendar,
-    options.showInterval,
-    options.interval,
-    options.lookback,
-    options.trainRange?.from,
-    options.trainRange?.to,
-    options.forecastRange?.from,
-    options.forecastRange?.to,
-    options.maxInflightLoads,
-    theme.colors.warning.main,
-  ]);
+    // `options` is a new object whenever any panel option changes, so it covers every field the load reads.
+  }, [id, retrainNonce, data.request, historyFrames, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main]);
 
   const plotFrames = useMemo(
     () =>
@@ -185,7 +165,6 @@ export const ForecastPanel: React.FC<Props> = ({
     [frames, fieldConfig, replaceVariables, theme, timeZone]
   );
 
-  const { history: historyFrames } = splitPanelFrames(data.series, data.request?.targets ?? []);
   if (historyFrames.length === 0 && data.series.length === 0) {
     return <PanelDataErrorView fieldConfig={fieldConfig} panelId={id} data={data} needsTimeField needsNumberField />;
   }
@@ -221,16 +200,18 @@ export const ForecastPanel: React.FC<Props> = ({
         {usedSaved && !error && (
           <span style={{ fontSize: 12, opacity: 0.8 }}>Using saved model</span>
         )}
-        <button
+        <Button
+          size="sm"
+          variant="secondary"
+          fill="outline"
           type="button"
           onClick={() => {
             queueRetrain(id);
             setRetrainNonce((n) => n + 1);
           }}
-          style={{ fontSize: 12 }}
         >
           Retrain
-        </button>
+        </Button>
       </div>
       {error && (
         <Alert title="Forecast failed" severity="error">

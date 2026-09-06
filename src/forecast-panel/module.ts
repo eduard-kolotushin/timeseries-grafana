@@ -114,21 +114,21 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       defaultValue: 1,
       settings: { min: 1, integer: true },
     })
+    // Button-only editors. They never call onChange; each has its own unused
+    // path so a future onChange cannot clobber a real option like trainRange.
     .addCustomEditor({
       id: 'retrain',
-      path: 'trainRange',
+      path: 'retrainAction',
       name: 'Saved model',
       description: 'Reuse the fitted snapshot until Retrain or a query, model, or training-period change. Auto train windows do not re-query as time moves.',
-      defaultValue: { from: '', to: '' },
       editor: RetrainEditor,
     })
     .addCustomEditor({
       id: 'alertFromPanel',
-      path: 'trainRange',
+      path: 'alertAction',
       name: 'New alert rule',
       description: 'Open Grafana alerting with this panel’s live queries (including Mixed Forecast rows). Save the dashboard first. Existing rules stay on the Alerting page.',
       category: ['Alerting'],
-      defaultValue: { from: '', to: '' },
       editor: AlertEditor,
     });
 });

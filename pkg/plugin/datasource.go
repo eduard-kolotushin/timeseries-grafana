@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eduard-kolotushin/timeseries"
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
@@ -116,11 +117,16 @@ type forecastQueryJSON struct {
 	Level    float64 `json:"level"`
 }
 
+// computeLimit returns the per-instance limiter, creating the default one once
+// for instances built without newDatasource (tests). It never hands out a
+// fresh, unshared limiter per call, which would silently disable the bound.
 func (d *Datasource) computeLimit() *workLimiter {
-	if d != nil && d.limit != nil {
-		return d.limit
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.limit == nil {
+		d.limit = newWorkLimiter(defaultMaxInflight)
 	}
-	return newWorkLimiter(defaultMaxInflight)
+	return d.limit
 }
 
 func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (resp *backend.QueryDataResponse, err error) {
@@ -172,35 +178,27 @@ func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID in
 	if kind != queryKindForecast && level == 0 {
 		level = 0.95
 	}
+	// Store I/O stays outside the inflight limiter so a slow Postgres does not
+	// hold compute slots; the limiter bounds Restore + ForecastRange only.
+	snap, ok, err := store.Get(ctx, orgID, in.CacheKey)
+	if err != nil {
+		return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+	}
+	if !ok {
+		return backend.ErrDataResponseWithSource(backend.StatusBadRequest, backend.ErrorSourcePlugin, msgNeedTrain)
+	}
+	from := q.TimeRange.From.UTC()
+	to := q.TimeRange.To.UTC()
 	resp, err := runLimited(ctx, d.computeLimit(), func() (backend.DataResponse, error) {
-		snap, ok, err := store.Get(ctx, orgID, in.CacheKey)
-		if err != nil {
-			return backend.ErrDataResponse(backend.StatusInternal, err.Error()), nil
-		}
-		if !ok {
-			return backend.ErrDataResponseWithSource(backend.StatusBadRequest, backend.ErrorSourcePlugin, msgNeedTrain), nil
-		}
 		fitted, err := forecast.Restore(snap)
 		if err != nil {
 			return backend.ErrDataResponse(backend.StatusBadRequest, err.Error()), nil
 		}
-		out, err := emitForecast(fitted, ForecastRequest{
-			From:  q.TimeRange.From.UTC().UnixMilli(),
-			To:    q.TimeRange.To.UTC().UnixMilli(),
-			Level: level,
-		})
+		series, err := seriesForKind(fitted, kind, from, to, level)
 		if err != nil {
 			return backend.ErrDataResponse(dataStatusFor(err), err.Error()), nil
 		}
-		values, err := seriesForKind(out, kind)
-		if err != nil {
-			return backend.ErrDataResponse(backend.StatusBadRequest, err.Error()), nil
-		}
-		frame, err := frameFromSeries(q.RefID, out.Times, values)
-		if err != nil {
-			return backend.ErrDataResponse(backend.StatusInternal, err.Error()), nil
-		}
-		return backend.DataResponse{Frames: data.Frames{frame}}, nil
+		return backend.DataResponse{Frames: data.Frames{frameFromSeries(q.RefID, series)}}, nil
 	})
 	if err != nil {
 		return backend.ErrDataResponse(dataStatusFor(err), err.Error())
@@ -208,44 +206,43 @@ func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID in
 	return resp
 }
 
-func seriesForKind(out ForecastResponse, kind string) ([]nullableFloat, error) {
+// seriesForKind runs only the range call the kind needs: ForecastRange for the
+// point forecast, ForecastIntervalRange for a bound.
+func seriesForKind(fitted forecast.Fitted, kind string, from, to time.Time, level float64) (timeseries.Series[float64], error) {
 	switch kind {
 	case queryKindForecast:
-		return out.Values, nil
-	case queryKindLower:
-		if len(out.Lower) == 0 {
-			return nil, fmt.Errorf("forecast: no lower series")
+		return fitted.ForecastRange(from, to)
+	case queryKindLower, queryKindUpper:
+		lower, upper, err := fitted.ForecastIntervalRange(from, to, level)
+		if err != nil {
+			return timeseries.Series[float64]{}, err
 		}
-		return out.Lower, nil
-	case queryKindUpper:
-		if len(out.Upper) == 0 {
-			return nil, fmt.Errorf("forecast: no upper series")
+		if kind == queryKindLower {
+			return lower, nil
 		}
-		return out.Upper, nil
+		return upper, nil
 	default:
-		return nil, fmt.Errorf("%w: %s", errUnknownKind, kind)
+		return timeseries.Series[float64]{}, fmt.Errorf("%w: %s", errUnknownKind, kind)
 	}
 }
 
-func frameFromSeries(refID string, times []int64, values []nullableFloat) (*data.Frame, error) {
-	if len(times) != len(values) {
-		return nil, fmt.Errorf("forecast: times and values length mismatch")
-	}
-	ts := make([]time.Time, len(times))
-	vs := make([]*float64, len(values))
-	for i := range times {
-		ts[i] = time.UnixMilli(times[i]).UTC()
-		v := float64(values[i])
-		if math.IsNaN(v) {
+func frameFromSeries(refID string, s timeseries.Series[float64]) *data.Frame {
+	ts := s.Times()
+	src := s.Values()
+	times := make([]time.Time, len(ts))
+	vs := make([]*float64, len(src))
+	for i := range ts {
+		times[i] = ts[i].UTC()
+		if math.IsNaN(src[i]) {
 			continue
 		}
-		x := v
+		x := src[i]
 		vs[i] = &x
 	}
 	frame := data.NewFrame(refID,
-		data.NewField("Time", nil, ts),
+		data.NewField("Time", nil, times),
 		data.NewField("Value", nil, vs),
 	)
 	frame.Meta = &data.FrameMeta{Type: data.FrameTypeTimeSeriesWide}
-	return frame, nil
+	return frame
 }

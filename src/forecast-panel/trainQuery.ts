@@ -7,7 +7,8 @@ import {
   TimeRange,
 } from '@grafana/data';
 import { getDataSourceSrv } from '@grafana/runtime';
-import { from, lastValueFrom } from 'rxjs';
+import { from } from 'rxjs';
+import { abortableLastValue, abortError } from './abortable';
 import { trainMaxDataPoints, trainStepInterval } from './lookback';
 import { metricTargets } from './mixed';
 import { rewriteTrainTargets, TrainRewriteWindow } from './trainRewrite';
@@ -17,9 +18,14 @@ export type TrainQueryResult = {
   reason?: string;
 };
 
+/**
+ * Run the panel's metric targets once over the training window. When `signal`
+ * aborts, the in-flight datasource request is cancelled (not just ignored).
+ */
 export async function queryTrainingFrames(
   request: DataQueryRequest | undefined,
-  window: TrainRewriteWindow
+  window: TrainRewriteWindow,
+  signal?: AbortSignal
 ): Promise<TrainQueryResult> {
   const { fromMs, toMs, intervalMs } = window;
   const targets = metricTargets(request?.targets ?? []);
@@ -64,6 +70,9 @@ export async function queryTrainingFrames(
   const frames: DataFrame[] = [];
   let skipReason: string | undefined;
   for (const group of groups.values()) {
+    if (signal?.aborted) {
+      throw abortError();
+    }
     const ds = await getDataSourceSrv().get(group[0].datasource, scopedVars);
     const rewritten = rewriteTrainTargets(ds.type || refType(group[0].datasource), group, rewriteWindow);
     if (rewritten.reason && rewritten.targets.length === 0) {
@@ -73,7 +82,7 @@ export async function queryTrainingFrames(
     if (rewritten.targets.length === 0) {
       continue;
     }
-    const resp = (await lastValueFrom(
+    const resp = (await abortableLastValue(
       from(
         ds.query({
           ...request,
@@ -87,7 +96,8 @@ export async function queryTrainingFrames(
           scopedVars,
           requestId: `${request.requestId ?? 'forecast'}-train`,
         })
-      )
+      ),
+      signal
     )) as DataQueryResponse;
     if (resp?.data?.length) {
       frames.push(...resp.data);

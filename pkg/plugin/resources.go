@@ -41,10 +41,6 @@ func (a *App) handleForecast(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := checkTrainLen(len(body.Times), len(body.Values)); err != nil {
-		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
-		return
-	}
 	orgID := backend.PluginConfigFromContext(req.Context()).OrgID
 	out, err := a.dispatchForecast(req.Context(), orgID, body)
 	if err != nil {

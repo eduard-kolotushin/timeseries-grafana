@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -26,8 +28,18 @@ CREATE TABLE IF NOT EXISTS forecast.snapshots (
 );
 `
 
+// ensureRetryAfter throttles reconnect attempts while Postgres is unreachable so
+// a burst of overlay loads does not turn into a burst of failed dials.
+const ensureRetryAfter = 5 * time.Second
+
 type postgresStore struct {
 	pool *pgxpool.Pool
+
+	mu          sync.Mutex
+	ready       bool
+	lastErr     error
+	lastAttempt time.Time
+	now         func() time.Time
 }
 
 func (s *postgresStore) Close() {
@@ -36,7 +48,41 @@ func (s *postgresStore) Close() {
 	}
 }
 
+// ensure pings Postgres and creates the schema on first successful use. It is
+// retried on later calls (after ensureRetryAfter) instead of failing the store
+// permanently when the database is unavailable at plugin start.
+func (s *postgresStore) ensure(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ready {
+		return nil
+	}
+	now := s.now()
+	if s.lastErr != nil && now.Sub(s.lastAttempt) < ensureRetryAfter {
+		return s.lastErr
+	}
+	s.lastAttempt = now
+	if err := s.pool.Ping(ctx); err != nil {
+		s.lastErr = fmt.Errorf("forecast store: %w", err)
+		return s.lastErr
+	}
+	if _, err := s.pool.Exec(ctx, ensureSQL); err != nil {
+		// A locked-down runtime user may lack CREATE. Accept that when the
+		// table is already provisioned.
+		if _, probe := s.pool.Exec(ctx, `SELECT 1 FROM forecast.snapshots LIMIT 1`); probe != nil {
+			s.lastErr = fmt.Errorf("forecast store: %w", err)
+			return s.lastErr
+		}
+	}
+	s.ready = true
+	s.lastErr = nil
+	return nil
+}
+
 func (s *postgresStore) Get(ctx context.Context, orgID int64, key string) (forecast.Snapshot, bool, error) {
+	if err := s.ensure(ctx); err != nil {
+		return forecast.Snapshot{}, false, err
+	}
 	var raw []byte
 	err := s.pool.QueryRow(ctx, `SELECT snapshot FROM forecast.snapshots WHERE org_id = $1 AND cache_key = $2`, orgID, key).Scan(&raw)
 	if err == pgx.ErrNoRows {
@@ -53,6 +99,9 @@ func (s *postgresStore) Get(ctx context.Context, orgID int64, key string) (forec
 }
 
 func (s *postgresStore) Put(ctx context.Context, orgID int64, key string, snap forecast.Snapshot) error {
+	if err := s.ensure(ctx); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		return err
@@ -65,20 +114,16 @@ ON CONFLICT (org_id, cache_key) DO UPDATE SET snapshot = EXCLUDED.snapshot, upda
 	return err
 }
 
+// openPostgresStore parses the DSN and builds the pool. pgxpool connects
+// lazily; the first Get/Put pings and provisions the schema (see ensure), so a
+// database that is down at plugin start does not disable the store for the
+// life of the process.
 func openPostgresStore(ctx context.Context, dsn string) (*postgresStore, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, err
-	}
-	if _, err := pool.Exec(ctx, ensureSQL); err != nil {
-		pool.Close()
-		return nil, err
-	}
-	return &postgresStore{pool: pool}, nil
+	return &postgresStore{pool: pool, now: time.Now}, nil
 }
 
 const (

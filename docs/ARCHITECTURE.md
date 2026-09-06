@@ -11,6 +11,8 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/forecast-panel/trainRewrite.ts` | Type-keyed training-query rewrite (Prom / OpenSearch / Postgres / Druid) |
 | `src/forecast-panel/extract.ts` | Time+numeric series from frames; train ↔ visible match |
 | `src/forecast-panel/cacheKey.ts` | Train-cache fingerprint (SHA-256); overlay and forecast datasource share this. SQL/expr identity; time macros match interpolated panel timestamps |
+| `src/forecast-panel/sha256.ts` | WebCrypto digest with a pure-JS fallback; `crypto.subtle` is missing on plain-HTTP (non-localhost) Grafana |
+| `src/forecast-panel/abortable.ts` | Observable → Promise that unsubscribes on `AbortSignal`, so an aborted overlay load cancels the HTTP request (`postResource`, train query) |
 | `src/forecast-panel/mixed.ts` | Metric vs Forecast datasource targets/frames on Mixed overlay |
 | `src/forecast-panel/alertFromPanel.ts` | Overlay options New alert rule: Grafana `/alerting/new` defaults from live panel queries |
 | `src/forecast-datasource/` | Nested queryable datasource for alerting (`kind` forecast / lower / upper) |
@@ -18,7 +20,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules |
 | `pkg/plugin/limits.go` | Train-length / body caps and Fit / ForecastRange inflight semaphore |
-| `pkg/plugin/store.go` | SnapshotStore; pgx `forecast.snapshots` |
+| `pkg/plugin/store.go` | SnapshotStore interface; bounded TTL read-through cache over pgx `forecast.snapshots` |
 | `pkg/plugin/resources.go` | `POST /forecast`, `GET /ping` |
 | `pkg/plugin/datasource.go` | `QueryData`: Restore snapshot, one frame per query `refId` |
 | `pkg/main.go` | `app.Manage` or `datasource.Manage` from the executable path / `GF_PLUGIN_ID` |
@@ -62,7 +64,11 @@ DSN resolution (first non-empty wins per field; URL short-circuits the rest):
 2. Grafana ini-to-env `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` or `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`, and `GrafanaCfg` keys (`store_host`, `store_port`, …) from `[plugin.eduardkolotushin-forecast-app]` or `[plugin.eduardkolotushin-forecast-datasource]`
 3. jsonData / secureJsonData (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`): app Configuration page for the overlay process; Forecast datasource jsonData for alerting `QueryData`. If datasource jsonData has no host/URL, `QueryData` also tries parent `AppInstanceSettings` when Grafana sends them
 
-CI/CD merges [`conf/forecast.ini.template`](../conf/forecast.ini.template) into `grafana.ini` (Grafana expands `${FORECAST_STORE_*}`). On connect: `CREATE SCHEMA IF NOT EXISTS forecast` and table `forecast.snapshots (org_id, cache_key, snapshot JSONB, updated_at)` PK `(org_id, cache_key)`. `org_id` comes from plugin context. No DSN: persist off.
+CI/CD merges [`conf/forecast.ini.template`](../conf/forecast.ini.template) into `grafana.ini` (Grafana expands `${FORECAST_STORE_*}`). `org_id` comes from plugin context. No DSN: persist off.
+
+Connection lifecycle: `openPostgresStore` only parses the DSN (pgxpool connects lazily). The first `Get`/`Put` pings and runs `CREATE SCHEMA IF NOT EXISTS forecast` plus table `forecast.snapshots (org_id, cache_key, snapshot JSONB, updated_at)` PK `(org_id, cache_key)`; if that DDL fails but the table is already readable (locked-down runtime user), the store is still ready. While Postgres is unreachable each call fails and a redial is attempted at most every 5 s, so a database that is down at plugin start does not disable the store for the life of the process.
+
+Per-process cache: each `gpx_forecast` process (overlay app, alerting datasource, one per Grafana replica) keeps a read-through cache of at most 256 snapshots with a 30 s TTL. `Put` writes through and refreshes the local entry; after the TTL a `Get` re-reads Postgres, so a Retrain on the overlay is visible to alert evaluation within 30 s without a restart, and resident memory stays bounded (a minute-of-week baseline is ~20k floats as JSON).
 
 ## Train step
 
@@ -132,8 +138,8 @@ Same as `timeseries-forecast`: grid `last + k * step` for `k ≥ 1`, clipped to 
 `gpx_forecast` is a separate process from Grafana, but a large train body or many concurrent Fit / `ForecastRange` calls can still OOM the plugin or stall Grafana’s plugin proxy. v11 bounds that:
 
 - Decode `POST /forecast` with a max body (16 MiB); reject `len(times)` / `len(values)` above `MAX_TRAIN_POINTS` (100k) with 413
-- Inflight semaphore around Fit / ForecastRange (overlay) and Restore + ForecastRange (`QueryData`). Default 4, from `FORECAST_MAX_INFLIGHT` / `GF_PLUGIN_*_MAX_INFLIGHT` / GrafanaCfg `max_inflight` / jsonData `maxInflight`. Excess is 429, not an unbounded queue. NeedTrain probes without a snapshot do not take a slot
-- Overlay: `maxInflightLoads` panel option (default 1); series POSTs stay sequential; 413/429/5xx set a reason and stop further series POSTs; no automatic retry
+- Inflight semaphore around CPU work only: Fit / SnapshotOf / ForecastRange (overlay) and Restore + ForecastRange (`QueryData`). Snapshot store `Get`/`Put` run outside the semaphore so a slow Postgres does not hold compute slots and turn into 429s; pgxpool bounds the DB side. Default 4, from `FORECAST_MAX_INFLIGHT` / `GF_PLUGIN_*_MAX_INFLIGHT` / GrafanaCfg `max_inflight` / jsonData `maxInflight`. Excess is 429, not an unbounded queue. NeedTrain probes without a snapshot do not take a slot
+- Overlay: `maxInflightLoads` panel option (default 1); series POSTs stay sequential; 413/429/5xx set a reason and stop further series POSTs; no automatic retry. Aborting a stale load unsubscribes the `fetch` / `ds.query` Observable, which cancels the HTTP request, so the backend sees `context.Canceled` and frees its slot instead of finishing work nobody will draw
 - Train `maxDataPoints` stays `min(100000, …)` so Grafana datasource queries are not a second unbounded path
 - Resource and `QueryData` handlers recover panics
 

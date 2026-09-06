@@ -52,14 +52,11 @@ func (a *App) Dispose() {
 }
 
 func (a *App) computeLimit() *workLimiter {
-	if a != nil && a.limit != nil {
-		return a.limit
-	}
-	return newWorkLimiter(defaultMaxInflight)
+	return a.limit
 }
 
 func (a *App) bodyLimit() int64 {
-	if a != nil && a.maxBody > 0 {
+	if a.maxBody > 0 {
 		return a.maxBody
 	}
 	return maxForecastBodyBytes

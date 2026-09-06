@@ -4,9 +4,40 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 )
+
+// TestPostgresStoreLazyConnect: an unreachable database must not turn the store
+// into a permanent error; Get/Put fail per call and retry after the backoff.
+func TestPostgresStoreLazyConnect(t *testing.T) {
+	ctx := context.Background()
+	s, err := openPostgresStore(ctx, "postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatalf("open must only parse the DSN: %v", err)
+	}
+	t.Cleanup(s.Close)
+	clock := time.Unix(1_000_000, 0)
+	s.now = func() time.Time { return clock }
+
+	_, _, err = s.Get(ctx, 1, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+	if err == nil {
+		t.Fatal("expected connect error")
+	}
+	first := s.lastAttempt
+	// Within the backoff window the cached error is returned without redialing.
+	if _, _, err2 := s.Get(ctx, 1, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err2 == nil || s.lastAttempt != first {
+		t.Fatalf("expected throttled retry, err=%v attempt moved=%v", err2, s.lastAttempt != first)
+	}
+	clock = clock.Add(ensureRetryAfter)
+	if _, _, err3 := s.Get(ctx, 1, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err3 == nil || s.lastAttempt == first {
+		t.Fatalf("expected a fresh attempt after backoff, err=%v", err3)
+	}
+	if s.ready {
+		t.Fatal("store must not be marked ready")
+	}
+}
 
 func TestPostgresStore(t *testing.T) {
 	dsn := os.Getenv("FORECAST_TEST_PG")

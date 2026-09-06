@@ -69,6 +69,9 @@ func (f *nullableFloat) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// dispatchForecast routes one POST /forecast. The inflight limiter bounds CPU
+// work only (Fit, Restore, ForecastRange); snapshot store I/O runs outside it
+// so a slow Postgres does not hold compute slots and turn into 429s.
 func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequest) (ForecastResponse, error) {
 	if in.CacheKey != "" && !cacheKeyPattern.MatchString(in.CacheKey) {
 		return ForecastResponse{}, errInvalidCacheKey
@@ -79,26 +82,40 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	hasTimes := len(in.Times) > 0 || len(in.Values) > 0
 	if in.CacheKey == "" {
 		return runLimited(ctx, a.computeLimit(), func() (ForecastResponse, error) {
-			return runForecast(in)
+			return fitAndEmit(in)
 		})
 	}
 	if hasTimes {
-		return runLimited(ctx, a.computeLimit(), func() (ForecastResponse, error) {
+		type fitOut struct {
+			resp ForecastResponse
+			snap forecast.Snapshot
+		}
+		out, err := runLimited(ctx, a.computeLimit(), func() (fitOut, error) {
 			fitted, err := fitRequest(in)
 			if err != nil {
+				return fitOut{}, err
+			}
+			resp, err := emitForecast(fitted, in.From, in.To, in.Level)
+			if err != nil {
+				return fitOut{}, err
+			}
+			var snap forecast.Snapshot
+			if a.store != nil {
+				if snap, err = forecast.SnapshotOf(fitted); err != nil {
+					return fitOut{}, err
+				}
+			}
+			return fitOut{resp: resp, snap: snap}, nil
+		})
+		if err != nil {
+			return ForecastResponse{}, err
+		}
+		if a.store != nil {
+			if err := a.store.Put(ctx, orgID, in.CacheKey, out.snap); err != nil {
 				return ForecastResponse{}, err
 			}
-			if a.store != nil {
-				snap, err := forecast.SnapshotOf(fitted)
-				if err != nil {
-					return ForecastResponse{}, err
-				}
-				if err := a.store.Put(ctx, orgID, in.CacheKey, snap); err != nil {
-					return ForecastResponse{}, err
-				}
-			}
-			return emitForecast(fitted, in)
-		})
+		}
+		return out.resp, nil
 	}
 	if in.Retrain || a.store == nil {
 		return ForecastResponse{NeedTrain: true}, nil
@@ -115,7 +132,7 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 		if err != nil {
 			return ForecastResponse{}, err
 		}
-		out, err := emitForecast(fitted, in)
+		out, err := emitForecast(fitted, in.From, in.To, in.Level)
 		if err != nil {
 			return ForecastResponse{}, err
 		}
@@ -124,12 +141,12 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	})
 }
 
-func runForecast(in ForecastRequest) (ForecastResponse, error) {
+func fitAndEmit(in ForecastRequest) (ForecastResponse, error) {
 	fitted, err := fitRequest(in)
 	if err != nil {
 		return ForecastResponse{}, err
 	}
-	return emitForecast(fitted, in)
+	return emitForecast(fitted, in.From, in.To, in.Level)
 }
 
 func fitRequest(in ForecastRequest) (forecast.Fitted, error) {
@@ -194,9 +211,11 @@ func fitRequest(in ForecastRequest) (forecast.Fitted, error) {
 	return fitted, nil
 }
 
-func emitForecast(fitted forecast.Fitted, in ForecastRequest) (ForecastResponse, error) {
-	from := time.UnixMilli(in.From).UTC()
-	to := time.UnixMilli(in.To).UTC()
+// emitForecast runs ForecastRange (and ForecastIntervalRange when level != 0)
+// over [fromMs, toMs] and encodes the result for JSON.
+func emitForecast(fitted forecast.Fitted, fromMs, toMs int64, level float64) (ForecastResponse, error) {
+	from := time.UnixMilli(fromMs).UTC()
+	to := time.UnixMilli(toMs).UTC()
 	out, err := fitted.ForecastRange(from, to)
 	if err != nil {
 		return ForecastResponse{}, err
@@ -211,8 +230,8 @@ func emitForecast(fitted forecast.Fitted, in ForecastRequest) (ForecastResponse,
 		resp.Times[i] = ts[i].UnixMilli()
 		resp.Values[i] = nullableFloat(vs[i])
 	}
-	if in.Level != 0 {
-		lower, upper, err := fitted.ForecastIntervalRange(from, to, in.Level)
+	if level != 0 {
+		lower, upper, err := fitted.ForecastIntervalRange(from, to, level)
 		if err != nil {
 			return ForecastResponse{}, err
 		}

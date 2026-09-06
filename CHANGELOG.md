@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Snapshot cache is bounded (256 entries) with a 30 s TTL, so an overlay Retrain reaches the alerting datasource process (and other Grafana replicas) without a restart and resident memory no longer grows with distinct cache keys
+- Snapshot store connects lazily and retries (5 s backoff) instead of failing permanently when Postgres is down at plugin start; DDL permission errors are tolerated when the table already exists
+- Inflight limiter bounds Fit / Restore / ForecastRange only; Postgres reads and writes no longer hold compute slots
+- `cacheKey` falls back to a pure-JS SHA-256 when `crypto.subtle` is unavailable (plain-HTTP Grafana), producing identical keys
+- Aborted overlay loads cancel the in-flight `POST /forecast` and training query instead of only skipping the next request
+- Button-only panel editors (Retrain, New alert rule) use their own option paths instead of `trainRange`
+
 ## 1.0.0
 
 - App plugin with Go `/forecast` resource

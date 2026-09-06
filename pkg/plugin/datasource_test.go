@@ -209,7 +209,7 @@ func TestQueryData(t *testing.T) {
 	t.Run("hit forecast lower upper", func(t *testing.T) {
 		store := newMemoryStore()
 		fitted := seedSnapshot(t, store, orgID, key, fit)
-		want, err := emitForecast(fitted, ForecastRequest{From: 4000, To: 5000, Level: 0.95})
+		want, err := emitForecast(fitted, 4000, 5000, 0.95)
 		if err != nil {
 			t.Fatal(err)
 		}

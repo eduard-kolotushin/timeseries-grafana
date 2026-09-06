@@ -1,6 +1,5 @@
-import { DataQueryRequest, DataQueryResponse, DataSourceInstanceSettings } from '@grafana/data';
+import { DataSourceInstanceSettings } from '@grafana/data';
 import { DataSourceWithBackend } from '@grafana/runtime';
-import { Observable } from 'rxjs';
 import { defaultForecastQuery, ForecastDataQuery, ForecastDataSourceOptions } from './types';
 
 export class ForecastDataSource extends DataSourceWithBackend<ForecastDataQuery, ForecastDataSourceOptions> {
@@ -14,9 +13,5 @@ export class ForecastDataSource extends DataSourceWithBackend<ForecastDataQuery,
 
   filterQuery(query: ForecastDataQuery): boolean {
     return Boolean(query.cacheKey) && !query.hide;
-  }
-
-  query(request: DataQueryRequest<ForecastDataQuery>): Observable<DataQueryResponse> {
-    return super.query(request);
   }
 }
