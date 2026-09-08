@@ -12,7 +12,7 @@ import {
   TimeRange,
 } from '@grafana/data';
 import { Button, Field, FilterInput, IconButton, Input, Stack, TimeRangeLabel, useStyles2 } from '@grafana/ui';
-import { autoForecastHorizon, autoLookback, isExplicitAutoTrainRange } from './lookback';
+import { absoluteDayBound, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, isExplicitAutoTrainRange } from './lookback';
 import { TrainRangeCalendar } from './TrainRangeCalendar';
 import { ForecastOptions, TrainTimeRange } from './types';
 
@@ -87,9 +87,14 @@ function parseDate(raw: string, timeZone: string): DateTime {
   }
 }
 
-function formatDate(d: Date, timeZone: string, endOfDay: boolean): string {
-  const dt = endOfDay ? dateTime(d).endOf('day') : dateTime(d).startOf('day');
-  return dateTimeFormat(dt, { timeZone, format: 'YYYY-MM-DD HH:mm:ss' });
+function timezoneLabel(timeZone: string): string {
+  if (timeZone === 'browser' || timeZone === '') {
+    return 'Browser time';
+  }
+  if (timeZone === 'utc') {
+    return 'UTC';
+  }
+  return timeZone;
 }
 
 export const TrainRangeEditor = ({
@@ -99,7 +104,7 @@ export const TrainRangeEditor = ({
   item,
 }: StandardEditorProps<TrainTimeRange, RangeEditorSettings, ForecastOptions>) => {
   const styles = useStyles2(getStyles);
-  const timeZone = 'browser';
+  const timeZone = dashboardTimeZone();
   const kind = item.settings?.kind ?? 'train';
   const auto =
     kind === 'forecast'
@@ -198,8 +203,8 @@ export const TrainRangeEditor = ({
   const quick = (kind === 'forecast' ? QUICK_FUTURE : QUICK).filter((q) =>
     q.display.toLowerCase().includes(search.trim().toLowerCase())
   );
-  const calFrom = parseDate(from, timeZone).toDate();
-  const calTo = parseDate(to, timeZone).toDate();
+  const calFrom = civilYmd(parseDate(from, timeZone).valueOf(), timeZone);
+  const calTo = civilYmd(parseDate(to, timeZone).valueOf(), timeZone);
 
   const tooltip = isAuto
     ? undefined
@@ -240,9 +245,10 @@ export const TrainRangeEditor = ({
                 <TrainRangeCalendar
                   from={calFrom}
                   to={calTo}
+                  timeZone={timeZone}
                   onSelect={(start, end) => {
-                    setFrom(formatDate(start, timeZone, false));
-                    setTo(formatDate(end, timeZone, true));
+                    setFrom(absoluteDayBound(start, timeZone, false));
+                    setTo(absoluteDayBound(end, timeZone, true));
                     setShowCalendar(false);
                   }}
                 />
@@ -250,7 +256,7 @@ export const TrainRangeEditor = ({
             )}
             <div className={styles.body}>
               <div className={styles.absolute}>
-                <div className={styles.section}>Absolute time range</div>
+                <div className={styles.section}>Absolute time range ({timezoneLabel(timeZone)})</div>
                 <Field label="From" noMargin className={styles.field}>
                   <div className={styles.inputRow}>
                     <div className={styles.inputGrow}>

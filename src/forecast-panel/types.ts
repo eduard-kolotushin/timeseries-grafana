@@ -2,7 +2,7 @@ export type ForecastModel = 'naive' | 'mean' | 'drift' | 'seasonal' | 'baseline'
 export type BaselineSeason = 'hour' | 'day' | 'week' | 'minute-week';
 export type BaselineCalendar = '' | 'ru';
 
-/** Grafana raw from/to, same strings as the dashboard time picker. Empty is Auto. */
+/** Grafana raw from/to, same strings as the dashboard time picker (dashboard timezone). Empty is Auto. */
 export interface TrainTimeRange {
   from: string;
   to: string;

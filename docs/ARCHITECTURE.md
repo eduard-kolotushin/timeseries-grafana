@@ -92,7 +92,7 @@ Train step follows the model, not the dashboard interval:
 
 ## Training window
 
-`trainRange` is Grafana raw from/to (`now-7d`/`now`, or absolute ISO). Empty / Auto windows (legacy `lookback` duration still applies if `trainRange` was never saved):
+`trainRange` is Grafana raw from/to (`now-7d`/`now`, or absolute `YYYY-MM-DD HH:mm:ss` in the **dashboard** timezone, same as the dashboard time picker). The overlay panel parses those strings with `PanelProps.timeZone`. Empty / Auto windows (legacy `lookback` duration still applies if `trainRange` was never saved):
 
 | Model | Lookback |
 | --- | --- |
@@ -104,7 +104,7 @@ Train step follows the model, not the dashboard interval:
 
 ## Forecast window
 
-`forecastRange` is Grafana raw from/to. Empty / Auto is `[dashboard now, now + autoForecastHorizon]`:
+`forecastRange` is Grafana raw from/to in the same dashboard timezone. Empty / Auto is `[dashboard now, now + autoForecastHorizon]`:
 
 | Model | Duration |
 | --- | --- |

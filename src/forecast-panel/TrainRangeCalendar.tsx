@@ -1,64 +1,82 @@
 import React, { useMemo, useState } from 'react';
 import { css, cx } from '@emotion/css';
-import { GrafanaTheme2 } from '@grafana/data';
+import { dateTimeFormat, dateTimeParse, GrafanaTheme2 } from '@grafana/data';
 import { Button, IconButton, useStyles2 } from '@grafana/ui';
+import { CivilDate } from './lookback';
 
 const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
 
-function startOfDay(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0');
 }
 
-function addMonths(d: Date, n: number): Date {
-  return new Date(d.getFullYear(), d.getMonth() + n, 1);
+function civilKey(d: CivilDate): number {
+  return d.year * 10000 + d.month * 100 + d.day;
 }
 
-function isSameDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+function isSameDay(a: CivilDate, b: CivilDate): boolean {
+  return a.year === b.year && a.month === b.month && a.day === b.day;
 }
 
-function between(d: Date, a: Date, b: Date): boolean {
-  const t = startOfDay(d).getTime();
-  const x = startOfDay(a).getTime();
-  const y = startOfDay(b).getTime();
-  return t >= Math.min(x, y) && t <= Math.max(x, y);
+function between(d: CivilDate, a: CivilDate, b: CivilDate): boolean {
+  const t = civilKey(d);
+  return t >= Math.min(civilKey(a), civilKey(b)) && t <= Math.max(civilKey(a), civilKey(b));
 }
 
-function monthCells(cursor: Date): Date[] {
-  const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
-  const lead = (first.getDay() + 6) % 7;
-  const start = new Date(first);
-  start.setDate(1 - lead);
-  const cells: Date[] = [];
+function addMonths(year: number, month: number, n: number): { year: number; month: number } {
+  const i = year * 12 + (month - 1) + n;
+  return { year: Math.floor(i / 12), month: (i % 12) + 1 };
+}
+
+/** Monday-first month grid in the Gregorian calendar (civil dates, timezone-independent). */
+export function monthCells(year: number, month: number): CivilDate[] {
+  const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+  const lead = (firstWeekday + 6) % 7;
+  const start = new Date(Date.UTC(year, month - 1, 1 - lead));
+  const cells: CivilDate[] = [];
   for (let i = 0; i < 42; i++) {
-    cells.push(new Date(start.getFullYear(), start.getMonth(), start.getDate() + i));
+    const t = new Date(start.getTime() + i * 86_400_000);
+    cells.push({ year: t.getUTCFullYear(), month: t.getUTCMonth() + 1, day: t.getUTCDate() });
   }
   return cells;
+}
+
+function monthTitle(year: number, month: number, timeZone: string): string {
+  try {
+    const dt = dateTimeParse(`${year}-${pad2(month)}-01 00:00:00`, { timeZone });
+    if (dt.isValid()) {
+      return dateTimeFormat(dt, { timeZone, format: 'MMMM YYYY' });
+    }
+  } catch {
+    // fall through
+  }
+  return `${year}-${pad2(month)}`;
 }
 
 export function TrainRangeCalendar({
   from,
   to,
+  timeZone,
   onSelect,
 }: {
-  from: Date;
-  to: Date;
-  onSelect: (from: Date, to: Date) => void;
+  from: CivilDate;
+  to: CivilDate;
+  timeZone: string;
+  onSelect: (from: CivilDate, to: CivilDate) => void;
 }) {
   const styles = useStyles2(getStyles);
-  const [cursor, setCursor] = useState(() => new Date(from.getFullYear(), from.getMonth(), 1));
-  const [picking, setPicking] = useState<Date | null>(null);
-  const cells = useMemo(() => monthCells(cursor), [cursor]);
-  const title = cursor.toLocaleString(undefined, { month: 'long', year: 'numeric' });
+  const [cursor, setCursor] = useState(() => ({ year: from.year, month: from.month }));
+  const [picking, setPicking] = useState<CivilDate | null>(null);
+  const cells = useMemo(() => monthCells(cursor.year, cursor.month), [cursor.year, cursor.month]);
+  const title = monthTitle(cursor.year, cursor.month, timeZone);
 
-  const onDay = (d: Date) => {
-    const day = startOfDay(d);
+  const onDay = (d: CivilDate) => {
     if (!picking) {
-      setPicking(day);
+      setPicking(d);
       return;
     }
-    const a = picking.getTime() <= day.getTime() ? picking : day;
-    const b = picking.getTime() <= day.getTime() ? day : picking;
+    const a = civilKey(picking) <= civilKey(d) ? picking : d;
+    const b = civilKey(picking) <= civilKey(d) ? d : picking;
     onSelect(a, b);
     setPicking(null);
   };
@@ -66,9 +84,17 @@ export function TrainRangeCalendar({
   return (
     <div className={styles.wrap}>
       <div className={styles.header}>
-        <IconButton name="angle-left" tooltip="Previous month" onClick={() => setCursor((c) => addMonths(c, -1))} />
+        <IconButton
+          name="angle-left"
+          tooltip="Previous month"
+          onClick={() => setCursor((c) => addMonths(c.year, c.month, -1))}
+        />
         <div className={styles.title}>{title}</div>
-        <IconButton name="angle-right" tooltip="Next month" onClick={() => setCursor((c) => addMonths(c, 1))} />
+        <IconButton
+          name="angle-right"
+          tooltip="Next month"
+          onClick={() => setCursor((c) => addMonths(c.year, c.month, 1))}
+        />
       </div>
       <div className={styles.weekdays}>
         {WEEKDAYS.map((d) => (
@@ -77,19 +103,19 @@ export function TrainRangeCalendar({
       </div>
       <div className={styles.grid}>
         {cells.map((d) => {
-          const inMonth = d.getMonth() === cursor.getMonth();
+          const inMonth = d.month === cursor.month;
           const selected = picking
             ? isSameDay(d, picking)
             : isSameDay(d, from) || isSameDay(d, to) || between(d, from, to);
           const edge = picking ? isSameDay(d, picking) : isSameDay(d, from) || isSameDay(d, to);
           return (
             <button
-              key={d.toISOString()}
+              key={civilKey(d)}
               type="button"
               className={cx(styles.day, !inMonth && styles.outside, selected && styles.range, edge && styles.edge)}
               onClick={() => onDay(d)}
             >
-              {d.getDate()}
+              {d.day}
             </button>
           );
         })}

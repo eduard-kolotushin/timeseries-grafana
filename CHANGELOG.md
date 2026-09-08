@@ -9,6 +9,8 @@
 - Aborted overlay loads cancel the in-flight `POST /forecast` and training query instead of only skipping the next request
 - Button-only panel editors (Retrain, New alert rule) use their own option paths instead of `trainRange`
 
+- Train and forecast pickers use the dashboard timezone (not a hard-coded browser zone), so calendar days match `resolveTrainWindow` / `resolveForecastWindow`
+
 ## 1.0.0
 
 - App plugin with Go `/forecast` resource

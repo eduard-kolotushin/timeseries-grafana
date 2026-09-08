@@ -1,4 +1,4 @@
-import { dateTime, rangeUtil } from '@grafana/data';
+import { dateTime, dateTimeFormat, dateTimeParse, rangeUtil } from '@grafana/data';
 import { BaselineSeason, ForecastModel, TrainTimeRange } from './types';
 
 export const MAX_TRAIN_POINTS = 100_000;
@@ -75,6 +75,78 @@ export function autoForecastHorizon(model: ForecastModel, season?: BaselineSeaso
     default:
       return '6h';
   }
+}
+
+/**
+ * Dashboard timezone (`utc`, `browser`, or IANA) from a Grafana scene graph.
+ * Prefers SceneTimeRange.getTimeZone() so Default/`browser` matches PanelProps.timeZone.
+ */
+export function timeZoneFromScene(root: unknown, depth = 0): string | undefined {
+  if (!root || typeof root !== 'object' || depth > 8) {
+    return undefined;
+  }
+  const obj = root as {
+    parent?: unknown;
+    getTimeZone?: () => unknown;
+    state?: { timeZone?: unknown; $timeRange?: unknown };
+  };
+  if (typeof obj.getTimeZone === 'function') {
+    const tz = obj.getTimeZone();
+    if (typeof tz === 'string' && tz.trim()) {
+      return tz.trim();
+    }
+  }
+  if (typeof obj.state?.timeZone === 'string' && obj.state.timeZone.trim()) {
+    return obj.state.timeZone.trim();
+  }
+  const nested = timeZoneFromScene(obj.state?.$timeRange, depth + 1);
+  if (nested) {
+    return nested;
+  }
+  return timeZoneFromScene(obj.parent, depth + 1);
+}
+
+/** Same timezone the overlay panel uses. Falls back to browser when no dashboard scene is mounted. */
+export function dashboardTimeZone(): string {
+  if (typeof window === 'undefined') {
+    return 'browser';
+  }
+  const scene = (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext;
+  return timeZoneFromScene(scene) ?? 'browser';
+}
+
+export type CivilDate = { year: number; month: number; day: number };
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0');
+}
+
+/** Calendar Y-M-D of an instant in a Grafana timezone. month is 1-based. */
+export function civilYmd(ms: number, timeZone: string): CivilDate {
+  const s = dateTimeFormat(ms, { timeZone, format: 'YYYY-MM-DD' });
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) {
+    const d = new Date(ms);
+    return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+  }
+  return { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) };
+}
+
+/**
+ * Absolute picker string for a civil day in `timeZone` (Grafana dashboard TZ).
+ * Stored without a Z suffix, same as the dashboard time picker; parse with the same zone.
+ */
+export function absoluteDayBound(date: CivilDate, timeZone: string, endOfDay: boolean): string {
+  const raw = `${date.year}-${pad2(date.month)}-${pad2(date.day)} ${endOfDay ? '23:59:59' : '00:00:00'}`;
+  try {
+    const dt = dateTimeParse(raw, { timeZone });
+    if (dt.isValid()) {
+      return dateTimeFormat(dt, { timeZone, format: 'YYYY-MM-DD HH:mm:ss' });
+    }
+  } catch {
+    // keep raw
+  }
+  return raw;
 }
 
 /** Grafana time-picker `now` (honors nowDelay), not wall clock and not panel `to`. */

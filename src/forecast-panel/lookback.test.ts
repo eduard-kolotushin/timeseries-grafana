@@ -1,4 +1,4 @@
-import { applyLookbackRange, autoForecastHorizon, autoLookback, forecastLevel, isoUtc, isInvalidForecastWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, trainMaxDataPoints, trainStepInterval, trainStepMs } from './lookback';
+import { absoluteDayBound, applyLookbackRange, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, forecastLevel, isoUtc, isInvalidForecastWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, timeZoneFromScene, trainMaxDataPoints, trainStepInterval, trainStepMs } from './lookback';
 
 const day = 24 * 60 * 60 * 1000;
 
@@ -257,5 +257,81 @@ describe('resolveForecastWindow', () => {
       'utc'
     );
     expect(isInvalidForecastWindow(w)).toBe(true);
+  });
+});
+
+describe('timeZoneFromScene / dashboardTimeZone', () => {
+  it('prefers SceneTimeRange.getTimeZone over state.timeZone', () => {
+    expect(
+      timeZoneFromScene({
+        state: { $timeRange: { state: { timeZone: 'browser' }, getTimeZone: () => 'utc' } },
+      })
+    ).toBe('utc');
+  });
+
+  it('reads $timeRange.state.timeZone and walks parent', () => {
+    expect(timeZoneFromScene({ state: { $timeRange: { state: { timeZone: 'Europe/Moscow' } } } })).toBe('Europe/Moscow');
+    expect(timeZoneFromScene({ parent: { state: { $timeRange: { state: { timeZone: 'utc' } } } } })).toBe('utc');
+  });
+
+  it('ignores blank values', () => {
+    expect(timeZoneFromScene({ state: { timeZone: '  ' } })).toBeUndefined();
+    expect(timeZoneFromScene(null)).toBeUndefined();
+  });
+
+  it('falls back to browser when no scene is mounted', () => {
+    const prev = (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext;
+    try {
+      delete (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext;
+      expect(dashboardTimeZone()).toBe('browser');
+      (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext = {
+        state: { $timeRange: { state: { timeZone: 'utc' } } },
+      };
+      expect(dashboardTimeZone()).toBe('utc');
+    } finally {
+      (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext = prev;
+    }
+  });
+});
+
+describe('absoluteDayBound / civilYmd', () => {
+  const utcMidnight = Date.UTC(2026, 8, 8, 0, 0, 0);
+
+  it('writes wall-clock bounds in the dashboard timezone', () => {
+    expect(absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'utc', false)).toBe('2026-09-08 00:00:00');
+    expect(absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'utc', true)).toBe('2026-09-08 23:59:59');
+  });
+
+  it('round-trips a UTC civil day through resolveTrainWindow', () => {
+    const from = absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'utc', false);
+    const to = absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'utc', true);
+    expect(resolveTrainWindow({ model: 'holt', trainRange: { from, to } }, 0, 'utc')).toEqual({
+      fromMs: utcMidnight,
+      toMs: Date.UTC(2026, 8, 8, 23, 59, 59),
+    });
+  });
+
+  it('civilYmd of a UTC instant is the UTC calendar day, not a shifted local day', () => {
+    expect(civilYmd(utcMidnight, 'utc')).toEqual({ year: 2026, month: 9, day: 8 });
+  });
+
+  it('civilYmd uses the dashboard zone, so UTC late evening can be the next calendar day in Moscow', () => {
+    const utcEvening = Date.UTC(2026, 8, 7, 22, 0, 0);
+    expect(civilYmd(utcEvening, 'utc')).toEqual({ year: 2026, month: 9, day: 7 });
+    expect(civilYmd(utcEvening, 'Europe/Moscow')).toEqual({ year: 2026, month: 9, day: 8 });
+    expect(absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'Europe/Moscow', false)).toBe('2026-09-08 00:00:00');
+    const parsed = resolveTrainWindow(
+      {
+        model: 'holt',
+        trainRange: {
+          from: absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'Europe/Moscow', false),
+          to: absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'Europe/Moscow', true),
+        },
+      },
+      0,
+      'Europe/Moscow'
+    );
+    // 2026-09-08 00:00:00 MSK = 2026-09-07 21:00:00Z
+    expect(parsed.fromMs).toBe(Date.UTC(2026, 8, 7, 21, 0, 0));
   });
 });
