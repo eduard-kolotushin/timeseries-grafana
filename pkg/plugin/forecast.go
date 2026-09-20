@@ -274,10 +274,26 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	}
 }
 
-// lookbackString renders the stored training width for operators reading the spec.
+// lookbackString renders the stored training width for the Retrain schedules
+// table: whole days and hours read as 21d / 6h, and anything else as a Go
+// duration. It is display only — a cron retrain re-resolves the window from
+// lookbackMs / from / to, never from this string.
 func lookbackString(ms int64) string {
 	if ms <= 0 {
 		return ""
+	}
+	const (
+		dayMs  = int64(24 * time.Hour / time.Millisecond)
+		hourMs = int64(time.Hour / time.Millisecond)
+		minMs  = int64(time.Minute / time.Millisecond)
+	)
+	switch {
+	case ms%dayMs == 0:
+		return fmt.Sprintf("%dd", ms/dayMs)
+	case ms%hourMs == 0:
+		return fmt.Sprintf("%dh", ms/hourMs)
+	case ms%minMs == 0:
+		return fmt.Sprintf("%dm", ms/minMs)
 	}
 	return (time.Duration(ms) * time.Millisecond).String()
 }
