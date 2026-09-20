@@ -7,6 +7,7 @@ require (
 	github.com/eduard-kolotushin/timeseries-forecast v0.4.0
 	github.com/grafana/grafana-plugin-sdk-go v0.296.1
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/robfig/cron/v3 v3.0.1
 )
 
 require (

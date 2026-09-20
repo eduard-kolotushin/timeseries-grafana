@@ -56,4 +56,6 @@ func (a *App) handleForecast(w http.ResponseWriter, req *http.Request) {
 func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ping", a.handlePing)
 	mux.HandleFunc("/forecast", a.handleForecast)
+	mux.HandleFunc("/schedules", a.handleSchedules)
+	mux.HandleFunc("/schedules/default", a.handleScheduleDefault)
 }

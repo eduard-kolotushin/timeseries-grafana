@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
@@ -366,7 +368,7 @@ func TestCallResource(t *testing.T) {
 
 func TestForecastCache(t *testing.T) {
 	store := newMemoryStore()
-	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, store)
+	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, store, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +483,7 @@ func TestForecastCache(t *testing.T) {
 }
 
 func TestForecastLoadLimits(t *testing.T) {
-	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, nil)
+	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +547,7 @@ func TestForecastLoadLimits(t *testing.T) {
 
 	t.Run("needTrain skip limiter", func(t *testing.T) {
 		store := newMemoryStore()
-		cached, err := newApp(context.Background(), backend.AppInstanceSettings{}, store)
+		cached, err := newApp(context.Background(), backend.AppInstanceSettings{}, store, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -597,4 +599,173 @@ func TestForecastLoadLimits(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+// TestForecastScheduleDue pins the probe contract: a stored snapshot answers the
+// overlay until the panel's schedule comes due, and a due row forces a refresh
+// even for a spec-less row the scheduler itself cannot retrain.
+func TestForecastScheduleDue(t *testing.T) {
+	clearStoreEnv(t)
+	ctx := context.Background()
+	store := newMemoryStore()
+	sched := newMemSchedules()
+	key := strings.Repeat("ef", 32)
+	seedSnapshot(t, store, 1, key, ForecastRequest{
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "naive",
+	})
+	app, err := newApp(ctx, backend.AppInstanceSettings{}, store, sched, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	probe, _ := json.Marshal(ForecastRequest{Model: "naive", From: 4000, To: 5000, CacheKey: key})
+	call := func() ForecastResponse {
+		t.Helper()
+		var r mockCallResourceResponseSender
+		if err := app.CallResource(ctx, &backend.CallResourceRequest{
+			PluginContext: backend.PluginContext{OrgID: 1},
+			Method:        http.MethodPost,
+			Path:          "forecast",
+			Body:          probe,
+		}, &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.response.Status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.response.Status, r.response.Body)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(r.response.Body), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	sched.seed(ScheduleRow{
+		OrgID: 1, Scope: scopePanel, Key: key, Cron: "0 3 * * *", Timezone: "UTC",
+		Enabled: true, NextRunAt: time.Now().Add(time.Hour),
+	})
+	got := call()
+	if !got.Cached || got.NeedTrain {
+		t.Fatalf("future schedule: got=%+v", got)
+	}
+
+	sched.seed(ScheduleRow{
+		OrgID: 1, Scope: scopePanel, Key: key, Cron: "0 3 * * *", Timezone: "UTC",
+		Enabled: true, NextRunAt: time.Now().Add(-time.Minute),
+	})
+	got = call()
+	if !got.NeedTrain || len(got.Values) != 0 {
+		t.Fatalf("due schedule: got=%+v", got)
+	}
+
+	// A disabled schedule is not the overlay's problem.
+	sched.seed(ScheduleRow{
+		OrgID: 1, Scope: scopePanel, Key: key, Cron: "0 3 * * *", Timezone: "UTC",
+		Enabled: false, NextRunAt: time.Now().Add(-time.Minute),
+	})
+	if got = call(); !got.Cached {
+		t.Fatalf("disabled schedule: got=%+v", got)
+	}
+}
+
+// TestForecastRecordsTrainSource pins the fit half of the schedule contract: a
+// trained overlay stores the browser's trainSource so the backend can re-fit it
+// later, and a later retrain extends that row's schedule instead of resetting it.
+func TestForecastRecordsTrainSource(t *testing.T) {
+	clearRetrainEnv(t)
+	clearStoreEnv(t)
+	ctx := context.Background()
+	sched := newMemSchedules()
+	app, err := newApp(ctx, backend.AppInstanceSettings{}, newMemoryStore(), sched, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	key := strings.Repeat("12", 32)
+	fit := func(src *TrainSource) int {
+		t.Helper()
+		body, _ := json.Marshal(ForecastRequest{
+			Times:       []int64{0, 1000, 2000, 3000},
+			Values:      []nullableFloat{1, 2, 3, 4},
+			Model:       "naive",
+			From:        4000,
+			To:          5000,
+			CacheKey:    key,
+			TrainSource: src,
+		})
+		var r mockCallResourceResponseSender
+		if err := app.CallResource(ctx, &backend.CallResourceRequest{
+			PluginContext: backend.PluginContext{OrgID: 3},
+			Method:        http.MethodPost,
+			Path:          "forecast",
+			Body:          body,
+		}, &r); err != nil {
+			t.Fatal(err)
+		}
+		return r.response.Status
+	}
+
+	// A frontend that predates trainSource fits and caches, but schedules nothing.
+	if status := fit(nil); status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	rows, err := sched.List(ctx, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("a fit without trainSource scheduled something: %+v", rows)
+	}
+
+	src := &TrainSource{
+		DatasourceUID: "ds-uid",
+		Queries:       json.RawMessage(`[{"refId":"A","intervalMs":60000,"maxDataPoints":43200}]`),
+		From:          1_700_000_000_000,
+		To:            1_700_100_000_000,
+		SeriesName:    "series-1",
+	}
+	if status := fit(src); status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	rows, err = sched.List(ctx, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%+v", rows)
+	}
+	row := rows[0]
+	if row.Scope != scopePanel || row.Key != key || !row.Enabled {
+		t.Fatalf("row=%+v", row)
+	}
+	if row.Cron != defaultRetrainCron || row.Timezone != "UTC" {
+		t.Fatalf("default schedule=%+v", row)
+	}
+	if !row.NextRunAt.After(time.Now()) {
+		t.Fatalf("next run is not in the future: %s", row.NextRunAt)
+	}
+	spec, err := parseRetrainSpec(row.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(spec.Queries) != string(src.Queries) || spec.SeriesName != "series-1" || spec.Model != "naive" {
+		t.Fatalf("spec=%+v", spec)
+	}
+
+	// An admin's cron survives the next retrain of the same panel.
+	sched.seed(ScheduleRow{
+		OrgID: 3, Scope: scopePanel, Key: key, Cron: "*/2 * * * *", Timezone: "Europe/Moscow",
+		Enabled: true, Spec: row.Spec, NextRunAt: time.Now().Add(time.Hour),
+	})
+	if status := fit(src); status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	rows, _ = sched.List(ctx, 3)
+	if len(rows) != 1 || rows[0].Cron != "*/2 * * * *" || rows[0].Timezone != "Europe/Moscow" {
+		t.Fatalf("retrain reset the schedule: %+v", rows)
+	}
 }

@@ -26,8 +26,8 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Nested panel calls `POST /api/plugins/eduardkolotushin-forecast-app/resources/forecast`
 - Nested datasource `QueryData` Restores snapshots; alerting uses Grafana `refId`s (metric vs forecast / interval)
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
-- No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots
-- Stay within v1–v11 unless `docs/INTENTIONS.md` is updated first
+- No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots and schedules; `POST /api/ds/query` on Grafana's own API is not a datasource client
+- Stay within v1–v12 unless `docs/INTENTIONS.md` is updated first
 
 ## v1 in scope
 
@@ -73,14 +73,18 @@ Overlay options New alert rule: Grafana `/alerting/new` with live panel queries 
 
 Bound `POST /forecast` / `QueryData` body and train length, and concurrent Fit / ForecastRange work, so high load returns 413/429 or a panel reason instead of crashing `gpx_forecast` or Grafana. Overlay: max in-flight loads per panel is a panel option (default 1), sequential series POSTs, no tight retry. No job queue or extra plugin replicas.
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11 out of scope
+## v12 in scope
 
-Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages, baseline publisher process.
+Backend retrain scheduler: `forecast.retrain` (`scope` `panel` / `baseline`), `FOR UPDATE SKIP LOCKED` claims, `/api/ds/query` frame fetch from the stored `trainSource`, `GET|PUT|DELETE /schedules` (Admin) and `/schedules/default`, Configuration-page schedule UI. `needTrain` also fires when a schedule is due. `trainSource` stays out of the `cacheKey` fingerprint. No per-datasource logic in `pkg/`; a scheduler failure never fails a query.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12 out of scope
+
+Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages, baseline publisher process, a job queue.
 
 ## Workflow
 
-- Table-driven Go tests for the forecast resource and datasource `QueryData`
-- Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, mixed frames, forecast-query `cacheKey`, overlay New alert rule defaults, and overlay load limits
+- Table-driven Go tests for the forecast resource, datasource `QueryData`, and the schedule resource
+- Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, `trainSource` capture, mixed frames, forecast-query `cacheKey`, overlay New alert rule defaults, overlay load limits, and the schedule API/UI
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`

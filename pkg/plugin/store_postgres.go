@@ -17,6 +17,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// ensureSQL is the only creator of both tables. The plugin owns forecast.retrain
+// outright: the baselines worker inserts, claims and finishes its own rows there
+// but never provisions them, so a deployment that runs the worker without ever
+// loading the plugin would not get the table.
+//
+// forecast.retrain carries no secondary index on purpose: it holds one row per
+// trained panel (plus one per worker-owned baseline hash), every plugin read is
+// the (scope, key) primary key, and the claim scan orders a table that stays in
+// the hundreds of rows — an index would only add write cost to each retrain.
 const ensureSQL = `
 CREATE SCHEMA IF NOT EXISTS forecast;
 CREATE TABLE IF NOT EXISTS forecast.snapshots (
@@ -25,6 +34,22 @@ CREATE TABLE IF NOT EXISTS forecast.snapshots (
   snapshot JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (org_id, cache_key)
+);
+CREATE TABLE IF NOT EXISTS forecast.retrain (
+  scope TEXT NOT NULL,                -- 'panel' | 'baseline'
+  key TEXT NOT NULL,                  -- panel: cache_key, baseline: metric_hash
+  org_id BIGINT NOT NULL DEFAULT 0,
+  cron TEXT NOT NULL,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  spec JSONB,                         -- panel: opaque datasource query objects; baseline: model spec
+  next_run_at TIMESTAMPTZ,
+  last_run_at TIMESTAMPTZ,
+  last_status TEXT,
+  claimed_by TEXT,
+  claimed_until TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (scope, key)
 );
 `
 

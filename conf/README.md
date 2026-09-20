@@ -14,9 +14,17 @@ Grafana expands `${FORECAST_STORE_*}` in `.ini` files. Your pipeline can also re
 | `store_ssl_mode` | `FORECAST_STORE_SSLMODE` |
 | `store_password` | `FORECAST_STORE_PASSWORD` |
 | `max_inflight` | `FORECAST_MAX_INFLIGHT` |
+| `retrain_enabled` | `FORECAST_RETRAIN_ENABLED` |
+| `retrain_tick` | `FORECAST_RETRAIN_TICK` |
+| `retrain_lease` | `FORECAST_RETRAIN_LEASE` |
+| `retrain_cron` | `FORECAST_RETRAIN_CRON` |
+| `grafana_url` | `FORECAST_GRAFANA_URL` |
+| `grafana_token` | `FORECAST_GRAFANA_TOKEN` |
 
 Leave `store_host` empty (and do not set `store_url`) to disable the snapshot store. Panel model options are dashboard JSON, not this file. Do not put `allow_loading_unsigned_plugins` or datasource YAML here.
 
 The template has two identical plugin sections: overlay (`eduardkolotushin-forecast-app`) and alerting QueryData (`eduardkolotushin-forecast-datasource`). Grafana 12.4+ does not forward host `FORECAST_STORE_*` into plugin processes by default; each process reads its own `[plugin.<id>]` via `GF_PLUGIN_*` / GrafanaCfg. Overlay jsonData comes from the app Configuration page; alerting needs the same keys on the Forecast datasource instance unless this ini section is merged.
 
 `gpx_forecast` also reads `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` and `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`. Process env `FORECAST_STORE_*` and `FORECAST_MAX_INFLIGHT` win over ini when present in the plugin process. Empty `max_inflight` uses the default of 4 concurrent Fit / ForecastRange slots.
+
+The `retrain_*` and `grafana_*` keys belong to the **app** section only. The app process runs the unattended retrain scheduler (claim a due `forecast.retrain` row, fetch training frames from Grafana's `/api/ds/query`, fit, store). The datasource process serves alerting `QueryData`, which only Restores, so it has no scheduler. Empty `retrain_enabled` means on; `retrain_tick` defaults to `30s`, `retrain_lease` to `5m`, `retrain_cron` to `0 3 * * *`. `grafana_token` is only needed when anonymous auth is off: use a Viewer service-account token, or set it through the encrypted Configuration-page field (`secureJsonData.grafanaToken`) instead of a plaintext ini value.

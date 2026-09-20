@@ -18,10 +18,13 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/forecast-datasource/` | Nested queryable datasource for alerting (`kind` forecast / lower / upper) |
 | `src/components/AppConfig/` | Overlay Postgres DSN for the snapshot store |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
-| `pkg/plugin/forecast.go` | Fit/forecast using sibling modules |
+| `pkg/plugin/forecast.go` | Fit/forecast using sibling modules; fit path records `trainSource` and upserts the `panel` schedule row |
 | `pkg/plugin/limits.go` | Train-length / body caps and Fit / ForecastRange inflight semaphore |
 | `pkg/plugin/store.go` | SnapshotStore interface; bounded TTL read-through cache over pgx `forecast.snapshots` |
-| `pkg/plugin/resources.go` | `POST /forecast`, `GET /ping` |
+| `pkg/plugin/schedule.go` | `ScheduleStore` over `forecast.retrain` (list / upsert / delete / due / claim / finish) |
+| `pkg/plugin/retrain.go` | Unattended retrain scheduler: ticker, claim, `/api/ds/query` frame fetch, fit, `Put`, `Finish` |
+| `pkg/plugin/schedules.go` | `/schedules` resource handlers and the Admin gate |
+| `pkg/plugin/resources.go` | `POST /forecast`, `GET /ping`, `/schedules` |
 | `pkg/plugin/datasource.go` | `QueryData`: Restore snapshot, one frame per query `refId` |
 | `pkg/main.go` | `app.Manage` or `datasource.Manage` from the executable path / `GF_PLUGIN_ID` |
 
@@ -34,7 +37,7 @@ Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeserie
 1. Grafana queries the **visible** panel time range. The nested panel draws **metric** frames as history (time + every numeric field per frame). Mixed Forecast datasource frames are not history, are not fitted, and are not plotted.
 2. Per visible metric series it POSTs `{ cacheKey, from, to, model, ... }` without training points. `cacheKey` is SHA-256 of **metric** datasource uid, canonical query (SQL / PromQL `expr` / redacted native body), model options, raw train-range strings, and series name. Forecast datasource queries are omitted from the fingerprint so adding query B does not invalidate the overlay snapshot. Grafana time macros and interpolated visible timestamps are `__TIME__`. Volatile query-row fields (`key`, interval, maxDataPoints) are omitted. Dashboard range and forecast window are not in the key.
 3. On a hit the backend `Restore`s the snapshot and `ForecastRange`s. The panel skips the training datasource query.
-4. On `needTrain` or Retrain, the panel issues one training query (rewritten for the train window and a model-aware step), then POSTs `{ times, values, cacheKey, ... }`. The backend fits, upserts JSONB, and returns the window.
+4. On `needTrain` or Retrain, the panel issues one training query (rewritten for the train window and a model-aware step), then POSTs `{ times, values, cacheKey, trainSource, ... }`. The backend fits, upserts JSONB, upserts the `panel` row in `forecast.retrain`, and returns the window. `trainSource` is `{datasourceUid, queries, from, to, seriesName}` where `queries` are the exact objects the panel sent to the datasource (including `intervalMs` / `maxDataPoints`), so the scheduler can replay the request later without any datasource knowledge in `pkg/`. `trainSource` is **not** in the fingerprint, so adding or editing a schedule never invalidates a stored snapshot.
 5. Auto/relative train strings do not re-query until Retrain; the saved model can lag `now`.
 6. The panel draws visible history and forecast with `@grafana/ui` `TimeSeries`. Interval bounds use `custom.fillBelowTo` on the forecast frame. Extra training points are not plotted. The plot `to` includes the forecast window.
 7. If the training query returns no points, or the forecast window has no grid points (or all NaN), the panel shows a reason. It does not silently fit the visible series.
@@ -69,6 +72,61 @@ CI/CD merges [`conf/forecast.ini.template`](../conf/forecast.ini.template) into 
 Connection lifecycle: `openPostgresStore` only parses the DSN (pgxpool connects lazily). The first `Get`/`Put` pings and runs `CREATE SCHEMA IF NOT EXISTS forecast` plus table `forecast.snapshots (org_id, cache_key, snapshot JSONB, updated_at)` PK `(org_id, cache_key)`; if that DDL fails but the table is already readable (locked-down runtime user), the store is still ready. While Postgres is unreachable each call fails and a redial is attempted at most every 5 s, so a database that is down at plugin start does not disable the store for the life of the process.
 
 Per-process cache: each `gpx_forecast` process (overlay app, alerting datasource, one per Grafana replica) keeps a read-through cache of at most 256 snapshots with a 30 s TTL. `Put` writes through and refreshes the local entry; after the TTL a `Get` re-reads Postgres, so a Retrain on the overlay is visible to alert evaluation within 30 s without a restart, and resident memory stays bounded (a minute-of-week baseline is ~20k floats as JSON).
+
+## Retrain schedule and the unattended scheduler
+
+A snapshot is only useful while it is fresh, and a dashboard nobody opens trains nothing. v12 moves the retrain out of the browser: the **app backend** runs a ticker that claims due rows and retrains them itself.
+
+### `forecast.retrain`
+
+Created by `ensureSQL` alongside `forecast.snapshots`; `gpx_forecast` is its only DDL owner.
+
+| Column | Meaning |
+| --- | --- |
+| `scope`, `key` | `panel` + `cacheKey`, or `baseline` + `metric_hash` (written by sibling `timeseries-baselines`) |
+| `org_id` | Plugin context org, default 0 |
+| `cron`, `timezone` | Retrain schedule. 5-field `cron.ParseStandard` form plus `@daily` / `@hourly` / `@every 1h`; `timezone` is an IANA name |
+| `enabled` | Claimed only when true |
+| `spec JSONB` | `panel`: the whole `trainSource` (datasource uid, the verbatim query objects, the train window, the series name). `baseline`: the worker's model spec. NULL means unclaimable |
+| `next_run_at` | Due when `<= now()`. NULL means never |
+| `last_run_at`, `last_status` | `ok` or `error: <message>` |
+| `claimed_by`, `claimed_until` | Lease; claimable while `claimed_until IS NULL OR claimed_until < now()` |
+| `updated_at` | Autotouched by the upsert |
+
+`PRIMARY KEY (scope, key)` is the whole index story: the table has one row per overlay series and one per baseline hash, so a sequence scan at this cardinality beats an index that the planner would ignore anyway.
+
+### Claiming
+
+```sql
+WITH due AS (
+  SELECT scope, key FROM forecast.retrain
+  WHERE scope = 'panel' AND enabled AND spec IS NOT NULL AND next_run_at IS NOT NULL AND next_run_at <= now()
+    AND (claimed_until IS NULL OR claimed_until < now())
+  ORDER BY next_run_at LIMIT $2 FOR UPDATE SKIP LOCKED
+)
+UPDATE forecast.retrain r SET claimed_by = $1, claimed_until = now() + $3::interval
+FROM due WHERE r.scope = due.scope AND r.key = due.key
+RETURNING r.scope, r.key, r.cron, r.timezone, r.spec
+```
+
+`FOR UPDATE SKIP LOCKED` is what makes Grafana HA safe: one plugin process per Grafana replica, all ticking, and every due row is retrained by exactly one of them. No leader, no lock table, no coordination. The lease covers a process that dies mid-retrain.
+
+The `panel` predicate requires `spec IS NOT NULL` and the `baseline` predicate is the same shape with `scope='baseline'`: **the plugin never claims a row it cannot fetch**, and the worker never claims a panel row it has no overlay frontend for. A `panel` row without a spec (an overlay trained by an older frontend) is still valid — it just retrains through `needTrain` on the next overlay load.
+
+### Tick
+
+`runScheduler` claims up to 4 rows per tick (once per `FORECAST_RETRAIN_TICK`, default 30s) and retrains each with the existing limits:
+
+1. `fetchFrames` — `POST <FORECAST_GRAFANA_URL>/api/ds/query` with `{queries: spec.queries, from: spec.from, to: spec.to}` and an optional `Authorization: Bearer` header. Decode the response with the SDK's `(*data.Frame).UnmarshalJSON` and extract (time field, numeric field matching `spec.seriesName`, else the first numeric field) into `timeseries.Series[float64]`, dropping NaN. The body is the frontend's own request, so **no datasource-specific field is interpreted here**
+2. `checkTrainLen` — the existing `MAX_TRAIN_POINTS` cap, so a schedule cannot become a second unbounded train path
+3. fit through the same `fitRequest` model switch as `POST /forecast`, inside `runLimited` (`workLimiter`), so a scheduled fit competes for the same inflight slots and backs off (`errBusy` → skip, retry next tick) instead of piling up
+4. `SnapshotOf` → `store.Put` → `Finish(next = nextRun(cron, timezone, now), "ok")`; any error → `Finish(now + FORECAST_RETRAIN_LEASE, "error: …")`
+
+Every branch logs `retrain scope=… key=… status=… dur=…`. A scheduler error is logged, never propagated: `/forecast` and `QueryData` behave exactly as before when the scheduler is off, when `/api/ds/query` is unreachable, or when Postgres is down. `needTrain` remains the fallback retrain path.
+
+### Auth and liveness
+
+Default `FORECAST_GRAFANA_URL` is `http://127.0.0.1:3000` and the default token is empty, which is what the sandbox's anonymous Admin uses. A production Grafana with anonymous auth off needs a Viewer service-account token in `secureJsonData.grafanaToken` (provisioned like `storePassword`). Neither available: the scheduler disables itself and the overlay keeps working.
 
 ## Train step
 
@@ -115,6 +173,21 @@ Train step follows the model, not the dashboard interval:
 | naive, mean, drift, SES, Holt | 6h |
 
 The backend emits `last + k×step` points inside that window (skip-ahead; no backcast before `last+step`).
+
+## Resource routes
+
+The app resource mux is reachable at `/api/plugins/eduardkolotushin-forecast-app/resources/…`.
+
+| Route | Handler | Notes |
+| --- | --- | --- |
+| `GET /ping` | `handlePing` | Liveness, no auth |
+| `POST /forecast` | `handleForecast` | Fit / probe / Restore; body capped at 16 MiB and `MAX_TRAIN_POINTS` |
+| `GET /schedules` | `handleSchedules` | Rows for the request org, **Admin only** |
+| `PUT /schedules` | `handleSchedules` | Upsert `{scope, key, cron, timezone, enabled}`; validates the cron and timezone |
+| `DELETE /schedules?scope=&key=` | `handleSchedules` | Panel rows only; a `baseline` row is refused with 400 |
+| `POST /schedules/default` | `handleScheduleDefault` | Validates `{cron, timezone}`; the Configuration page writes them to jsonData |
+
+The Admin gate is `backend.PluginConfigFromContext(req.Context()).User.Role != "Admin"` → `403 "forecast: admin required"`. Responses never echo a row's `spec`, and the list carries only `scope, key, cron, timezone, enabled, nextRunAt, lastRunAt, lastStatus, hasSpec`, so a schedule read cannot leak dashboard query text.
 
 ## Forecast datasource (alerting)
 

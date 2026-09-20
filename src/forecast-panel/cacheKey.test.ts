@@ -190,4 +190,27 @@ describe('cacheKey', () => {
     });
     expect(key).toMatch(/^[a-f0-9]{64}$/);
   });
+
+  it('does not change when the overlay sends a trainSource', async () => {
+    const base = {
+      targets: [{ refId: 'A', datasource: { uid: 'druid' }, builder: { queryType: 'sql', query: 'SELECT 1' } }],
+      options: baseOptions,
+      seriesName: 'value',
+    };
+    // The replay payload rides along on the fit POST but is not part of the model identity:
+    // offline retrains produce the same snapshot for a different query text, same targets.
+    const withTrainSource = {
+      ...base,
+      trainSource: {
+        datasourceUid: 'druid',
+        queries: [{ refId: 'A', datasource: { uid: 'druid' }, expr: 'up', intervalMs: 60000, maxDataPoints: 20000 }],
+        from: visFrom,
+        to: visTo,
+        seriesName: 'value train',
+      },
+      trainSeriesName: 'value train',
+    };
+    expect(fingerprintPayload(withTrainSource)).toEqual(fingerprintPayload(base));
+    expect(await cacheKey(withTrainSource)).toBe(await cacheKey(base));
+  });
 });

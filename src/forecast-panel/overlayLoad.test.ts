@@ -188,4 +188,55 @@ describe('loadOverlayForecasts', () => {
     expect(got.error).toBeNull();
     expect(got.forecasts).toHaveLength(1);
   });
+
+  it('rides the replayable trainSource along on the fit POST', async () => {
+    const source = {
+      datasourceUid: 'druid',
+      queries: [{ refId: 'A', datasource: { uid: 'druid' }, intervalMs: 60_000, maxDataPoints: 20_000 }],
+      from: 1,
+      to: 2,
+    };
+    const queryTrain = jest.fn(async () => ({ frames: [frame()], source }));
+    const post = jest
+      .fn<Promise<ForecastResponse>, [Record<string, unknown>]>()
+      .mockResolvedValueOnce({ needTrain: true })
+      .mockResolvedValueOnce({ times: [3], values: [30] });
+    await loadOverlayForecasts({
+      // The visible display name differs from the training series name: the backend
+      // re-extracts the training frame, so `seriesName` must be the matched one.
+      visible: [{ name: 'rate (visible)', times: [1, 2], values: [1, 2] }],
+      fromMs: 3,
+      toMs: 4,
+      level: 0,
+      retrain: false,
+      fitBody: { model: 'naive' },
+      cacheKeyFor: async () => 'aa'.repeat(32),
+      queryTrain,
+      post,
+    });
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post.mock.calls[1][0].trainSource).toEqual({ ...source, seriesName: 'up' });
+    expect(post.mock.calls[1][0].times).toEqual([1, 2]);
+  });
+
+  it('sends no trainSource when training frames carried none', async () => {
+    const queryTrain = jest.fn(async () => ({ frames: [frame()] }));
+    const post = jest
+      .fn<Promise<ForecastResponse>, [Record<string, unknown>]>()
+      .mockResolvedValueOnce({ needTrain: true })
+      .mockResolvedValueOnce({ times: [3], values: [30] });
+    await loadOverlayForecasts({
+      visible,
+      fromMs: 3,
+      toMs: 4,
+      level: 0,
+      retrain: false,
+      fitBody: { model: 'naive' },
+      cacheKeyFor: async () => 'aa'.repeat(32),
+      queryTrain,
+      post,
+    });
+    expect('trainSource' in post.mock.calls[0][0]).toBe(false);
+    expect('trainSource' in post.mock.calls[1][0]).toBe(false);
+  });
 });

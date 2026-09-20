@@ -12,6 +12,7 @@ import (
 
 	"github.com/eduard-kolotushin/timeseries"
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 )
 
 var (
@@ -20,21 +21,34 @@ var (
 	cacheKeyPattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
+// TrainSource is the training window exactly as the browser produced it. The
+// query objects are opaque here — pkg/ carries no datasource-specific field or
+// type name — and the backend replays them verbatim through Grafana's own query
+// API when the schedule fires with no browser attached.
+type TrainSource struct {
+	DatasourceUID string          `json:"datasourceUid"`
+	Queries       json.RawMessage `json:"queries"`
+	From          int64           `json:"from"`
+	To            int64           `json:"to"`
+	SeriesName    string          `json:"seriesName,omitempty"`
+}
+
 // ForecastRequest is the JSON body for POST /forecast.
 type ForecastRequest struct {
-	Times    []int64         `json:"times"`
-	Values   []nullableFloat `json:"values"`
-	Model    string          `json:"model"`
-	From     int64           `json:"from"`
-	To       int64           `json:"to"`
-	Alpha    float64         `json:"alpha"`
-	Beta     float64         `json:"beta"`
-	Period   int             `json:"period"`
-	Season   string          `json:"season"`
-	Calendar string          `json:"calendar"`
-	Level    float64         `json:"level"`
-	CacheKey string          `json:"cacheKey"`
-	Retrain  bool            `json:"retrain"`
+	Times       []int64         `json:"times"`
+	Values      []nullableFloat `json:"values"`
+	Model       string          `json:"model"`
+	From        int64           `json:"from"`
+	To          int64           `json:"to"`
+	Alpha       float64         `json:"alpha"`
+	Beta        float64         `json:"beta"`
+	Period      int             `json:"period"`
+	Season      string          `json:"season"`
+	Calendar    string          `json:"calendar"`
+	Level       float64         `json:"level"`
+	CacheKey    string          `json:"cacheKey"`
+	Retrain     bool            `json:"retrain"`
+	TrainSource *TrainSource    `json:"trainSource,omitempty"`
 }
 
 // ForecastResponse is the JSON body returned by POST /forecast.
@@ -114,11 +128,22 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 			if err := a.store.Put(ctx, orgID, in.CacheKey, out.snap); err != nil {
 				return ForecastResponse{}, err
 			}
+			a.recordPanelSchedule(ctx, orgID, in)
 		}
 		return out.resp, nil
 	}
 	if in.Retrain || a.store == nil {
 		return ForecastResponse{NeedTrain: true}, nil
+	}
+	// A due schedule means a retrain is owed, so the overlay refreshes the
+	// snapshot even for a row the scheduler cannot retrain itself (no spec).
+	if a.sched != nil {
+		due, err := a.sched.Due(ctx, orgID, in.CacheKey, time.Now())
+		if err != nil {
+			log.DefaultLogger.Warn("schedule due", "key", in.CacheKey, "err", err.Error())
+		} else if due {
+			return ForecastResponse{NeedTrain: true}, nil
+		}
 	}
 	snap, ok, err := a.store.Get(ctx, orgID, in.CacheKey)
 	if err != nil {
@@ -139,6 +164,65 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 		out.Cached = true
 		return out, nil
 	})
+}
+
+// recordPanelSchedule registers (or refreshes) the trained panel's row in the
+// schedule table, which is what lets the backend re-fit it later with no browser
+// open. Nothing here may fail the fit the user is waiting on: a scheduler or
+// store error is logged and the response stands.
+func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastRequest) {
+	if a.sched == nil || in.TrainSource == nil {
+		return
+	}
+	cronSpec, timezone := a.retrain.Cron, a.retrain.Timezone
+	// An existing row's cron is the admin's schedule, not the default: a retrain
+	// must extend the row, never reset when it fires.
+	if rows, err := a.sched.List(ctx, orgID); err != nil {
+		log.DefaultLogger.Warn("schedule list", "err", err.Error())
+	} else {
+		for _, row := range rows {
+			if row.Scope == scopePanel && row.Key == in.CacheKey {
+				cronSpec, timezone = row.Cron, row.Timezone
+				break
+			}
+		}
+	}
+	next, err := nextRun(cronSpec, timezone, time.Now())
+	if err != nil {
+		log.DefaultLogger.Error("schedule cron", "cron", cronSpec, "timezone", timezone, "err", err.Error())
+		return
+	}
+	spec, err := json.Marshal(retrainSpec{
+		TrainSource: *in.TrainSource,
+		Model:       in.Model,
+		Season:      in.Season,
+		Calendar:    in.Calendar,
+		Lookback:    lookbackString(in.TrainSource.To - in.TrainSource.From),
+	})
+	if err != nil {
+		log.DefaultLogger.Error("schedule spec", "key", in.CacheKey, "err", err.Error())
+		return
+	}
+	err = a.sched.Upsert(ctx, orgID, ScheduleRow{
+		Scope:     scopePanel,
+		Key:       in.CacheKey,
+		Cron:      cronSpec,
+		Timezone:  normalizedTimezone(timezone),
+		Enabled:   true,
+		Spec:      spec,
+		NextRunAt: next,
+	})
+	if err != nil {
+		log.DefaultLogger.Error("schedule upsert", "key", in.CacheKey, "err", err.Error())
+	}
+}
+
+// lookbackString renders the stored training width for operators reading the spec.
+func lookbackString(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	return (time.Duration(ms) * time.Millisecond).String()
 }
 
 func fitAndEmit(in ForecastRequest) (ForecastResponse, error) {

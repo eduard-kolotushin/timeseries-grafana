@@ -107,6 +107,7 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
     return { forecasts, error: overlayError ?? REASON_TRAIN_EMPTY, usedSaved };
   }
 
+  const trainSource = train.source;
   for (const points of need) {
     const fit = trainingForFit(points, trained);
     if (!fit) {
@@ -119,7 +120,7 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
     try {
       throwIfAborted(args.signal);
       const key = await args.cacheKeyFor(points.name);
-      const resp = await args.post({
+      const body: OverlayPostBody = {
         ...args.fitBody,
         cacheKey: key,
         times: fit.times,
@@ -127,7 +128,13 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
         from: args.fromMs,
         to: args.toMs,
         level: args.level,
-      });
+      };
+      if (trainSource) {
+        // `seriesName` is the matched *training* series: the backend later re-extracts it
+        // out of the replayed frame, and the visible display name need not match it.
+        body.trainSource = { ...trainSource, seriesName: fit.name };
+      }
+      const resp = await args.post(body);
       const drawn = pushForecast(forecasts, points.name, resp);
       if (!drawn.ok) {
         overlayError = overlayError ?? drawn.reason;

@@ -13,9 +13,23 @@ import { trainMaxDataPoints, trainStepInterval } from './lookback';
 import { metricTargets } from './mixed';
 import { rewriteTrainTargets, TrainRewriteWindow } from './trainRewrite';
 
+/**
+ * The datasource query objects that produced the training frames, verbatim, plus the
+ * train window. The overlay POSTs this so the plugin backend can replay it through
+ * Grafana's own `/api/ds/query` on a schedule, with no browser open.
+ */
+export type TrainQuerySource = {
+  datasourceUid: string;
+  queries: unknown[];
+  from: number;
+  to: number;
+};
+
 export type TrainQueryResult = {
   frames: DataFrame[] | null;
   reason?: string;
+  /** Absent when no group returned frames. Only the first producing group is kept. */
+  source?: TrainQuerySource;
 };
 
 /**
@@ -68,6 +82,7 @@ export async function queryTrainingFrames(
   }
 
   const frames: DataFrame[] = [];
+  let source: TrainQuerySource | undefined;
   let skipReason: string | undefined;
   for (const group of groups.values()) {
     if (signal?.aborted) {
@@ -100,11 +115,19 @@ export async function queryTrainingFrames(
       signal
     )) as DataQueryResponse;
     if (resp?.data?.length) {
+      // The backend replays these exact objects and re-extracts the training series by
+      // name, so they stay untouched here (`rewritten.targets` is already a clone).
+      source = source ?? {
+        datasourceUid: refKey(group[0].datasource),
+        queries: rewritten.targets,
+        from: fromMs,
+        to: toMs,
+      };
       frames.push(...resp.data);
     }
   }
   if (frames.length > 0) {
-    return { frames };
+    return { frames, source };
   }
   return { frames: null, reason: skipReason };
 }

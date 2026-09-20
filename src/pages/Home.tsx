@@ -29,7 +29,7 @@ function Home() {
           ForecastRange calls are already running. The overlay posts one series at a time and limits in-flight loads
           (panel option, default 1).
         </p>
-        <p>The Docker Grafana sandbox (TestData demo dashboard) is the sibling repo timeseries-grafana-sandbox.</p>
+        <p>The Docker Grafana sandbox (minute-of-week overlay and Metrics vs baselines) is the sibling repo timeseries-grafana-sandbox.</p>
       </div>
     </PluginPage>
   );

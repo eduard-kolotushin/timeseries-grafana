@@ -16,7 +16,7 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 | Sandbox | sibling `timeseries-grafana-sandbox` (Compose) |
 | Kubernetes | sibling `timeseries-k8s` (Helm + images) |
 | Baseline publisher | sibling `timeseries-baselines` (standalone process, not Grafana-hosted) |
-| Train adapters | frontend only (Prometheus, OpenSearch, Postgres, existing Druid/SQL rewrite). No Prom/OS/PG HTTP clients in `pkg/` |
+| Train adapters | frontend only (Prometheus, OpenSearch, Postgres, existing Druid/SQL rewrite). No Prom/OS/PG HTTP clients in `pkg/`. The v12 scheduler replays the frontend's query objects through Grafana's own `/api/ds/query`, which is not a datasource client |
 
 ## v1 must-have
 
@@ -108,7 +108,22 @@ High load must not crash `gpx_forecast` or Grafana. Prefer a reason (or HTTP 413
 - **Grafana process**: training queries stay in Grafana datasource plugins and stay clamped by `maxDataPoints` ≤ 100k. This plugin does not add a second train query per series. Snapshot Restore stays the cheap path; load limits apply there too so an alert-eval burst cannot grow without bound
 - Do not add a job queue, extra `gpx_forecast` replicas, Grafana core changes, SIMD, or a parallel public API
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11 non-goals
+## v12 must-have
+
+Retrain stored snapshots on a cron with **no browser open**, and expose the schedule so an operator can see and edit it. The backend fetches its own training data through Grafana's own query API.
+
+- **Backend retrain scheduler** in the app process: one ticker (`FORECAST_RETRAIN_TICK`, default 30s) that claims due rows from Postgres and retrains them. Started only when a store, a claimable row, and the Grafana query API are all available; `Dispose` cancels it
+- **`forecast.retrain` table** (schema `forecast`, created by `ensureSQL` in `gpx_forecast` — the plugin is its only DDL owner). Columns: `scope`, `key`, `org_id`, `cron`, `timezone`, `enabled`, `spec JSONB`, `next_run_at`, `last_run_at`, `last_status`, `claimed_by`, `claimed_until`, `updated_at`; `PRIMARY KEY (scope, key)`. `scope` is `panel` (overlay `cacheKey`) or `baseline` (`metric_hash`, written by sibling `timeseries-baselines`, which never creates the table)
+- **Claim queue**: `Claim` is `UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED)`, so Grafana HA (one plugin process per replica) retrains each due row exactly once without a leader. Lease `FORECAST_RETRAIN_LEASE` (default 5m) releases a row whose worker died. The plugin claims only `scope='panel'` rows that have a `spec`; the worker claims only `scope='baseline'`. Neither can claim a row it cannot retrain
+- **The plugin fetches its own training data** with `POST <Grafana>/api/ds/query` and the query objects the overlay stored verbatim, so no datasource-specific field is ever interpreted in `pkg/`. This introduces **no per-datasource logic and no datasource HTTP client**: the request body is opaque JSON that came from Grafana's own frontend, and the response is decoded with the SDK's `data.Frame` JSON unmarshaller. The type-keyed train rewrite stays in the overlay frontend
+- **`trainSource` in the fit request**: `POST /forecast` gains an optional `trainSource {datasourceUid, queries, from, to, seriesName}` carrying exactly what the browser sent to the datasource. A successful fit upserts `forecast.retrain` for that `cacheKey` (never resetting an existing row's cron). `trainSource` is **not** part of the `cacheKey` fingerprint
+- **Resource routes**: `GET|PUT /schedules` and `DELETE /schedules?scope=&key=` on the app resource mux, Admin-gated through `backend.PluginConfigFromContext(ctx).User.Role` (`403` otherwise). `DELETE` on a `scope='baseline'` row is refused (`400`): the worker re-inserts it
+- **Configuration-page schedule UI**: a table of rows (scope, key, cron, timezone, next/last run, status) with cron + timezone editing, an enable toggle, and delete for panel rows, plus a default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`)
+- **`needTrain` also fires when the schedule is due** (`next_run_at <= now()`), so a row the scheduler cannot retrain — no stored spec, scheduler disabled — is still refreshed by the next overlay load. `POST /forecast` is unchanged for every other caller
+- Config: `FORECAST_RETRAIN_ENABLED`, `FORECAST_RETRAIN_TICK`, `FORECAST_RETRAIN_LEASE`, `FORECAST_RETRAIN_CRON`, `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN`, following the existing `FORECAST_*` → `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / ini / jsonData / `secureJsonData` precedence
+- A scheduler failure never fails a query: if the scheduler is disabled or `/api/ds/query` is unreachable, `needTrain` on the next overlay load remains the retrain path
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12 non-goals
 
 Do not add these without first updating this document:
 
@@ -120,13 +135,18 @@ Do not add these without first updating this document:
 - Shipping Grafana alert rules or contact points
 - Extra app pages beyond the landing page and existing Configuration page
 - Duplicating Series or forecast algorithms
-- A Druid/Kafka ticker in this plugin (see `timeseries-baselines`)
+- A Druid/Kafka ticker in this plugin (see `timeseries-baselines`); the v12 scheduler retrains **this plugin's** `forecast.snapshots`, it does not compute minute-of-week baselines
 - Consuming the metrics Kafka topic
+- Interpreting datasource-specific query content in `pkg/` (v12 replays opaque query objects through `/api/ds/query`; it never rewrites them)
+- Shipping Grafana alert rules, contact points, or a job queue
 
 ## Quality bar
 
 - Backend does not mutate caller series (libraries already return new series)
 - Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource and datasource `QueryData`, plus oversize / busy (413/429) load limits
-- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, overlay New alert rule defaults, and overlay load limits
+- Table-driven tests cover the schedule resource (method/status matrix, Admin gate, upsert→list round-trip, invalid cron, baseline-delete refusal) and `needTrain`-when-due
+- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, overlay New alert rule defaults, overlay load limits, `trainSource` capture, the schedule API, and the schedule UI
+- `trainSource` must not enter the `cacheKey` fingerprint: adding or editing a scheduled retrain must not invalidate a stored snapshot
+- The retrain scheduler must never fail a query: an unreachable `/api/ds/query`, a disabled scheduler, or a claim error leaves `needTrain` as the retrain path
 - GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack

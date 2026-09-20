@@ -32,6 +32,22 @@ func connectStore(ctx context.Context, dsn string) (SnapshotStore, func()) {
 	return withCache(pg), pg.Close
 }
 
+// connectStores opens one pool and hands it back as both the snapshot store and
+// the schedule store, so the app process never dials Postgres twice for the same
+// database. A DSN that cannot even be parsed yields error stores rather than nil:
+// the scheduler keeps ticking and logging per attempt instead of silently idling.
+func connectStores(ctx context.Context, dsn string) (SnapshotStore, ScheduleStore, func()) {
+	if dsn == "" {
+		return nil, nil, nil
+	}
+	pg, err := openPostgresStore(ctx, dsn)
+	if err != nil {
+		log.DefaultLogger.Error("forecast store", "err", err.Error())
+		return errStore{err: err}, errScheduleStore{err: err}, nil
+	}
+	return withCache(pg), pg, pg.Close
+}
+
 // SnapshotStore persists fitted snapshots. A nil store means persist is off.
 type SnapshotStore interface {
 	Get(ctx context.Context, orgID int64, key string) (forecast.Snapshot, bool, error)

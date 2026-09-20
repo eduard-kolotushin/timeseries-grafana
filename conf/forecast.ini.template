@@ -20,6 +20,18 @@ store_ssl_mode = ${FORECAST_STORE_SSLMODE}
 store_password = ${FORECAST_STORE_PASSWORD}
 ; Concurrent Fit / ForecastRange slots in this process (default 4).
 max_inflight = ${FORECAST_MAX_INFLIGHT}
+; Unattended retrain scheduler. Only this process (the app) runs it; the
+; datasource section below does not, because alerting QueryData only Restores.
+; The scheduler claims due rows from forecast.retrain and fetches its own
+; training data from Grafana's /api/ds/query. Leave retrain_enabled empty (or
+; true) to run it. Empty grafana_url means http://127.0.0.1:3000.
+retrain_enabled = ${FORECAST_RETRAIN_ENABLED}
+retrain_tick = ${FORECAST_RETRAIN_TICK}
+retrain_lease = ${FORECAST_RETRAIN_LEASE}
+retrain_cron = ${FORECAST_RETRAIN_CRON}
+grafana_url = ${FORECAST_GRAFANA_URL}
+; Viewer service-account token for /api/ds/query when anonymous auth is off.
+grafana_token = ${FORECAST_GRAFANA_TOKEN}
 
 [plugin.eduardkolotushin-forecast-datasource]
 ; Same keys as the app. Alerting QueryData does not receive app jsonData.

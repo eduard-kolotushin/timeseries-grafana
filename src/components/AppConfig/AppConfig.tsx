@@ -3,6 +3,7 @@ import { AppPluginMeta, PluginConfigPageProps } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
 import { Button, Field, FieldSet, Input, SecretInput } from '@grafana/ui';
 import { testIds } from '../testIds';
+import RetrainSchedules from './RetrainSchedules';
 
 export type ForecastStoreJsonData = {
   storeHost?: string;
@@ -10,6 +11,8 @@ export type ForecastStoreJsonData = {
   storeDatabase?: string;
   storeUser?: string;
   storeSslMode?: string;
+  retrainCron?: string;
+  retrainTimezone?: string;
 };
 
 export type AppConfigProps = PluginConfigPageProps<AppPluginMeta<ForecastStoreJsonData>>;
@@ -23,6 +26,8 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
   const [storeSslMode, setStoreSslMode] = useState(json.storeSslMode ?? 'disable');
   const [storePassword, setStorePassword] = useState('');
   const [passwordConfigured, setPasswordConfigured] = useState(Boolean(plugin.meta.secureJsonFields?.storePassword));
+  const [retrainCron, setRetrainCron] = useState(json.retrainCron ?? '0 3 * * *');
+  const [retrainTimezone, setRetrainTimezone] = useState(json.retrainTimezone ?? 'UTC');
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
@@ -37,6 +42,8 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
           storeDatabase,
           storeUser,
           storeSslMode,
+          retrainCron,
+          retrainTimezone,
         },
         secureJsonData: passwordConfigured && !storePassword ? {} : { storePassword },
       });
@@ -85,6 +92,12 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
           Save
         </Button>
       </FieldSet>
+      <RetrainSchedules
+        defaultCron={retrainCron}
+        defaultTimezone={retrainTimezone}
+        onDefaultCronChange={setRetrainCron}
+        onDefaultTimezoneChange={setRetrainTimezone}
+      />
       <p>Plugin id: {plugin.meta.id}</p>
       <p>
         Env <code>FORECAST_STORE_*</code> (not forwarded into plugin processes on Grafana 12.4+ by default) and
