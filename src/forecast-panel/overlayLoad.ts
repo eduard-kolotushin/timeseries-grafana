@@ -131,7 +131,8 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
       };
       if (trainSource) {
         // `seriesName` is the matched *training* series: the backend later re-extracts it
-        // out of the replayed frame, and the visible display name need not match it.
+        // out of the replayed frame, and the visible display name need not match it. A
+        // relative window rides along untouched: the backend re-resolves it at claim time.
         body.trainSource = { ...trainSource, seriesName: fit.name };
       }
       const resp = await args.post(body);

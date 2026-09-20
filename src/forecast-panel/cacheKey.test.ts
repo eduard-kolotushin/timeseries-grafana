@@ -213,4 +213,19 @@ describe('cacheKey', () => {
     expect(fingerprintPayload(withTrainSource)).toEqual(fingerprintPayload(base));
     expect(await cacheKey(withTrainSource)).toBe(await cacheKey(base));
   });
+
+  it('does not change when the trainSource window is relative', async () => {
+    const base = {
+      targets: [{ refId: 'A', datasource: { uid: 'druid' }, builder: { queryType: 'sql', query: 'SELECT 1' } }],
+      options: baseOptions,
+      seriesName: 'value',
+    };
+    // How the backend re-resolves the window is a retrain instruction, not model
+    // identity: switching a panel between Auto and an absolute picker must not
+    // invalidate the snapshot the panel is already serving.
+    const absolute = { ...base, trainSource: { from: visFrom, to: visTo, relative: false, lookbackMs: 0 } };
+    const relative = { ...base, trainSource: { from: visFrom, to: visTo, relative: true, lookbackMs: visTo - visFrom } };
+    expect(fingerprintPayload(relative)).toEqual(fingerprintPayload(absolute));
+    expect(await cacheKey(relative)).toBe(await cacheKey(absolute));
+  });
 });

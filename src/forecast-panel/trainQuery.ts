@@ -23,6 +23,13 @@ export type TrainQuerySource = {
   queries: unknown[];
   from: number;
   to: number;
+  /**
+   * True when `from`/`to` were derived from a lookback: the backend re-resolves
+   * `[now - lookbackMs, now]` at retrain time instead of replaying them. Absent
+   * (undefined) serializes away, which the backend reads as an absolute window.
+   */
+  relative?: boolean;
+  lookbackMs?: number;
 };
 
 export type TrainQueryResult = {
@@ -64,6 +71,9 @@ export async function queryTrainingFrames(
   const stepMs = intervalMs > 0 ? intervalMs : 60_000;
   const maxDataPoints = trainMaxDataPoints(toMs - fromMs, stepMs);
   const interval = trainStepInterval(stepMs);
+  // The backend re-resolves a lookback window at retrain time; a window that is
+  // not a lookback has no width to re-resolve.
+  const lookbackMs = window.relative === true ? Math.max(window.lookbackMs ?? 0, 0) : 0;
   const scopedVars = {
     ...request.scopedVars,
     __from: { text: String(fromMs), value: String(fromMs) },
@@ -122,6 +132,8 @@ export async function queryTrainingFrames(
         queries: rewritten.targets,
         from: fromMs,
         to: toMs,
+        relative: lookbackMs > 0,
+        lookbackMs,
       };
       frames.push(...resp.data);
     }

@@ -14,6 +14,7 @@ import (
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -57,50 +58,83 @@ CREATE TABLE IF NOT EXISTS forecast.retrain (
 // a burst of overlay loads does not turn into a burst of failed dials.
 const ensureRetryAfter = 5 * time.Second
 
-type postgresStore struct {
-	pool *pgxpool.Pool
+// pgxPool is the slice of *pgxpool.Pool this store uses. It is an interface so
+// the per-table readiness split below can be exercised without a live Postgres;
+// *pgxpool.Pool is its only production implementation.
+type pgxPool interface {
+	Ping(ctx context.Context) error
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Close()
+}
 
-	mu          sync.Mutex
-	ready       bool
-	lastErr     error
-	lastAttempt time.Time
-	now         func() time.Time
+// storeProbe is one table's readiness and retry state. Every table has its own:
+// ensureSQL provisions both, so a runtime user that may not CREATE can be missing
+// forecast.retrain while forecast.snapshots is fine — and that schedule failure
+// must not change the answer a snapshot call gets.
+type storeProbe struct {
+	ready   bool
+	err     error
+	attempt time.Time
+}
+
+type postgresStore struct {
+	pool pgxPool
+
+	mu    sync.Mutex
+	snap  storeProbe
+	sched storeProbe
+	now   func() time.Time
 }
 
 func (s *postgresStore) Close() {
-	if s != nil && s.pool != nil {
-		s.pool.Close()
+	if s == nil || s.pool == nil {
+		return
 	}
+	s.pool.Close()
 }
 
 // ensure pings Postgres and creates the schema on first successful use. It is
 // retried on later calls (after ensureRetryAfter) instead of failing the store
 // permanently when the database is unavailable at plugin start.
 func (s *postgresStore) ensure(ctx context.Context) error {
+	return s.ensureTable(ctx, &s.snap, `SELECT 1 FROM forecast.snapshots LIMIT 1`)
+}
+
+// ensureSchedules is the same contract for the schedule table. Readiness is tracked per
+// table: a deployment that cannot CREATE and upgrades with forecast.retrain missing must
+// keep serving snapshots (and keep retrying the DDL) instead of latching ready and
+// answering every schedule call with a permanent relation-does-not-exist.
+func (s *postgresStore) ensureSchedules(ctx context.Context) error {
+	return s.ensureTable(ctx, &s.sched, `SELECT 1 FROM forecast.retrain LIMIT 1`)
+}
+
+func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, readySQL string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ready {
+	if probe.ready {
 		return nil
 	}
 	now := s.now()
-	if s.lastErr != nil && now.Sub(s.lastAttempt) < ensureRetryAfter {
-		return s.lastErr
+	if probe.err != nil && now.Sub(probe.attempt) < ensureRetryAfter {
+		return probe.err
 	}
-	s.lastAttempt = now
+	probe.attempt = now
 	if err := s.pool.Ping(ctx); err != nil {
-		s.lastErr = fmt.Errorf("forecast store: %w", err)
-		return s.lastErr
+		probe.err = fmt.Errorf("forecast store: %w", err)
+		return probe.err
 	}
 	if _, err := s.pool.Exec(ctx, ensureSQL); err != nil {
-		// A locked-down runtime user may lack CREATE. Accept that when the
-		// table is already provisioned.
-		if _, probe := s.pool.Exec(ctx, `SELECT 1 FROM forecast.snapshots LIMIT 1`); probe != nil {
-			s.lastErr = fmt.Errorf("forecast store: %w", err)
-			return s.lastErr
+		// A locked-down runtime user may lack CREATE. Accept that when the table
+		// this call needs is already provisioned.
+		if _, probeErr := s.pool.Exec(ctx, readySQL); probeErr != nil {
+			probe.err = fmt.Errorf("forecast store: %w", err)
+			return probe.err
 		}
 	}
-	s.ready = true
-	s.lastErr = nil
+	probe.ready = true
+	probe.err = nil
 	return nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/robfig/cron/v3"
 )
 
@@ -45,13 +46,17 @@ type ScheduleRow struct {
 // ScheduleStore is the forecast.retrain table as the plugin uses it. Claim and
 // Finish are scope-agnostic because the worker shares the table, but the plugin's
 // own claim is restricted to scope='panel' rows (see panelClaimSQL).
+//
+// Finish is owner-guarded: a claim may only be released by the owner that took
+// it (or when nobody holds it), so a retrain that outlives its lease cannot clear
+// a newer owner's claim.
 type ScheduleStore interface {
 	List(ctx context.Context, orgID int64) ([]ScheduleRow, error)
 	Upsert(ctx context.Context, orgID int64, row ScheduleRow) error
 	Delete(ctx context.Context, orgID int64, scope, key string) error
 	Due(ctx context.Context, orgID int64, key string, now time.Time) (bool, error)
 	Claim(ctx context.Context, owner string, lease time.Duration, limit int) ([]ScheduleRow, error)
-	Finish(ctx context.Context, scope, key string, next time.Time, status string) error
+	Finish(ctx context.Context, owner, scope, key string, next time.Time, status string) error
 }
 
 // panelClaimSQL is the plugin half of the claim protocol. The predicate is
@@ -89,7 +94,7 @@ func intervalSeconds(d time.Duration) string {
 // construction: filtering them by org would hide every worker schedule from the
 // Configuration page and from the PUT echo.
 func (s *postgresStore) List(ctx context.Context, orgID int64) ([]ScheduleRow, error) {
-	if err := s.ensure(ctx); err != nil {
+	if err := s.ensureSchedules(ctx); err != nil {
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
@@ -126,7 +131,7 @@ FROM forecast.retrain WHERE scope = 'baseline' OR org_id = $1 ORDER BY scope, ke
 // lets the Configuration page edit a cron without erasing the panel's query
 // objects.
 func (s *postgresStore) Upsert(ctx context.Context, orgID int64, row ScheduleRow) error {
-	if err := s.ensure(ctx); err != nil {
+	if err := s.ensureSchedules(ctx); err != nil {
 		return err
 	}
 	// Baseline rows are fleet-wide (the worker owns them and has no org), so an
@@ -159,7 +164,7 @@ ON CONFLICT (scope, key) DO UPDATE SET
 }
 
 func (s *postgresStore) Delete(ctx context.Context, orgID int64, scope, key string) error {
-	if err := s.ensure(ctx); err != nil {
+	if err := s.ensureSchedules(ctx); err != nil {
 		return err
 	}
 	_, err := s.pool.Exec(ctx, `DELETE FROM forecast.retrain WHERE org_id = $1 AND scope = $2 AND key = $3`, orgID, scope, key)
@@ -169,7 +174,7 @@ func (s *postgresStore) Delete(ctx context.Context, orgID int64, scope, key stri
 // Due answers the probe path only: "is this panel's schedule past its next run".
 // It is a single primary-key lookup because it runs on every overlay probe.
 func (s *postgresStore) Due(ctx context.Context, orgID int64, key string, now time.Time) (bool, error) {
-	if err := s.ensure(ctx); err != nil {
+	if err := s.ensureSchedules(ctx); err != nil {
 		return false, err
 	}
 	var due bool
@@ -184,7 +189,7 @@ SELECT EXISTS (
 }
 
 func (s *postgresStore) Claim(ctx context.Context, owner string, lease time.Duration, limit int) ([]ScheduleRow, error) {
-	if err := s.ensure(ctx); err != nil {
+	if err := s.ensureSchedules(ctx); err != nil {
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, panelClaimSQL, limit, owner, intervalSeconds(lease))
@@ -204,18 +209,29 @@ func (s *postgresStore) Claim(ctx context.Context, owner string, lease time.Dura
 }
 
 // Finish records the outcome and drops the claim, so the row is claimable again
-// exactly at next rather than at lease expiry.
-func (s *postgresStore) Finish(ctx context.Context, scope, key string, next time.Time, status string) error {
-	if err := s.ensure(ctx); err != nil {
+// exactly at next rather than at lease expiry. The owner predicate is what makes
+// that safe: a retrain that outlived its lease has no claim left to release, and
+// must not clear the claim (or overwrite the next run) of the process that took
+// the row over. Zero rows updated is that case, not an error.
+//
+// The worker's Done is the mirror of this statement for scope='baseline'.
+func (s *postgresStore) Finish(ctx context.Context, owner, scope, key string, next time.Time, status string) error {
+	if err := s.ensureSchedules(ctx); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 UPDATE forecast.retrain
 SET next_run_at = $3, last_run_at = now(), last_status = $4,
     claimed_by = NULL, claimed_until = NULL, updated_at = now()
-WHERE scope = $1 AND key = $2
-`, scope, key, next.UTC(), status)
-	return err
+WHERE scope = $1 AND key = $2 AND (claimed_by IS NULL OR claimed_by = $5)
+`, scope, key, next.UTC(), status, owner)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		log.DefaultLogger.Debug("retrain claim lost", "scope", scope, "key", key, "owner", owner)
+	}
+	return nil
 }
 
 // errScheduleStore stands in when the pool cannot be built, so the scheduler
@@ -236,7 +252,7 @@ func (s errScheduleStore) Claim(context.Context, string, time.Duration, int) ([]
 	return nil, s.err
 }
 
-func (s errScheduleStore) Finish(context.Context, string, string, time.Time, string) error {
+func (s errScheduleStore) Finish(context.Context, string, string, string, time.Time, string) error {
 	return s.err
 }
 

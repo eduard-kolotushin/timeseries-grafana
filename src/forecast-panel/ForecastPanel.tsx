@@ -91,11 +91,7 @@ export const ForecastPanel: React.FC<Props> = ({
       }
 
       retrain = takeRetrain(id);
-      const { fromMs: trainFromMs, toMs: trainToMs } = resolveTrainWindow(
-        options,
-        timeRange.to.valueOf(),
-        timeZone
-      );
+      const trainWindow = resolveTrainWindow(options, timeRange.to.valueOf(), timeZone);
       const visibleFromMs = data.request?.range?.from?.valueOf();
       const visibleToMs = data.request?.range?.to?.valueOf();
       const targets = metricTargets(allTargets ?? []);
@@ -118,8 +114,10 @@ export const ForecastPanel: React.FC<Props> = ({
           queryTrainingFrames(
             data.request,
             {
-              fromMs: trainFromMs,
-              toMs: trainToMs,
+              fromMs: trainWindow.fromMs,
+              toMs: trainWindow.toMs,
+              relative: trainWindow.relative,
+              lookbackMs: trainWindow.lookbackMs,
               visibleFromMs,
               visibleToMs,
               intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),

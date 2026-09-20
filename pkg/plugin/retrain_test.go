@@ -1,12 +1,15 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -201,12 +204,31 @@ func testTrainSpec() []byte {
 			SeriesName:    "series-1",
 		},
 		Model:    "baseline",
+		Alpha:    0.5,
+		Beta:     0.1,
+		Period:   24,
 		Season:   "minute-week",
 		Calendar: "",
 		Lookback: "2h",
 	})
 	if err != nil {
 		panic(err)
+	}
+	return raw
+}
+
+// testSpecRaw is testTrainSpec with mutate applied, for rows that differ from the
+// default spec in exactly one way.
+func testSpecRaw(t *testing.T, mutate func(*retrainSpec)) []byte {
+	t.Helper()
+	var spec retrainSpec
+	if err := json.Unmarshal(testTrainSpec(), &spec); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&spec)
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return raw
 }
@@ -256,18 +278,50 @@ func TestFetchFrames(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// claimTime is the scheduler's clock for the relative-window row below.
+	claimTime := time.UnixMilli(1_800_000_000_000)
 	for _, tc := range []struct {
 		name     string
 		token    string
 		wantAuth string
+		spec     []byte
+		clock    time.Time
+		wantFrom string
+		wantTo   string
 	}{
-		{name: "no token sends no header"},
-		{name: "token sends a bearer header", token: "sa-token", wantAuth: "Bearer sa-token"},
+		{
+			// A panel whose picker held absolute dates is retrained on exactly those
+			// dates, whatever the clock says.
+			name: "an absolute spec replays the stored window", wantFrom: "1000", wantTo: "2000",
+		},
+		{
+			name: "token sends a bearer header", token: "sa-token", wantAuth: "Bearer sa-token",
+			wantFrom: "1000", wantTo: "2000",
+		},
+		{
+			// The stored pair is only the browser's last resolution; a lookback window
+			// must move with the clock or every cron tick refetches the same range.
+			name: "a relative spec re-resolves the window at claim time",
+			spec: testSpecRaw(t, func(s *retrainSpec) {
+				s.Relative, s.LookbackMs = true, int64(6*time.Hour/time.Millisecond)
+			}),
+			clock:    claimTime,
+			wantFrom: strconv.FormatInt(claimTime.UnixMilli()-6*3_600_000, 10),
+			wantTo:   strconv.FormatInt(claimTime.UnixMilli(), 10),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got = fetchRequest{}
-			poster := &grafanaPoster{url: srv.URL, token: tc.token, client: srv.Client()}
-			row := ScheduleRow{Scope: scopePanel, Key: "k", Spec: testTrainSpec()}
+			rowSpec := tc.spec
+			if rowSpec == nil {
+				rowSpec = testTrainSpec()
+			}
+			clock := tc.clock
+			if clock.IsZero() {
+				clock = time.Now()
+			}
+			poster := &grafanaPoster{url: srv.URL, token: tc.token, client: srv.Client(), now: func() time.Time { return clock }}
+			row := ScheduleRow{Scope: scopePanel, Key: "k", Spec: rowSpec}
 			frames, err := poster.fetchFrames(context.Background(), row)
 			if err != nil {
 				t.Fatal(err)
@@ -282,8 +336,8 @@ func TestFetchFrames(t *testing.T) {
 			if string(got.Body.Queries) != `[{"refId":"A","intervalMs":60000}]` {
 				t.Fatalf("queries=%s", got.Body.Queries)
 			}
-			if got.Body.From != "1000" || got.Body.To != "2000" {
-				t.Fatalf("range=%s..%s", got.Body.From, got.Body.To)
+			if got.Body.From != tc.wantFrom || got.Body.To != tc.wantTo {
+				t.Fatalf("range=%s..%s want %s..%s", got.Body.From, got.Body.To, tc.wantFrom, tc.wantTo)
 			}
 			if len(frames) != 2 {
 				t.Fatalf("frames=%d", len(frames))
@@ -308,14 +362,31 @@ func TestFetchFrames(t *testing.T) {
 		})
 	}
 
+	// Grafana refusing the scheduler's own credentials has to be tellable apart
+	// from every other fetch failure: runScheduler counts exactly these.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run("auth refusal "+strconv.Itoa(status), func(t *testing.T) {
+			bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "nope", status)
+			}))
+			defer bad.Close()
+			poster := &grafanaPoster{url: bad.URL, client: bad.Client()}
+			_, err := poster.fetchFrames(context.Background(), ScheduleRow{Spec: testTrainSpec()})
+			if !errors.Is(err, errGrafanaUnauthorized) {
+				t.Fatalf("err=%v is not an auth refusal", err)
+			}
+		})
+	}
+
 	t.Run("status error", func(t *testing.T) {
 		bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "nope", http.StatusUnauthorized)
+			http.Error(w, "nope", http.StatusBadGateway)
 		}))
 		defer bad.Close()
 		poster := &grafanaPoster{url: bad.URL, client: bad.Client()}
-		if _, err := poster.fetchFrames(context.Background(), ScheduleRow{Spec: testTrainSpec()}); err == nil {
-			t.Fatal("expected an error")
+		_, err := poster.fetchFrames(context.Background(), ScheduleRow{Spec: testTrainSpec()})
+		if err == nil || errors.Is(err, errGrafanaUnauthorized) {
+			t.Fatalf("err=%v must not read as an auth refusal", err)
 		}
 	})
 
@@ -347,6 +418,34 @@ func TestSeriesFromFrames(t *testing.T) {
 		data.NewField("other", nil, []*float64{f64ptr(1), f64ptr(2), f64ptr(3)}),
 		data.NewField("series-1", nil, []*float64{f64ptr(10), nil, f64ptr(30)}),
 	)}
+	// A Prometheus-shaped reply: one bare "Value" column whose identity is its
+	// labels, which is the name Grafana displays and the browser stored.
+	prom := data.Frames{data.NewFrame("",
+		data.NewField("Time", nil, minutes(2)),
+		data.NewField("Value", data.Labels{"instance": "10.0.0.1", "job": "api"}, []*float64{f64ptr(1), f64ptr(2)}),
+	)}
+	// Two numeric fields that share a name: Grafana disambiguates them by index.
+	dupeNamed := data.Frames{data.NewFrame("A",
+		data.NewField("Time", nil, minutes(2)),
+		data.NewField("value", nil, []*float64{f64ptr(1), f64ptr(2)}),
+		data.NewField("value", nil, []*float64{f64ptr(3), f64ptr(4)}),
+	)}
+	renamed := data.Frames{data.NewFrame("A",
+		data.NewField("Time", nil, minutes(2)),
+		data.NewField("metric", nil, []*float64{f64ptr(5), f64ptr(6)}).SetConfig(&data.FieldConfig{DisplayName: "My Series"}),
+	)}
+	// One point over the train cap: the reply is bounded only by the decoder
+	// buffer, so the refusal has to come before the slices are allocated.
+	oversize := func() data.Frames {
+		n := maxTrainPoints + 1
+		times := make([]time.Time, n)
+		values := make([]*float64, n)
+		for i := range n {
+			times[i] = t0.Add(time.Duration(i) * time.Minute)
+			values[i] = f64ptr(float64(i))
+		}
+		return data.Frames{data.NewFrame("A", data.NewField("Time", nil, times), data.NewField("v", nil, values))}
+	}()
 	for _, tc := range []struct {
 		name       string
 		frames     data.Frames
@@ -354,6 +453,7 @@ func TestSeriesFromFrames(t *testing.T) {
 		wantValues []float64
 		wantTimes  int
 		wantErr    string
+		wantIs     error
 	}{
 		{
 			name:       "named field wins over the first numeric one",
@@ -370,9 +470,66 @@ func TestSeriesFromFrames(t *testing.T) {
 			wantTimes:  2,
 		},
 		{
-			name:       "first numeric field when nothing matches",
+			name:   "a named series that is absent is refused, not substituted",
+			frames: named,
+			spec:   retrainSpec{TrainSource: TrainSource{SeriesName: "absent"}},
+			// Fitting the first numeric field instead would publish a different series
+			// under this panel's cache key with last_status ok.
+			wantErr: `no series named "absent"`,
+		},
+		{
+			name: "a display name matches when the field name does not",
+			frames: data.Frames{data.NewFrame("A",
+				data.NewField("Time", nil, minutes(2)),
+				data.NewField("Value #A", nil, []*float64{f64ptr(7), f64ptr(8)}).SetConfig(&data.FieldConfig{DisplayNameFromDS: "series-1"}),
+			)},
+			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: "series-1"}},
+			wantValues: []float64{7, 8},
+			wantTimes:  2,
+		},
+		{
+			// What the browser stores for a labeled Prometheus series, and what the
+			// old field-name-only mirror could never match.
+			name:       "a label-derived display name matches",
+			frames:     prom,
+			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: `{instance="10.0.0.1", job="api"}`}},
+			wantValues: []float64{1, 2},
+			wantTimes:  2,
+		},
+		{
+			name:       "the duplicate index disambiguates same-named fields",
+			frames:     dupeNamed,
+			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: "value 2"}},
+			wantValues: []float64{3, 4},
+			wantTimes:  2,
+		},
+		{
+			name:       "a config.displayName override matches",
+			frames:     renamed,
+			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: "My Series"}},
+			wantValues: []float64{5, 6},
+			wantTimes:  2,
+		},
+		{
+			// A display name can drift between the browser and this process (another
+			// datasource version, a different frame set). One candidate is not a
+			// choice, so it is taken rather than blocking the row forever.
+			name:       "a lone candidate stands in for an unmatched name",
+			frames:     prom,
+			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: "labels the reply does not carry"}},
+			wantValues: []float64{1, 2},
+			wantTimes:  2,
+		},
+		{
+			name:   "a frame over MAX_TRAIN_POINTS is refused",
+			frames: oversize,
+			spec:   retrainSpec{TrainSource: TrainSource{SeriesName: "v"}},
+			wantIs: errTrainTooLong,
+		},
+		{
+			name:       "an unnamed spec takes the first time series",
 			frames:     named,
-			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: "absent"}},
+			spec:       retrainSpec{},
 			wantValues: []float64{1, 2, 3},
 			wantTimes:  3,
 		},
@@ -396,6 +553,12 @@ func TestSeriesFromFrames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			series, err := seriesFromFrames(tc.frames, tc.spec)
+			if tc.wantIs != nil {
+				if !errors.Is(err, tc.wantIs) {
+					t.Fatalf("err=%v want %v", err, tc.wantIs)
+				}
+				return
+			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err=%v", err)
@@ -451,7 +614,8 @@ func (p *fakePoster) fetchFrames(_ context.Context, _ ScheduleRow) (data.Frames,
 	}
 	return data.Frames{data.NewFrame("A",
 		data.NewField("Time", nil, times),
-		data.NewField("Value", nil, values),
+		// The name the spec asks for: testTrainSpec trains on "series-1".
+		data.NewField("series-1", nil, values),
 	)}, nil
 }
 
@@ -478,7 +642,7 @@ func TestRetrainOne(t *testing.T) {
 	t.Run("ok writes a snapshot and the next run", func(t *testing.T) {
 		app, store, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, newWorkLimiter(1))
 		before := time.Now()
-		app.retrainOne(ctx, newRow())
+		app.retrainOne(ctx, retrainOwner(), newRow())
 		finishes := sched.finished()
 		if len(finishes) != 1 {
 			t.Fatalf("finishes=%+v", finishes)
@@ -494,10 +658,43 @@ func TestRetrainOne(t *testing.T) {
 		}
 	})
 
+	t.Run("the spec's model parameters reach the fit", func(t *testing.T) {
+		// A scheduled refit must reproduce the model the panel asked for: identical
+		// snapshots for two different alphas means the spec's parameters were ignored
+		// and the fit silently fell back to the backend defaults.
+		snapshotFor := func(alpha float64) string {
+			app, store, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, newWorkLimiter(1))
+			row := newRow()
+			var spec retrainSpec
+			if err := json.Unmarshal(row.Spec, &spec); err != nil {
+				t.Fatal(err)
+			}
+			spec.Model, spec.Season, spec.Alpha = "ses", "", alpha
+			raw, err := json.Marshal(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			row.Spec = raw
+			app.retrainOne(ctx, retrainOwner(), row)
+			snap, ok, err := store.Get(ctx, 7, key)
+			if err != nil || !ok {
+				t.Fatalf("snapshot ok=%v err=%v (finishes=%+v)", ok, err, sched.finished())
+			}
+			out, err := json.Marshal(snap)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(out)
+		}
+		if snapshotFor(0.5) == snapshotFor(0.7) {
+			t.Fatal("alpha from the stored spec did not reach the fit")
+		}
+	})
+
 	t.Run("fetch failure records the error and retries after the lease", func(t *testing.T) {
 		app, store, sched := newRetrainApp(&fakePoster{err: errors.New("upstream down")}, newWorkLimiter(1))
 		before := time.Now()
-		app.retrainOne(ctx, newRow())
+		app.retrainOne(ctx, retrainOwner(), newRow())
 		finishes := sched.finished()
 		if len(finishes) != 1 {
 			t.Fatalf("finishes=%+v", finishes)
@@ -522,7 +719,7 @@ func TestRetrainOne(t *testing.T) {
 		defer release()
 		app, _, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, lim)
 		before := time.Now()
-		app.retrainOne(ctx, newRow())
+		app.retrainOne(ctx, retrainOwner(), newRow())
 		finishes := sched.finished()
 		if len(finishes) != 1 || !strings.Contains(finishes[0].Status, errBusy.Error()) {
 			t.Fatalf("finishes=%+v", finishes)
@@ -536,7 +733,7 @@ func TestRetrainOne(t *testing.T) {
 		app, _, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, newWorkLimiter(1))
 		row := newRow()
 		row.Spec = json.RawMessage(`{"model":"baseline"}`)
-		app.retrainOne(ctx, row)
+		app.retrainOne(ctx, retrainOwner(), row)
 		finishes := sched.finished()
 		if len(finishes) != 1 || !strings.HasPrefix(finishes[0].Status, "error:") {
 			t.Fatalf("finishes=%+v", finishes)
@@ -547,7 +744,7 @@ func TestRetrainOne(t *testing.T) {
 		app, _, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, newWorkLimiter(1))
 		row := newRow()
 		row.Scope = scopeBaseline
-		app.retrainOne(ctx, row)
+		app.retrainOne(ctx, retrainOwner(), row)
 		finishes := sched.finished()
 		if len(finishes) != 1 || !strings.HasPrefix(finishes[0].Status, "error:") {
 			t.Fatalf("finishes=%+v", finishes)
@@ -618,6 +815,60 @@ func TestSchedulerOutlivesItsCreatingRequest(t *testing.T) {
 	t.Fatal("the scheduler never ran after its creating context was cancelled")
 }
 
+// TestAuthGuardStopsOnlyOnConsecutiveRefusals pins the counting rule behind the
+// auto-disable: only Grafana's own 401/403 refusals accumulate, and any tick
+// that got past the fetch starts the count over.
+func TestAuthGuardStopsOnlyOnConsecutiveRefusals(t *testing.T) {
+	denied := tickResult{denied: true}
+	fetched := tickResult{fetched: true}
+	idle := tickResult{}
+	for _, tc := range []struct {
+		name  string
+		ticks []tickResult
+		want  bool
+	}{
+		{
+			name:  "three refusals in a row stop it",
+			ticks: []tickResult{denied, denied, denied},
+			want:  true,
+		},
+		{
+			name:  "a fetch that got past the wall resets the count",
+			ticks: []tickResult{denied, denied, fetched, denied, denied},
+			want:  false,
+		},
+		{
+			name:  "a tick with nothing due neither counts nor resets",
+			ticks: []tickResult{denied, idle, denied, idle, denied},
+			want:  true,
+		},
+		{
+			name:  "a datasource error is not a refusal",
+			ticks: []tickResult{denied, fetched, denied, fetched, denied, fetched},
+			want:  false,
+		},
+		{
+			name:  "fewer than the threshold keeps it alive",
+			ticks: []tickResult{denied, denied},
+			want:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var g authGuard
+			stopped := false
+			for _, tick := range tc.ticks {
+				if g.watch(tick) {
+					stopped = true
+					break
+				}
+			}
+			if stopped != tc.want {
+				t.Fatalf("stopped=%v want %v after %d ticks", stopped, tc.want, len(tc.ticks))
+			}
+		})
+	}
+}
+
 // TestRunSchedulerStops pins the Dispose contract: canceling the app must end
 // the ticker goroutine, or every instance reload leaks a ticker that keeps
 // claiming rows for the life of the Grafana process.
@@ -641,5 +892,179 @@ func TestRunSchedulerStops(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("scheduler did not stop after cancel")
+	}
+}
+
+// TestRunSchedulerStopsOnAuthRefusal pins the documented invariant that a
+// scheduler Grafana will not authenticate (401/403) ends itself instead of
+// retrying every tick for the life of the process, while a datasource that is
+// merely broken keeps it running.
+func TestRunSchedulerStopsOnAuthRefusal(t *testing.T) {
+	const key = "4444444444444444444444444444444444444444444444444444444444444444"
+	newApp := func(poster framePoster) (*App, *memSchedules) {
+		store, sched := newMemoryStore(), newMemSchedules()
+		sched.seed(ScheduleRow{
+			OrgID: 1, Scope: scopePanel, Key: key, Cron: "@every 1s", Timezone: "UTC",
+			Enabled: true, Spec: testTrainSpec(), NextRunAt: time.Now().Add(-time.Minute),
+		})
+		return &App{
+			store: store, sched: sched, poster: poster,
+			// The short lease makes the failed row due again a few ticks later, so
+			// three consecutive refusals happen in well under a second.
+			retrain: retrainConfig{Enabled: true, Cron: "@every 1s", Timezone: "UTC", Lease: 20 * time.Millisecond, Tick: 2 * time.Millisecond},
+			limit:   newWorkLimiter(1),
+		}, sched
+	}
+	for _, tc := range []struct {
+		name      string
+		poster    *fakePoster
+		wantStop  bool
+		wantCalls int
+	}{
+		{
+			name:      "three auth refusals end the ticker",
+			poster:    &fakePoster{err: fmt.Errorf("%w: status 401", errGrafanaUnauthorized)},
+			wantStop:  true,
+			wantCalls: retrainAuthFailures,
+		},
+		{
+			name:     "a broken datasource keeps it ticking",
+			poster:   &fakePoster{err: errors.New("datasource exploded")},
+			wantStop: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, sched := newApp(tc.poster)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				app.runScheduler(ctx)
+				close(done)
+			}()
+
+			if !tc.wantStop {
+				// Attempts are observed through the store (guarded), because the
+				// poster is only ever read once its goroutine has stopped.
+				deadline := time.Now().Add(5 * time.Second)
+				for len(sched.finished()) < 2 && time.Now().Before(deadline) {
+					time.Sleep(5 * time.Millisecond)
+				}
+				if len(sched.finished()) < 2 {
+					t.Fatalf("only %d attempts: the ticker is not running", len(sched.finished()))
+				}
+				select {
+				case <-done:
+					t.Fatalf("a datasource error disabled the scheduler after %d attempts", len(sched.finished()))
+				default:
+				}
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("scheduler did not stop after cancel")
+				}
+				return
+			}
+
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("the scheduler kept ticking against an auth refusal (%d attempts)", len(sched.finished()))
+			}
+			if tc.poster.calls != tc.wantCalls {
+				t.Fatalf("fetch attempts=%d want %d", tc.poster.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestRetrainReplyBounds pins what one /api/ds/query reply may cost the
+// scheduler: a body over maxDSQueryReplyBytes is refused outright, and a frame
+// over MAX_TRAIN_POINTS is refused before it is fitted. Neither may publish a
+// snapshot.
+func TestRetrainReplyBounds(t *testing.T) {
+	const key = "5555555555555555555555555555555555555555555555555555555555555555"
+	ctx := context.Background()
+
+	oversizeBody := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		chunk := bytes.Repeat([]byte("x"), 1<<16)
+		for written := int64(0); written <= maxDSQueryReplyBytes; written += int64(len(chunk)) {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer oversizeBody.Close()
+
+	// The reply that violates the train cap has to arrive over the wire: it is the
+	// decoder that bounds what the datasource can cost.
+	bigPoints := maxTrainPoints + 1
+	bigTimes := make([]time.Time, bigPoints)
+	bigValues := make([]float64, bigPoints)
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	for i := range bigPoints {
+		bigTimes[i] = t0.Add(time.Duration(i) * time.Minute)
+		bigValues[i] = float64(i)
+	}
+	bigReply, err := json.Marshal(dsReply{Results: map[string]*dsReplyResult{
+		"A": {Status: 200, Frames: data.Frames{data.NewFrame("A",
+			data.NewField("Time", nil, bigTimes),
+			data.NewField("series-1", nil, bigValues),
+		)}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bigFrame := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bigReply)
+	}))
+	defer bigFrame.Close()
+
+	for _, tc := range []struct {
+		name       string
+		poster     framePoster
+		wantIs     error
+		wantPhrase string
+	}{
+		{
+			name:       "a reply over maxDSQueryReplyBytes is refused",
+			poster:     &grafanaPoster{url: oversizeBody.URL, client: oversizeBody.Client()},
+			wantPhrase: "reply exceeds",
+		},
+		{
+			name:       "a frame over MAX_TRAIN_POINTS is refused",
+			poster:     &grafanaPoster{url: bigFrame.URL, client: bigFrame.Client()},
+			wantIs:     errTrainTooLong,
+			wantPhrase: errTrainTooLong.Error(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, sched := newMemoryStore(), newMemSchedules()
+			app := &App{
+				store: store, sched: sched, poster: tc.poster,
+				retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, Tick: time.Second},
+				limit:   newWorkLimiter(1),
+			}
+			row := ScheduleRow{OrgID: 7, Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Spec: testTrainSpec()}
+			err := app.trainFromSpec(ctx, row)
+			if err == nil || !strings.Contains(err.Error(), tc.wantPhrase) {
+				t.Fatalf("err=%v want %q", err, tc.wantPhrase)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Fatalf("err=%v is not %v", err, tc.wantIs)
+			}
+			// The scheduler path must reach the same verdict and publish nothing.
+			app.retrainOne(ctx, retrainOwner(), row)
+			finishes := sched.finished()
+			if len(finishes) != 1 || !strings.Contains(finishes[0].Status, tc.wantPhrase) {
+				t.Fatalf("finishes=%+v want %q", finishes, tc.wantPhrase)
+			}
+			if _, ok, err := store.Get(ctx, 7, key); err != nil || ok {
+				t.Fatalf("snapshot published: ok=%v err=%v", ok, err)
+			}
+		})
 	}
 }

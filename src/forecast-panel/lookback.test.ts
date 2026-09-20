@@ -44,6 +44,8 @@ describe('resolveTrainWindow', () => {
     expect(resolveTrainWindow({ model: 'holt' }, panelTo)).toEqual({
       fromMs: panelTo - 7 * day,
       toMs: panelTo,
+      relative: true,
+      lookbackMs: 7 * day,
     });
   });
 
@@ -51,6 +53,8 @@ describe('resolveTrainWindow', () => {
     expect(resolveTrainWindow({ model: 'holt', lookback: '30d' }, panelTo)).toEqual({
       fromMs: panelTo - 30 * day,
       toMs: panelTo,
+      relative: true,
+      lookbackMs: 30 * day,
     });
   });
 
@@ -58,25 +62,40 @@ describe('resolveTrainWindow', () => {
     expect(resolveTrainWindow({ model: 'holt', lookback: '30d', trainRange: { from: '', to: '' } }, panelTo)).toEqual({
       fromMs: panelTo - 7 * day,
       toMs: panelTo,
+      relative: true,
+      lookbackMs: 7 * day,
     });
   });
 
-  it('uses an absolute from/to range', () => {
+  it('reports a lookback window as relative so a retrain re-resolves it', () => {
+    const w = resolveTrainWindow({ model: 'baseline', season: 'minute-week' }, panelTo);
+    expect(w.lookbackMs).toBe(21 * day);
+    expect(w.relative).toBe(true);
+    expect(w.toMs - w.fromMs).toBe(w.lookbackMs);
+  });
+
+  it('uses an absolute from/to range and reports it as such', () => {
     const from = '2026-07-01T00:00:00.000Z';
     const to = '2026-08-01T00:00:00.000Z';
     expect(resolveTrainWindow({ model: 'holt', trainRange: { from, to } }, panelTo, 'utc')).toEqual({
       fromMs: Date.parse(from),
       toMs: Date.parse(to),
+      // The picker means those dates, not "the last N hours": the stored window
+      // stays the only correct one for a cron retrain.
+      relative: false,
+      lookbackMs: 0,
     });
   });
 
   it('parses a relative Grafana range', () => {
-    const { fromMs, toMs } = resolveTrainWindow(
+    const { fromMs, toMs, relative, lookbackMs } = resolveTrainWindow(
       { model: 'holt', trainRange: { from: 'now-7d', to: 'now' } },
       panelTo,
       'utc'
     );
     expect(Math.abs(toMs - fromMs - 7 * day)).toBeLessThan(2);
+    expect(relative).toBe(false);
+    expect(lookbackMs).toBe(0);
   });
 
   it('falls back to Auto when from is not before to', () => {
@@ -85,6 +104,8 @@ describe('resolveTrainWindow', () => {
     ).toEqual({
       fromMs: panelTo - 7 * day,
       toMs: panelTo,
+      relative: true,
+      lookbackMs: 7 * day,
     });
   });
 });
@@ -308,6 +329,8 @@ describe('absoluteDayBound / civilYmd', () => {
     expect(resolveTrainWindow({ model: 'holt', trainRange: { from, to } }, 0, 'utc')).toEqual({
       fromMs: utcMidnight,
       toMs: Date.UTC(2026, 8, 8, 23, 59, 59),
+      relative: false,
+      lookbackMs: 0,
     });
   });
 

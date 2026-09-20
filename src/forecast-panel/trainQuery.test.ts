@@ -66,9 +66,33 @@ describe('queryTrainingFrames', () => {
       queries: prom.seen[0],
       from: fromMs,
       to: toMs,
+      relative: false,
+      lookbackMs: 0,
     });
     // Identity, not a copy: the backend replays the untouched rewrite output.
     expect(result.source?.queries).toBe(prom.seen[0]);
+  });
+
+  it('carries a relative window into the source so a cron retrain can re-resolve it', async () => {
+    const prom = datasource([frame('up')]);
+    mockGet.mockResolvedValue(prom.ds);
+
+    const result = await queryTrainingFrames(request([{ uid: 'prom', type: 'prometheus' }]), {
+      fromMs,
+      toMs,
+      intervalMs: 60_000,
+      relative: true,
+      lookbackMs: toMs - fromMs,
+    });
+
+    expect(result.source).toEqual({
+      datasourceUid: 'prom',
+      queries: prom.seen[0],
+      from: fromMs,
+      to: toMs,
+      relative: true,
+      lookbackMs: toMs - fromMs,
+    });
   });
 
   it('attributes the source to the first group that returned frames', async () => {

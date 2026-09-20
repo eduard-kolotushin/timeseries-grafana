@@ -3,12 +3,16 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // TestPostgresStoreLazyConnect: an unreachable database must not turn the store
@@ -27,17 +31,93 @@ func TestPostgresStoreLazyConnect(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connect error")
 	}
-	first := s.lastAttempt
+	first := s.snap.attempt
 	// Within the backoff window the cached error is returned without redialing.
-	if _, _, err2 := s.Get(ctx, 1, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err2 == nil || s.lastAttempt != first {
-		t.Fatalf("expected throttled retry, err=%v attempt moved=%v", err2, s.lastAttempt != first)
+	if _, _, err2 := s.Get(ctx, 1, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err2 == nil || s.snap.attempt != first {
+		t.Fatalf("expected throttled retry, err=%v attempt moved=%v", err2, s.snap.attempt != first)
 	}
 	clock = clock.Add(ensureRetryAfter)
-	if _, _, err3 := s.Get(ctx, 1, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err3 == nil || s.lastAttempt == first {
+	if _, _, err3 := s.Get(ctx, 1, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err3 == nil || s.snap.attempt == first {
 		t.Fatalf("expected a fresh attempt after backoff, err=%v", err3)
 	}
-	if s.ready {
+	if s.snap.ready {
 		t.Fatal("store must not be marked ready")
+	}
+}
+
+// fakePool answers the statements ensureTable issues, without a Postgres.
+type fakePool struct {
+	pingErr    error
+	execErr    func(sql string) error
+	rowErr     error
+	statements []string
+}
+
+func (p *fakePool) Ping(context.Context) error { return p.pingErr }
+
+func (p *fakePool) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	p.statements = append(p.statements, sql)
+	if p.execErr != nil {
+		if err := p.execErr(sql); err != nil {
+			return pgconn.CommandTag{}, err
+		}
+	}
+	return pgconn.NewCommandTag("CREATE TABLE"), nil
+}
+
+func (p *fakePool) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("fakePool has no rows")
+}
+
+func (p *fakePool) QueryRow(context.Context, string, ...any) pgx.Row { return fakeRow{err: p.rowErr} }
+
+func (p *fakePool) Close() {}
+
+type fakeRow struct{ err error }
+
+func (r fakeRow) Scan(...any) error { return r.err }
+
+// TestScheduleDDLFailureLeavesSnapshotsServing: ensureSQL provisions both
+// tables, so a runtime user that may not CREATE can be missing forecast.retrain
+// while forecast.snapshots is fine. A schedule failure must not change what a
+// snapshot call answers — sharing one cached error made every overlay probe 500
+// until the retry window expired.
+func TestScheduleDDLFailureLeavesSnapshotsServing(t *testing.T) {
+	ctx := context.Background()
+	db := &fakePool{
+		execErr: func(sql string) error {
+			if strings.Contains(sql, "forecast.retrain") {
+				return errors.New("ERROR: permission denied for schema forecast (SQLSTATE 42501)")
+			}
+			return nil
+		},
+		rowErr: pgx.ErrNoRows,
+	}
+	clock := time.Unix(1_000_000, 0)
+	s := &postgresStore{pool: db, now: func() time.Time { return clock }}
+
+	if err := s.ensureSchedules(ctx); err == nil {
+		t.Fatal("the schedule path must report the DDL failure")
+	}
+	if _, ok, err := s.Get(ctx, 1, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"); err != nil || ok {
+		t.Fatalf("a schedule DDL failure changed the snapshot path: ok=%v err=%v", ok, err)
+	}
+
+	// The per-table retry state still throttles the failing DDL, and retries it
+	// after the window instead of latching the table as ready.
+	attempts := len(db.statements)
+	if err := s.ensureSchedules(ctx); err == nil {
+		t.Fatal("the schedule path must keep reporting the failure")
+	}
+	if len(db.statements) != attempts {
+		t.Fatalf("the failing DDL was retried inside the backoff window (%d statements)", len(db.statements))
+	}
+	clock = clock.Add(ensureRetryAfter)
+	if err := s.ensureSchedules(ctx); err == nil {
+		t.Fatal("the schedule path must not latch ready while the table is missing")
+	}
+	if len(db.statements) == attempts {
+		t.Fatal("the DDL was never retried after the backoff")
 	}
 }
 
@@ -188,7 +268,34 @@ func TestPostgresSchedule(t *testing.T) {
 	}
 
 	next := time.Now().Add(5 * time.Minute).UTC().Truncate(time.Millisecond)
-	if err := s.Finish(ctx, scopePanel, key, next, "ok"); err != nil {
+	// A stale owner — a retrain that outlived its lease — must not release this
+	// claim or move this row's next run: those belong to whoever holds the lease.
+	stale := next.Add(time.Hour)
+	if err := s.Finish(ctx, "test-owner-2", scopePanel, key, stale, "error: stale"); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := s.List(ctx, orgID); err != nil {
+		t.Fatal(err)
+	} else {
+		mine := panelRows(rows)
+		if len(mine) != 1 {
+			t.Fatalf("list=%+v", rows)
+		}
+		if !mine[0].NextRunAt.Equal(past) || mine[0].LastStatus != "" {
+			t.Fatalf("a stale owner moved the row: %+v", mine[0])
+		}
+	}
+	if claimed, err := s.Claim(ctx, "test-owner-4", time.Minute, 100); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, row := range claimed {
+			if row.Key == key {
+				t.Fatalf("a stale owner released the claim: %+v", row)
+			}
+		}
+	}
+
+	if err := s.Finish(ctx, "test-owner", scopePanel, key, next, "ok"); err != nil {
 		t.Fatal(err)
 	}
 	if due, err := s.Due(ctx, orgID, key, time.Now()); err != nil || due {

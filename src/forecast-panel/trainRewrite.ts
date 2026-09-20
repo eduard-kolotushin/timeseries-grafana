@@ -30,6 +30,13 @@ export type TrainRewriteWindow = {
   visibleFromMs?: number;
   visibleToMs?: number;
   intervalMs: number;
+  /**
+   * True when `fromMs`/`toMs` came from a lookback resolved against the panel's
+   * own now. It rides along into the stored `trainSource` so a cron retrain
+   * re-resolves the window instead of replaying a frozen pair.
+   */
+  relative?: boolean;
+  lookbackMs?: number;
 };
 
 export type TrainRewriteResult<T> = {

@@ -692,6 +692,9 @@ func TestForecastRecordsTrainSource(t *testing.T) {
 			Times:       []int64{0, 1000, 2000, 3000},
 			Values:      []nullableFloat{1, 2, 3, 4},
 			Model:       "naive",
+			Alpha:       0.4,
+			Beta:        0.15,
+			Period:      12,
 			From:        4000,
 			To:          5000,
 			CacheKey:    key,
@@ -755,11 +758,16 @@ func TestForecastRecordsTrainSource(t *testing.T) {
 	if string(spec.Queries) != string(src.Queries) || spec.SeriesName != "series-1" || spec.Model != "naive" {
 		t.Fatalf("spec=%+v", spec)
 	}
+	// The scheduler re-fits from this spec alone, so the panel's model parameters have to
+	// be stored with it: without them a cron retrain fits the backend defaults instead.
+	if spec.Alpha != 0.4 || spec.Beta != 0.15 || spec.Period != 12 {
+		t.Fatalf("spec parameters were dropped: %+v", spec)
+	}
 
-	// An admin's cron survives the next retrain of the same panel.
+	// An admin's cron and enable state survive the next retrain of the same panel.
 	sched.seed(ScheduleRow{
 		OrgID: 3, Scope: scopePanel, Key: key, Cron: "*/2 * * * *", Timezone: "Europe/Moscow",
-		Enabled: true, Spec: row.Spec, NextRunAt: time.Now().Add(time.Hour),
+		Enabled: false, Spec: row.Spec, NextRunAt: time.Now().Add(time.Hour),
 	})
 	if status := fit(src); status != http.StatusOK {
 		t.Fatalf("status=%d", status)
@@ -767,5 +775,8 @@ func TestForecastRecordsTrainSource(t *testing.T) {
 	rows, _ = sched.List(ctx, 3)
 	if len(rows) != 1 || rows[0].Cron != "*/2 * * * *" || rows[0].Timezone != "Europe/Moscow" {
 		t.Fatalf("retrain reset the schedule: %+v", rows)
+	}
+	if rows[0].Enabled {
+		t.Fatalf("a browser fit re-enabled a schedule the admin turned off: %+v", rows[0])
 	}
 }

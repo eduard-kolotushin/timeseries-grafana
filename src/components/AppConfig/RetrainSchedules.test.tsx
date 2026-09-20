@@ -35,10 +35,34 @@ const baselineRow: ScheduleRow = {
   lastStatus: 'ok',
 };
 
+const errorRow: ScheduleRow = {
+  ...panelRow,
+  key: 'errorhash',
+  lastStatus: 'error: dial tcp: connection refused',
+};
+
+const neverRow: ScheduleRow = { ...panelRow, key: 'neverhash', lastStatus: undefined };
+
+const manyRows = (count: number): ScheduleRow[] =>
+  Array.from({ length: count }, (_, i) => ({ ...panelRow, key: `panelhash${i}` }));
+
 function renderSchedules(rows: ScheduleRow[]) {
   mockGet.mockResolvedValue(rows);
   return render(<RetrainSchedules />);
 }
+
+/** The table has no per-row testid; an input's aria-label identifies its row. */
+function rowOf(ariaLabel: string): HTMLElement {
+  const tr = screen.getByLabelText(ariaLabel).closest('tr');
+  if (!tr) {
+    throw new Error(`no row for ${ariaLabel}`);
+  }
+  return tr;
+}
+
+const pickRadio = (legend: string, option: string) => {
+  fireEvent.click(within(screen.getByRole('group', { name: legend })).getByRole('radio', { name: option }));
+};
 
 describe('RetrainSchedules', () => {
   beforeEach(() => {
@@ -51,11 +75,66 @@ describe('RetrainSchedules', () => {
     renderSchedules([panelRow, baselineRow]);
     expect(await screen.findByText('panelhash')).toBeInTheDocument();
     expect(screen.getByText('baselinehash')).toBeInTheDocument();
-    expect(screen.getAllByTestId(testIds.appConfig.retrainRow)).toHaveLength(2);
-    const panel = screen.getAllByTestId(testIds.appConfig.retrainRow)[0];
+    const panel = rowOf('panel/panelhash cron');
     expect(within(panel).getByText('2026-09-21T03:00:00Z')).toBeInTheDocument();
     expect(within(panel).getByText('2026-09-20T03:00:00Z')).toBeInTheDocument();
     expect(screen.queryByTestId(testIds.appConfig.retrainError)).toBeNull();
+  });
+
+  it('pages long lists and drops the pager when a filter narrows them to one page', async () => {
+    renderSchedules(manyRows(25));
+    await screen.findByLabelText('panel/panelhash0 cron');
+    expect(screen.queryByLabelText('panel/panelhash20 cron')).toBeNull();
+    fireEvent.click(within(screen.getByRole('navigation')).getByRole('button', { name: '2' }));
+    expect(await screen.findByLabelText('panel/panelhash20 cron')).toBeInTheDocument();
+    expect(within(screen.getByRole('navigation')).getByRole('button', { name: '1' })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search' }), { target: { value: 'panelhash2' } });
+    expect(await screen.findByLabelText('panel/panelhash2 cron')).toBeInTheDocument();
+    expect(screen.queryByRole('navigation')).toBeNull();
+  });
+
+  it('hides the pager for a single page', async () => {
+    renderSchedules([panelRow, baselineRow]);
+    await screen.findByLabelText('panel/panelhash cron');
+    expect(screen.queryByRole('navigation')).toBeNull();
+  });
+
+  it('filters by key search', async () => {
+    renderSchedules([panelRow, baselineRow]);
+    await screen.findByLabelText('panel/panelhash cron');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search' }), { target: { value: 'BASELINE' } });
+    expect(screen.queryByLabelText('panel/panelhash cron')).toBeNull();
+    expect(screen.getByLabelText('baseline/baselinehash cron')).toBeInTheDocument();
+  });
+
+  it('filters by scope', async () => {
+    renderSchedules([panelRow, baselineRow]);
+    await screen.findByLabelText('panel/panelhash cron');
+    pickRadio('Scope', 'baseline');
+    expect(screen.queryByLabelText('panel/panelhash cron')).toBeNull();
+    expect(screen.getByLabelText('baseline/baselinehash cron')).toBeInTheDocument();
+    pickRadio('Scope', 'panel');
+    expect(screen.queryByLabelText('baseline/baselinehash cron')).toBeNull();
+    expect(screen.getByLabelText('panel/panelhash cron')).toBeInTheDocument();
+  });
+
+  it('filters by enabled state', async () => {
+    renderSchedules([panelRow, { ...panelRow, key: 'disabled', enabled: false }]);
+    await screen.findByLabelText('panel/panelhash cron');
+    pickRadio('Enabled', 'Disabled');
+    expect(screen.queryByLabelText('panel/panelhash cron')).toBeNull();
+    expect(screen.getByLabelText('panel/disabled cron')).toBeInTheDocument();
+  });
+
+  it('filters by last status, treating a missing status as never run', async () => {
+    renderSchedules([panelRow, errorRow, neverRow]);
+    await screen.findByLabelText('panel/panelhash cron');
+    pickRadio('Status', 'error');
+    expect(screen.queryByLabelText('panel/panelhash cron')).toBeNull();
+    expect(screen.getByLabelText('panel/errorhash cron')).toBeInTheDocument();
+    pickRadio('Status', 'never run');
+    expect(screen.getByLabelText('panel/neverhash cron')).toBeInTheDocument();
+    expect(screen.queryByLabelText('panel/errorhash cron')).toBeNull();
   });
 
   it('saves an edited cron', async () => {

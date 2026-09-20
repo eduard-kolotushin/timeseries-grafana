@@ -16,10 +16,18 @@ import (
 func schedKey(scope, key string) string { return scope + "\x00" + key }
 
 type finishCall struct {
+	Owner  string
 	Scope  string
 	Key    string
 	Next   time.Time
 	Status string
+}
+
+// schedLease is one claimed row's holder and expiry, the in-memory twin of the
+// (claimed_by, claimed_until) pair.
+type schedLease struct {
+	owner string
+	until time.Time
 }
 
 // memSchedules is an in-memory ScheduleStore. It applies the same
@@ -28,14 +36,14 @@ type finishCall struct {
 type memSchedules struct {
 	mu     sync.Mutex
 	rows   map[string]ScheduleRow
-	leases map[string]time.Time
+	leases map[string]schedLease
 	finish []finishCall
 }
 
 var _ ScheduleStore = (*memSchedules)(nil)
 
 func newMemSchedules() *memSchedules {
-	return &memSchedules{rows: map[string]ScheduleRow{}, leases: map[string]time.Time{}}
+	return &memSchedules{rows: map[string]ScheduleRow{}, leases: map[string]schedLease{}}
 }
 
 // List mirrors the SQL predicate: baseline rows are fleet-wide (the worker
@@ -103,7 +111,7 @@ func (m *memSchedules) Claim(_ context.Context, owner string, lease time.Duratio
 		if row.NextRunAt.IsZero() || row.NextRunAt.After(now) {
 			continue
 		}
-		if until, ok := m.leases[k]; ok && until.After(now) {
+		if lease, ok := m.leases[k]; ok && lease.until.After(now) {
 			continue
 		}
 		due = append(due, row)
@@ -113,16 +121,22 @@ func (m *memSchedules) Claim(_ context.Context, owner string, lease time.Duratio
 		due = due[:limit]
 	}
 	for _, row := range due {
-		m.leases[schedKey(row.Scope, row.Key)] = now.Add(lease)
+		m.leases[schedKey(row.Scope, row.Key)] = schedLease{owner: owner, until: now.Add(lease)}
 	}
 	return due, nil
 }
 
-func (m *memSchedules) Finish(_ context.Context, scope, key string, next time.Time, status string) error {
+// Finish mirrors the SQL's owner predicate: only the holder may release the
+// claim, so a retrain that outlived its lease leaves the newer owner's claim and
+// next run alone.
+func (m *memSchedules) Finish(_ context.Context, owner, scope, key string, next time.Time, status string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.finish = append(m.finish, finishCall{Scope: scope, Key: key, Next: next, Status: status})
+	m.finish = append(m.finish, finishCall{Owner: owner, Scope: scope, Key: key, Next: next, Status: status})
 	k := schedKey(scope, key)
+	if lease, ok := m.leases[k]; ok && lease.owner != owner {
+		return nil
+	}
 	row := m.rows[k]
 	row.Scope, row.Key = scope, key
 	row.NextRunAt, row.LastRunAt, row.LastStatus = next, time.Now(), status

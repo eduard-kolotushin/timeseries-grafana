@@ -31,6 +31,14 @@ type TrainSource struct {
 	From          int64           `json:"from"`
 	To            int64           `json:"to"`
 	SeriesName    string          `json:"seriesName,omitempty"`
+	// Relative marks From/To as "the browser resolved a lookback against the
+	// panel's own now": a cron retrain re-resolves [now - LookbackMs, now] at
+	// claim time, so the window moves with the clock instead of refetching one
+	// frozen range forever. From/To stay the stored absolute pair and are the
+	// only correct window for a panel whose picker held real dates, and the
+	// fallback for rows an older frontend wrote.
+	Relative   bool  `json:"relative,omitempty"`
+	LookbackMs int64 `json:"lookbackMs,omitempty"`
 }
 
 // ForecastRequest is the JSON body for POST /forecast.
@@ -174,15 +182,16 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	if a.sched == nil || in.TrainSource == nil {
 		return
 	}
-	cronSpec, timezone := a.retrain.Cron, a.retrain.Timezone
-	// An existing row's cron is the admin's schedule, not the default: a retrain
-	// must extend the row, never reset when it fires.
+	cronSpec, timezone, enabled := a.retrain.Cron, a.retrain.Timezone, true
+	// An existing row's cron and enable state are the admin's, not the defaults: a
+	// browser retrain must extend the row, never reset when it fires or switch off a
+	// schedule an admin turned off.
 	if rows, err := a.sched.List(ctx, orgID); err != nil {
 		log.DefaultLogger.Warn("schedule list", "err", err.Error())
 	} else {
 		for _, row := range rows {
 			if row.Scope == scopePanel && row.Key == in.CacheKey {
-				cronSpec, timezone = row.Cron, row.Timezone
+				cronSpec, timezone, enabled = row.Cron, row.Timezone, row.Enabled
 				break
 			}
 		}
@@ -195,6 +204,9 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	spec, err := json.Marshal(retrainSpec{
 		TrainSource: *in.TrainSource,
 		Model:       in.Model,
+		Alpha:       in.Alpha,
+		Beta:        in.Beta,
+		Period:      in.Period,
 		Season:      in.Season,
 		Calendar:    in.Calendar,
 		Lookback:    lookbackString(in.TrainSource.To - in.TrainSource.From),
@@ -208,7 +220,7 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 		Key:       in.CacheKey,
 		Cron:      cronSpec,
 		Timezone:  normalizedTimezone(timezone),
-		Enabled:   true,
+		Enabled:   enabled,
 		Spec:      spec,
 		NextRunAt: next,
 	})

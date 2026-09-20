@@ -210,6 +210,19 @@ function parseTimeRange(
   return null;
 }
 
+/**
+ * Training from/to window plus how it was resolved. `relative` is true when the
+ * window came from a lookback against the panel's own now, which is what a cron
+ * retrain must re-resolve instead of replaying `fromMs`/`toMs` verbatim.
+ */
+export type TrainWindow = {
+  fromMs: number;
+  toMs: number;
+  relative: boolean;
+  /** Width to re-resolve at claim time. 0 when the window is absolute. */
+  lookbackMs: number;
+};
+
 /** Training from/to window. Explicit empty picker is Auto (ignores legacy `lookback`). */
 export function resolveTrainWindow(
   options: {
@@ -220,18 +233,20 @@ export function resolveTrainWindow(
   },
   panelToMs: number,
   timeZone?: string
-): { fromMs: number; toMs: number } {
+): TrainWindow {
   if (options.trainRange != null && !isExplicitAutoTrainRange(options.trainRange)) {
     const parsed = parseTimeRange(options.trainRange, timeZone);
     if (parsed) {
-      return parsed;
+      // An absolute picker means those dates, not "the last N hours": replaying
+      // them verbatim is the only faithful retrain.
+      return { ...parsed, relative: false, lookbackMs: 0 };
     }
   }
   const lookbackMs =
     options.trainRange != null && isExplicitAutoTrainRange(options.trainRange)
       ? rangeUtil.intervalToMs(autoLookback(options.model, options.season))
       : resolveLookbackMs(options);
-  return { fromMs: panelToMs - lookbackMs, toMs: panelToMs };
+  return { fromMs: panelToMs - lookbackMs, toMs: panelToMs, relative: true, lookbackMs };
 }
 
 export type ForecastWindow = { fromMs: number; toMs: number } | { invalid: true };
