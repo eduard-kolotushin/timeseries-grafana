@@ -210,12 +210,16 @@ describe('RetrainSchedules', () => {
     expect(screen.getByLabelText('panel/sourcedhash cron')).toBeInTheDocument();
   });
 
-  it('deletes panel rows only', async () => {
+  it('deletes a row of either scope', async () => {
     renderSchedules([panelRow, baselineRow]);
     await screen.findByText('panelhash');
-    expect(screen.queryByLabelText('baseline/baselinehash delete')).toBeNull();
-    fireEvent.click(screen.getByLabelText('panel/panelhash delete'));
+    // A baseline row is fleet-wide and the worker re-creates a live hash's row, so
+    // deleting one is how a retired hash's row stops being retrained forever.
+    fireEvent.click(screen.getByLabelText('baseline/baselinehash delete'));
     await waitFor(() => expect(mockDelete).toHaveBeenCalledTimes(1));
-    expect(mockDelete.mock.calls[0][0]).toContain('scope=panel&key=panelhash');
+    expect(mockDelete.mock.calls[0][0]).toContain('scope=baseline&key=baselinehash');
+    fireEvent.click(screen.getByLabelText('panel/panelhash delete'));
+    await waitFor(() => expect(mockDelete).toHaveBeenCalledTimes(2));
+    expect(mockDelete.mock.calls[1][0]).toContain('scope=panel&key=panelhash');
   });
 });

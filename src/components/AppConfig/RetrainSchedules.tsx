@@ -323,17 +323,15 @@ export const RetrainSchedules = () => {
             >
               Save
             </Button>
-            {row.original.scope === 'panel' && (
-              <Button
-                size="sm"
-                variant="destructive"
-                disabled={busy === rowId(row.original)}
-                aria-label={`${rowId(row.original)} delete`}
-                onClick={() => void remove(row.original)}
-              >
-                Delete
-              </Button>
-            )}
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={busy === rowId(row.original)}
+              aria-label={`${rowId(row.original)} delete`}
+              onClick={() => void remove(row.original)}
+            >
+              Delete
+            </Button>
           </Stack>
         ),
       },
@@ -346,9 +344,11 @@ export const RetrainSchedules = () => {
       <FieldSet label="Retrain schedules">
         <p>
           One row per stored model. <code>panel</code> rows are refreshed by this Grafana backend on their cron and
-          belong to this org; <code>baseline</code> rows are claimed by the baselines worker, are fleet-wide (they show
-          in every org, and their cron, timezone and enable state are shared by all of them) and cannot be deleted
-          here.
+          belong to this org, which is the only org that lists them; <code>baseline</code> rows are claimed by the
+          baselines worker, are fleet-wide (they show in every org, and their cron, timezone and enable state are
+          shared by all of them) and are created by that worker, so only an existing one can be edited here. Deleting
+          a <code>baseline</code> row removes it for every org: the worker re-creates it on its next tick while the
+          metric still reports, which is how a retired hash&apos;s row stops being retrained.
         </p>
         <p>
           A <code>baseline</code> row&apos;s key is the upstream <code>metric_hash</code> — the only identity this

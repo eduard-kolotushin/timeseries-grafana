@@ -22,7 +22,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules; fit path records `trainSource` and upserts the `panel` schedule row |
 | `pkg/plugin/limits.go` | Train-length / body caps and Fit / ForecastRange inflight semaphore |
 | `pkg/plugin/store.go` | SnapshotStore interface; bounded TTL read-through cache over pgx `forecast.snapshots` |
-| `pkg/plugin/schedule.go` | `ScheduleStore` over `forecast.retrain` (list / upsert / delete / due / claim / finish) |
+| `pkg/plugin/schedule.go` | `ScheduleStore` over `forecast.retrain` (list / read one row / upsert / delete / due / claim / finish / identify) |
 | `pkg/plugin/retrain.go` | Unattended retrain scheduler: ticker, claim, `/api/ds/query` frame fetch, fit, `Put`, `Finish` |
 | `pkg/plugin/schedules.go` | `/schedules` resource handlers and the Admin gate |
 | `pkg/plugin/resources.go` | `POST /forecast`, `GET /ping`, `/schedules` |
@@ -84,8 +84,7 @@ Created by `ensureSQL` alongside `forecast.snapshots`; `gpx_forecast` is its onl
 
 | Column | Meaning |
 | --- | --- |
-| `scope`, `key` | `panel` + `cacheKey`, or `baseline` + `metric_hash` (written by sibling `timeseries-baselines`) |
-| `org_id` | Plugin context org, default 0 |
+| `scope`, `org_id`, `key` | The primary key. `panel` + this org + `cacheKey`, or `baseline` + `0` + `metric_hash` (written by sibling `timeseries-baselines`, fleet-wide by construction since it has no org) |
 | `cron`, `timezone` | Retrain schedule. 5-field `cron.ParseStandard` form plus `@daily` / `@hourly` / `@every 1h`; `timezone` is an IANA name |
 | `enabled` | Claimed only when true |
 | `spec JSONB` | `panel`: the whole `trainSource` (datasource uid, the verbatim query objects, the train window, the series name, `relative`/`lookbackMs`, and the identification keys `panelId`, `panelTitle`, `dashboardUid`, `querySummary`) plus the model fields the refit needs: `model`, `alpha`, `beta`, `period`, `season`, `calendar`, `lookback` (the operator-readable width). `baseline`: the worker's model spec. NULL means unclaimable |
@@ -94,34 +93,38 @@ Created by `ensureSQL` alongside `forecast.snapshots`; `gpx_forecast` is its onl
 | `claimed_by`, `claimed_until` | Lease; claimable while `claimed_until IS NULL OR claimed_until < now()` |
 | `updated_at` | Autotouched by the upsert |
 
-`PRIMARY KEY (scope, key)` is the whole index story: the table has one row per overlay series and one per baseline hash, so a sequence scan at this cardinality beats an index that the planner would ignore anyway.
+`org_id` is part of the key because a `cacheKey` is **org-independent**: the fingerprint is the targets, options, series name and train window, so the same dashboard provisioned into two orgs hashes the same. Keyed `(scope, key)` those two orgs shared one row, and whichever org fitted last would overwrite the other's `cron`, `enabled` and stored query objects — while the org it overwrote could not even list the row, because `List` filters by org. `ensureSQL` migrates such a table in place (`DROP CONSTRAINT` + `ADD PRIMARY KEY (scope, org_id, key)` inside a `DO` block that only acts when the catalog still reports the two-column key), keeping every row's org, and `scheduleKeySQL` makes `ensureSchedules` refuse a table left on the old key rather than serve it: a runtime user that may not `ALTER` gets `errScheduleKey` on every schedule call (logged, never propagated into a query) instead of a silent cross-org write.
+
+`PRIMARY KEY (scope, org_id, key)` is the whole index story: the table has one row per overlay series per org and one per baseline hash, so a sequence scan at this cardinality beats an index that the planner would ignore anyway.
 
 ### Claiming
 
 ```sql
 WITH due AS (
-  SELECT scope, key FROM forecast.retrain
-  WHERE scope = 'panel' AND enabled AND spec IS NOT NULL AND next_run_at IS NOT NULL AND next_run_at <= now()
+  SELECT scope, org_id, key FROM forecast.retrain
+  WHERE scope = 'panel' AND org_id = $4 AND enabled AND spec IS NOT NULL AND next_run_at IS NOT NULL AND next_run_at <= now()
     AND (claimed_until IS NULL OR claimed_until < now())
   ORDER BY next_run_at LIMIT $1 FOR UPDATE SKIP LOCKED
 )
 UPDATE forecast.retrain r SET claimed_by = $2, claimed_until = now() + $3::interval, updated_at = now()
-FROM due WHERE r.scope = due.scope AND r.key = due.key
+FROM due WHERE r.scope = due.scope AND r.org_id = due.org_id AND r.key = due.key
 RETURNING r.scope, r.key, r.org_id, r.cron, r.timezone, r.spec
 ```
 
 `FOR UPDATE SKIP LOCKED` is what makes Grafana HA safe: one plugin process per Grafana replica, all ticking, and every due row is retrained by exactly one of them. No leader, no lock table, no coordination. The lease covers a process that dies mid-retrain.
 
+The claim is also **org-bound**: the scheduler resolves its own org once per process from `GET /api/org` (the org its credential belongs to) and claims only that org's rows. A `datasourceUid` is resolved by Grafana inside the requesting org, so claiming another org's row would fetch that row's stored queries as this org's series — or fail forever — and then store the result under the other org's key. If `/api/org` itself is refused the tick claims nothing and returns `denied`, so a bad credential still disables the ticker through the auth guard instead of guessing an org. Rows of other orgs stay due and are refreshed by their own org's overlay load.
+
 Releasing a claim is **owner-guarded**, on both sides of the table:
 
 ```sql
 UPDATE forecast.retrain
-SET next_run_at = $3, last_run_at = now(), last_status = $4,
+SET next_run_at = $4, last_run_at = now(), last_status = $5,
     claimed_by = NULL, claimed_until = NULL, updated_at = now()
-WHERE scope = $1 AND key = $2 AND (claimed_by IS NULL OR claimed_by = $5)  -- $5 = owner
+WHERE scope = $1 AND org_id = $2 AND key = $3 AND claimed_by = $6  -- $6 = owner
 ```
 
-The plugin's owner is `host:pid`, resolved once per tick and used for both the claim and every finish; a worker's owner is its `SHARD_ID`/self id. The predicate is what stops a retrain that outlived its lease (a slow datasource, a stalled process) from releasing a claim — or overwriting `next_run_at` and `last_status` — that a newer owner now holds. Zero rows updated is that case: logged at Debug as a lost claim, not an error.
+The plugin's owner is `host:pid`, resolved once per tick and used for both the claim and every finish; a worker's owner is its `SHARD_ID`/self id. The predicate is the whole guard — **not** `claimed_by IS NULL OR claimed_by = owner`, which would let a retrain that outlived its lease write its own outcome over a row the newer owner had already finished and released. Both `Finish` and `Done` therefore update zero rows for a stale owner, and zero rows is logged at Debug as a lost claim, not an error.
 
 The `panel` predicate requires `spec IS NOT NULL` and the `baseline` predicate is the same shape with `scope='baseline'`: **the plugin never claims a row it cannot fetch**, and the worker never claims a panel row it has no overlay frontend for. A `panel` row without a spec (an overlay trained by an older frontend) is still valid — it just retrains through `needTrain` on the next overlay load.
 
@@ -199,14 +202,14 @@ The app resource mux is reachable at `/api/plugins/eduardkolotushin-forecast-app
 | --- | --- | --- |
 | `GET /ping` | `handlePing` | Liveness, no auth |
 | `POST /forecast` | `handleForecast` | Fit / probe / Restore; body capped at 16 MiB and `MAX_TRAIN_POINTS` |
-| `GET /schedules` | `handleSchedules` | Rows for the request org, **Admin only** |
-| `PUT /schedules` | `handleSchedules` | Upsert `{scope, key, cron, timezone, enabled}`; validates the cron and timezone |
-| `DELETE /schedules?scope=&key=` | `handleSchedules` | Panel rows only; a `baseline` row is refused with 400 |
+| `GET /schedules` | `handleSchedules` | This org's `panel` rows plus every fleet-wide `baseline` row, **Admin only** |
+| `PUT /schedules` | `handleSchedules` | Retime `{scope, key, cron, timezone, enabled}`; validates the cron and timezone. A `baseline` key must already exist (`404`) — those rows are the worker's, so an admin may retime one but never invent one |
+| `DELETE /schedules?scope=&key=` | `handleSchedules` | This org's `panel` row, or the fleet-wide `baseline` row; the worker re-creates a live hash's row on its next tick, so deleting a retired hash's row is how its forever-retry ends |
 | `POST /schedules/default` | `handleScheduleDefault` | Validates `{cron, timezone}`; the Configuration page calls it before its settings POST and refuses to save a rejected default |
 
 The Admin gate is `backend.PluginConfigFromContext(req.Context()).User.Role != "Admin"` → `403 "forecast: admin required"`. Responses never echo a row's `spec`: the list carries `scope, key, cron, timezone, enabled, nextRunAt, lastRunAt, lastStatus, hasSpec` plus the derived `source` (`dashboardUid`, `panelId`, `panelTitle`, `datasourceUid`, `seriesName`, `querySummary`, `lookback`), which `scheduleSourceFromSpec` reads out of the stored spec with a lenient unmarshal — a malformed or absent spec costs that row its Source cell, never the listing, and `querySummary` is capped at 200 runes on the way out whatever a client stored. `source` is absent for a `baseline` row (the worker writes no spec), whose only identity is its `metric_hash` key.
 
-Every overlay request — the `needTrain` probe included — carries a top-level `provenance {panelId, panelTitle, dashboardUid, querySummary}`, which is deliberately **not** part of `trainSource` (a probe never runs the training query). `Identify` merges those keys into an existing panel row's spec with `spec || $patch`, guarded so it can never create a row (only a fit knows the query objects a claim needs) and never writes when the merge would change nothing (`spec || $3::jsonb IS DISTINCT FROM spec`); errors are logged, never returned. That is how a row written before this field existed becomes identifiable on the next dashboard load, since the cron path has no panel context to fill it in. `querySummary` is summarised from the panel's **own** targets, not the rewritten ones, so the probe and the fit produce the same label — a Postgres rewrite substitutes literal timestamps into SQL text, which would otherwise flip the cell on every load.
+Every overlay request — the `needTrain` probe included — carries a top-level `provenance {panelId, panelTitle, dashboardUid, querySummary}`, which is deliberately **not** part of `trainSource` (a probe never runs the training query). `Identify` merges those keys into an existing panel row's spec with `spec || $patch`, guarded so it can never create a row (only a fit knows the query objects a claim needs) and never writes when the merge would change nothing (`spec || $3::jsonb IS DISTINCT FROM spec`); errors are logged, never returned. It runs on the **read** paths only: a request that carries training points writes the whole spec — provenance included — through `recordPanelSchedule` anyway, so merging there would be a redundant round trip on the request the user is waiting for, while the cached-load path it does serve already reads this row (`Due`, `Get`). That is how a row written before this field existed becomes identifiable on the next dashboard load, since the cron path has no panel context to fill it in. `recordPanelSchedule` reads its one row by key (`Row`) rather than listing the table, which would transfer and decode every worker baseline row per fit. `querySummary` is summarised from the panel's **own** targets, not the rewritten ones, so the probe and the fit produce the same label — a Postgres rewrite substitutes literal timestamps into SQL text, which would otherwise flip the cell on every load.
 
 ## Forecast datasource (alerting)
 

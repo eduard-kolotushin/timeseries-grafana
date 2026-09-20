@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -25,8 +26,14 @@ import (
 //
 // forecast.retrain carries no secondary index on purpose: it holds one row per
 // trained panel (plus one per worker-owned baseline hash), every plugin read is
-// the (scope, key) primary key, and the claim scan orders a table that stays in
-// the hundreds of rows — an index would only add write cost to each retrain.
+// the (scope, org_id, key) primary key, and the claim scan orders a table that
+// stays in the hundreds of rows — an index would only add write cost to each
+// retrain.
+//
+// org_id is part of the key because a panel's cache key is org-independent: the
+// same dashboard and datasource uids hash the same in two orgs, so a (scope, key)
+// key would put two orgs on one row, where either org's fit would rewrite the
+// other's cron and stored query objects. See scheduleKeySQL.
 const ensureSQL = `
 CREATE SCHEMA IF NOT EXISTS forecast;
 CREATE TABLE IF NOT EXISTS forecast.snapshots (
@@ -50,9 +57,45 @@ CREATE TABLE IF NOT EXISTS forecast.retrain (
   claimed_by TEXT,
   claimed_until TIMESTAMPTZ,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (scope, key)
+  PRIMARY KEY (scope, org_id, key)
 );
+DO $$
+DECLARE pk_name TEXT; pk_cols TEXT;
+BEGIN
+  SELECT c.conname, string_agg(a.attname, ',' ORDER BY a.attnum)
+    INTO pk_name, pk_cols
+  FROM pg_constraint c
+  JOIN pg_class t ON t.oid = c.conrelid
+  JOIN pg_namespace n ON n.oid = t.relnamespace
+  JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+  WHERE n.nspname = 'forecast' AND t.relname = 'retrain' AND c.contype = 'p'
+  GROUP BY c.conname;
+  IF pk_cols = 'scope,key' THEN
+    -- A table created before org_id joined the key. Existing rows keep their
+    -- org: a panel row was written with the org that fitted it.
+    EXECUTE format('ALTER TABLE forecast.retrain DROP CONSTRAINT %I', pk_name);
+    ALTER TABLE forecast.retrain ADD PRIMARY KEY (scope, org_id, key);
+  END IF;
+END $$;
 `
+
+// scheduleKeySQL reports whether forecast.retrain's primary key is the per-org
+// shape ensureSQL migrates to, so a runtime user that may not ALTER an upgraded
+// table fails the schedule store loudly instead of sharing a row between orgs.
+const scheduleKeySQL = `
+SELECT EXISTS (
+  SELECT 1
+  FROM pg_constraint c
+  JOIN pg_class t ON t.oid = c.conrelid
+  JOIN pg_namespace n ON n.oid = t.relnamespace
+  WHERE n.nspname = 'forecast' AND t.relname = 'retrain' AND c.contype = 'p'
+    AND array_length(c.conkey, 1) = 3
+    AND c.conkey @> ARRAY[(SELECT a.attnum FROM pg_attribute a WHERE a.attrelid = t.oid AND a.attname = 'org_id')]
+)`
+
+// errScheduleKey is the schedule table's upgrade error: the DDL ran, but the
+// table still keys on (scope, key), so the process cannot store per-org rows.
+var errScheduleKey = errors.New("forecast store: forecast.retrain has no per-org primary key; it needs PRIMARY KEY (scope, org_id, key), which the table owner must apply")
 
 // ensureRetryAfter throttles reconnect attempts while Postgres is unreachable so
 // a burst of overlay loads does not turn into a burst of failed dials.
@@ -99,18 +142,24 @@ func (s *postgresStore) Close() {
 // retried on later calls (after ensureRetryAfter) instead of failing the store
 // permanently when the database is unavailable at plugin start.
 func (s *postgresStore) ensure(ctx context.Context) error {
-	return s.ensureTable(ctx, &s.snap, `SELECT 1 FROM forecast.snapshots LIMIT 1`)
+	return s.ensureTable(ctx, &s.snap, `SELECT 1 FROM forecast.snapshots LIMIT 1`, "")
 }
 
 // ensureSchedules is the same contract for the schedule table. Readiness is tracked per
 // table: a deployment that cannot CREATE and upgrades with forecast.retrain missing must
 // keep serving snapshots (and keep retrying the DDL) instead of latching ready and
-// answering every schedule call with a permanent relation-does-not-exist.
+// answering every schedule call with a permanent relation-does-not-exist. Unlike the
+// snapshot table it also requires the per-org key shape, because a schedule row shared
+// between two orgs is a correctness bug rather than a missing feature.
 func (s *postgresStore) ensureSchedules(ctx context.Context) error {
-	return s.ensureTable(ctx, &s.sched, `SELECT 1 FROM forecast.retrain LIMIT 1`)
+	return s.ensureTable(ctx, &s.sched, `SELECT 1 FROM forecast.retrain LIMIT 1`, scheduleKeySQL)
 }
 
-func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, readySQL string) error {
+// ensureTable provisions one table and records its readiness. shapeSQL, when set,
+// must answer true or this store stays unusable for that table: ensureSQL may have
+// been refused by a runtime user without ALTER, and an upgraded table with the old
+// key is worse than no schedules at all.
+func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, readySQL, shapeSQL string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if probe.ready {
@@ -133,9 +182,57 @@ func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, read
 			return probe.err
 		}
 	}
+	if shapeSQL != "" {
+		var ok bool
+		if err := s.pool.QueryRow(ctx, shapeSQL).Scan(&ok); err != nil {
+			probe.err = fmt.Errorf("forecast store: %w", err)
+			return probe.err
+		}
+		if !ok {
+			probe.err = errScheduleKey
+			return probe.err
+		}
+	}
 	probe.ready = true
 	probe.err = nil
 	return nil
+}
+
+// Row reads one schedule row by its full key. A panel fit reads its row this way
+// rather than through List, which would transfer and decode every worker baseline
+// row to find one of them.
+func (s *postgresStore) Row(ctx context.Context, orgID int64, scope, key string) (ScheduleRow, bool, error) {
+	if err := s.ensureSchedules(ctx); err != nil {
+		return ScheduleRow{}, false, err
+	}
+	// Baseline rows are the worker's fleet-wide rows: they are stored at org 0
+	// whatever org asks, which is what keeps them visible (and editable) everywhere.
+	if scope == scopeBaseline {
+		orgID = 0
+	}
+	row := ScheduleRow{}
+	var next, last *time.Time
+	var status *string
+	err := s.pool.QueryRow(ctx, `
+SELECT scope, key, org_id, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status
+FROM forecast.retrain WHERE scope = $1 AND org_id = $2 AND key = $3
+`, scope, orgID, key).Scan(&row.Scope, &row.Key, &row.OrgID, &row.Cron, &row.Timezone, &row.Enabled, &row.Spec, &next, &last, &status)
+	if err == pgx.ErrNoRows {
+		return ScheduleRow{}, false, nil
+	}
+	if err != nil {
+		return ScheduleRow{}, false, err
+	}
+	if next != nil {
+		row.NextRunAt = next.UTC()
+	}
+	if last != nil {
+		row.LastRunAt = last.UTC()
+	}
+	if status != nil {
+		row.LastStatus = *status
+	}
+	return row, true, nil
 }
 
 func (s *postgresStore) Get(ctx context.Context, orgID int64, key string) (forecast.Snapshot, bool, error) {

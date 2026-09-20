@@ -15,7 +15,7 @@ var (
 	errNoStore          = errors.New("forecast: snapshot store not configured")
 	errScopeKeyRequired = errors.New("forecast: scope and key required")
 	errInvalidScope     = errors.New("forecast: invalid scope")
-	errBaselineDelete   = errors.New("forecast: baseline schedules are disabled, not deleted")
+	errBaselineUnknown  = errors.New("forecast: no such baseline schedule; the baselines worker creates those rows, so an admin may only edit an existing one")
 )
 
 // maxScheduleBodyBytes caps the schedule routes' bodies. Their DTOs are a few
@@ -195,6 +195,19 @@ func (a *App) putSchedule(w http.ResponseWriter, req *http.Request, orgID int64)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// A baseline row belongs to the worker, which derives it from the metrics it
+	// sees: an admin may retime an existing one, never invent one. A row created
+	// here would be claimed by the fleet forever for a hash with no series, and
+	// nothing on the page could remove it.
+	if body.Scope == scopeBaseline {
+		if _, ok, err := a.sched.Row(req.Context(), orgID, scopeBaseline, body.Key); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		} else if !ok {
+			http.Error(w, errBaselineUnknown.Error(), http.StatusNotFound)
+			return
+		}
+	}
 	// No spec: an admin edit changes when a panel retrains, never how. Upsert
 	// keeps the stored spec when the incoming one is empty.
 	err = a.sched.Upsert(req.Context(), orgID, ScheduleRow{
@@ -209,16 +222,14 @@ func (a *App) putSchedule(w http.ResponseWriter, req *http.Request, orgID int64)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	rows, err := a.sched.List(req.Context(), orgID)
+	row, ok, err := a.sched.Row(req.Context(), orgID, body.Scope, body.Key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	for _, row := range rows {
-		if row.Scope == body.Scope && row.Key == body.Key {
-			writeJSON(w, toScheduleDTO(row))
-			return
-		}
+	if ok {
+		writeJSON(w, toScheduleDTO(row))
+		return
 	}
 	// Unreachable: the upsert just wrote the row. Answer the caller with what it
 	// asked for rather than an error it cannot act on.
@@ -232,6 +243,10 @@ func (a *App) putSchedule(w http.ResponseWriter, req *http.Request, orgID int64)
 	})
 }
 
+// deleteSchedule removes one row. Panel rows are this org's; a baseline row is
+// fleet-wide (org 0) and the worker re-creates it on its next tick if the hash is
+// still reporting, so deleting a retired hash's row sticks and deleting a live
+// one is harmless.
 func (a *App) deleteSchedule(w http.ResponseWriter, req *http.Request, orgID int64) {
 	query := req.URL.Query()
 	scope, key := query.Get("scope"), query.Get("key")
@@ -239,11 +254,7 @@ func (a *App) deleteSchedule(w http.ResponseWriter, req *http.Request, orgID int
 		http.Error(w, errScopeKeyRequired.Error(), http.StatusBadRequest)
 		return
 	}
-	if scope == scopeBaseline {
-		http.Error(w, errBaselineDelete.Error(), http.StatusBadRequest)
-		return
-	}
-	if scope != scopePanel {
+	if scope != scopePanel && scope != scopeBaseline {
 		http.Error(w, errInvalidScope.Error(), http.StatusBadRequest)
 		return
 	}

@@ -128,10 +128,15 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	if err := checkTrainLen(len(in.Times), len(in.Values)); err != nil {
 		return ForecastResponse{}, err
 	}
-	if in.Provenance != nil && in.CacheKey != "" && a.sched != nil {
+	hasTimes := len(in.Times) > 0 || len(in.Values) > 0
+	// Identify on the read paths only. A request that carries training points writes
+	// the whole spec a few lines below (recordPanelSchedule) with the same provenance,
+	// and a Retrain probe is answered by such a fit, so merging here would be a
+	// redundant Postgres round trip on the request the user is waiting for. What is
+	// left is the cached-load path, which already reads this row (Due, Get).
+	if in.Provenance != nil && in.CacheKey != "" && a.sched != nil && !hasTimes && !in.Retrain {
 		a.identifyPanel(ctx, orgID, in.CacheKey, *in.Provenance)
 	}
-	hasTimes := len(in.Times) > 0 || len(in.Values) > 0
 	if in.CacheKey == "" {
 		return runLimited(ctx, a.computeLimit(), func() (ForecastResponse, error) {
 			return fitAndEmit(in)
@@ -229,16 +234,12 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	cronSpec, timezone, enabled := a.retrain.Cron, a.retrain.Timezone, true
 	// An existing row's cron and enable state are the admin's, not the defaults: a
 	// browser retrain must extend the row, never reset when it fires or switch off a
-	// schedule an admin turned off.
-	if rows, err := a.sched.List(ctx, orgID); err != nil {
-		log.DefaultLogger.Warn("schedule list", "err", err.Error())
-	} else {
-		for _, row := range rows {
-			if row.Scope == scopePanel && row.Key == in.CacheKey {
-				cronSpec, timezone, enabled = row.Cron, row.Timezone, row.Enabled
-				break
-			}
-		}
+	// schedule an admin turned off. One row is read by key: listing the table would
+	// transfer and decode every worker baseline row to find it.
+	if row, ok, err := a.sched.Row(ctx, orgID, scopePanel, in.CacheKey); err != nil {
+		log.DefaultLogger.Warn("schedule row", "err", err.Error())
+	} else if ok {
+		cronSpec, timezone, enabled = row.Cron, row.Timezone, row.Enabled
 	}
 	next, err := nextRun(cronSpec, timezone, time.Now())
 	if err != nil {

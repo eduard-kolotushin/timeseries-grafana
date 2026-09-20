@@ -598,6 +598,20 @@ type fakePoster struct {
 	step   time.Duration
 	err    error
 	calls  int
+	// org is what /api/org answers; 0 stands for org 1, where the scheduler tests
+	// seed their rows. orgErr makes the lookup itself fail.
+	org    int64
+	orgErr error
+}
+
+func (p *fakePoster) orgID(context.Context) (int64, error) {
+	if p.orgErr != nil {
+		return 0, p.orgErr
+	}
+	if p.org != 0 {
+		return p.org, nil
+	}
+	return 1, nil
 }
 
 func (p *fakePoster) fetchFrames(_ context.Context, _ ScheduleRow) (data.Frames, error) {
@@ -750,6 +764,78 @@ func TestRetrainOne(t *testing.T) {
 			t.Fatalf("finishes=%+v", finishes)
 		}
 	})
+}
+
+// TestRetrainDueClaimsOnlyItsOwnOrg pins the org boundary of a scheduled retrain.
+// The scheduler holds one Grafana credential and Grafana resolves a stored query's
+// datasourceUid inside that credential's org, so claiming another org's row would
+// fetch its frames as the wrong org's series — or fail forever — and store the
+// result under that org's cache key. The row it does not claim stays due, which is
+// what keeps it refreshed by its own org's overlay load.
+func TestRetrainDueClaimsOnlyItsOwnOrg(t *testing.T) {
+	const (
+		ownKey   = "6666666666666666666666666666666666666666666666666666666666666666"
+		otherKey = "7777777777777777777777777777777777777777777777777777777777777777"
+	)
+	ctx := context.Background()
+	past := time.Now().Add(-time.Minute)
+	row := func(org int64, key string) ScheduleRow {
+		return ScheduleRow{OrgID: org, Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Enabled: true, Spec: testTrainSpec(), NextRunAt: past}
+	}
+	poster := &fakePoster{points: 6, step: time.Minute, org: 2}
+	store, sched := newMemoryStore(), newMemSchedules()
+	app := &App{
+		store: store, sched: sched, poster: poster,
+		retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, Tick: time.Second},
+		limit:   newWorkLimiter(1),
+	}
+	sched.seed(row(1, otherKey))
+	sched.seed(row(2, ownKey))
+
+	app.retrainDue(ctx)
+
+	if poster.calls != 1 {
+		t.Fatalf("fetched %d rows, want only this org's", poster.calls)
+	}
+	finishes := sched.finished()
+	if len(finishes) != 1 || finishes[0].Key != ownKey {
+		t.Fatalf("finishes=%+v, want only %s", finishes, ownKey)
+	}
+	if _, ok, err := store.Get(ctx, 2, ownKey); err != nil || !ok {
+		t.Fatalf("this org's snapshot ok=%v err=%v", ok, err)
+	}
+	if _, ok, _ := store.Get(ctx, 1, otherKey); ok {
+		t.Fatal("another org's key was given a snapshot built from this org's credential")
+	}
+	if due, err := sched.Due(ctx, 1, otherKey, time.Now()); err != nil || !due {
+		t.Fatalf("the other org's row is no longer due (due=%v err=%v): its overlay would never refresh it", due, err)
+	}
+}
+
+// TestRetrainDueWithoutAnOrgClaimsNothing pins what happens when Grafana will not
+// say which org the credential belongs to: the scheduler must claim nothing rather
+// than guess an org, and a refusal must count toward the auth guard so a bad token
+// still disables it instead of retrying forever.
+func TestRetrainDueWithoutAnOrgClaimsNothing(t *testing.T) {
+	const key = "8888888888888888888888888888888888888888888888888888888888888888"
+	ctx := context.Background()
+	poster := &fakePoster{points: 6, step: time.Minute, orgErr: fmt.Errorf("%w: /api/org status 401", errGrafanaUnauthorized)}
+	store, sched := newMemoryStore(), newMemSchedules()
+	app := &App{
+		store: store, sched: sched, poster: poster,
+		retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, Tick: time.Second},
+		limit:   newWorkLimiter(1),
+	}
+	sched.seed(ScheduleRow{OrgID: 1, Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Enabled: true, Spec: testTrainSpec(), NextRunAt: time.Now().Add(-time.Minute)})
+
+	out := app.retrainDue(ctx)
+
+	if poster.calls != 0 || len(sched.finished()) != 0 {
+		t.Fatalf("claimed work without knowing the org: calls=%d finishes=%+v", poster.calls, sched.finished())
+	}
+	if !out.denied {
+		t.Fatal("a refused /api/org must count as an auth refusal, or the ticker retries a bad token forever")
+	}
 }
 
 func TestRetrainDueClaimsAndSkipsLeasedRows(t *testing.T) {

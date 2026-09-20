@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -13,7 +14,11 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
 
-func schedKey(scope, key string) string { return scope + "\x00" + key }
+// schedKey is the primary key of forecast.retrain: (scope, org_id, key). A panel's
+// cache key is org-independent, so two orgs can hold the same key as two rows.
+func schedKey(scope string, orgID int64, key string) string {
+	return scope + "\x00" + strconv.FormatInt(orgID, 10) + "\x00" + key
+}
 
 type finishCall struct {
 	Owner  string
@@ -57,37 +62,53 @@ func (m *memSchedules) List(_ context.Context, orgID int64) ([]ScheduleRow, erro
 			out = append(out, row)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return schedKey(out[i].Scope, out[i].Key) < schedKey(out[j].Scope, out[j].Key) })
+	sort.Slice(out, func(i, j int) bool {
+		return schedKey(out[i].Scope, out[i].OrgID, out[i].Key) < schedKey(out[j].Scope, out[j].OrgID, out[j].Key)
+	})
 	return out, nil
 }
 
-// Upsert mirrors the UPDATE column list of the SQL statement: an absent spec and
-// the run history survive, everything else is replaced.
+// Upsert mirrors the SQL statement: the conflict target is the full primary key
+// (scope, org_id, key), so another org's row with the same cache key is a different
+// row and never an update of this one. An absent spec and the run history survive,
+// everything else is replaced. Baseline rows are stored at org 0 wherever they are
+// written from, as the store's own forcing does.
 func (m *memSchedules) Upsert(_ context.Context, orgID int64, row ScheduleRow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	k := schedKey(row.Scope, row.Key)
+	if row.Scope == scopeBaseline {
+		orgID = 0
+	}
+	k := schedKey(row.Scope, orgID, row.Key)
 	if old, ok := m.rows[k]; ok {
 		if len(row.Spec) == 0 {
 			row.Spec = old.Spec
 		}
 		row.LastRunAt, row.LastStatus = old.LastRunAt, old.LastStatus
 	}
-	if row.Scope == scopeBaseline {
-		orgID = 0
-	}
 	row.OrgID = orgID
 	m.rows[k] = row
 	return nil
 }
 
+// Row mirrors the SQL lookup: one row by its full key.
+func (m *memSchedules) Row(_ context.Context, orgID int64, scope, key string) (ScheduleRow, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if scope == scopeBaseline {
+		orgID = 0
+	}
+	row, ok := m.rows[schedKey(scope, orgID, key)]
+	return row, ok, nil
+}
+
 func (m *memSchedules) Delete(_ context.Context, orgID int64, scope, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	k := schedKey(scope, key)
-	if row, ok := m.rows[k]; ok && row.OrgID == orgID {
-		delete(m.rows, k)
+	if scope == scopeBaseline {
+		orgID = 0
 	}
+	delete(m.rows, schedKey(scope, orgID, key))
 	return nil
 }
 
@@ -97,9 +118,9 @@ func (m *memSchedules) Delete(_ context.Context, orgID int64, scope, key string)
 func (m *memSchedules) Identify(_ context.Context, orgID int64, key string, prov PanelProvenance) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	k := schedKey(scopePanel, key)
+	k := schedKey(scopePanel, orgID, key)
 	row, ok := m.rows[k]
-	if !ok || row.OrgID != orgID || len(row.Spec) == 0 {
+	if !ok || len(row.Spec) == 0 {
 		return nil
 	}
 	var spec map[string]any
@@ -141,24 +162,25 @@ func (m *memSchedules) Identify(_ context.Context, orgID int64, key string, prov
 func (m *memSchedules) Due(_ context.Context, orgID int64, key string, now time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	row, ok := m.rows[schedKey(scopePanel, key)]
-	return ok && row.OrgID == orgID && row.Enabled && !row.NextRunAt.IsZero() && !row.NextRunAt.After(now), nil
+	row, ok := m.rows[schedKey(scopePanel, orgID, key)]
+	return ok && row.Enabled && !row.NextRunAt.IsZero() && !row.NextRunAt.After(now), nil
 }
 
-func (m *memSchedules) Claim(_ context.Context, owner string, lease time.Duration, limit int) ([]ScheduleRow, error) {
+// Claim mirrors panelClaimSQL: panel rows of this org only, enabled, with a spec,
+// due, and not leased by anyone else.
+func (m *memSchedules) Claim(_ context.Context, orgID int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
 	due := make([]ScheduleRow, 0, limit)
 	for _, row := range m.rows {
-		k := schedKey(row.Scope, row.Key)
-		if row.Scope != scopePanel || !row.Enabled || len(row.Spec) == 0 {
+		if row.OrgID != orgID || row.Scope != scopePanel || !row.Enabled || len(row.Spec) == 0 {
 			continue
 		}
 		if row.NextRunAt.IsZero() || row.NextRunAt.After(now) {
 			continue
 		}
-		if lease, ok := m.leases[k]; ok && lease.until.After(now) {
+		if lease, ok := m.leases[schedKey(row.Scope, row.OrgID, row.Key)]; ok && lease.until.After(now) {
 			continue
 		}
 		due = append(due, row)
@@ -168,24 +190,24 @@ func (m *memSchedules) Claim(_ context.Context, owner string, lease time.Duratio
 		due = due[:limit]
 	}
 	for _, row := range due {
-		m.leases[schedKey(row.Scope, row.Key)] = schedLease{owner: owner, until: now.Add(lease)}
+		m.leases[schedKey(row.Scope, row.OrgID, row.Key)] = schedLease{owner: owner, until: now.Add(lease)}
 	}
 	return due, nil
 }
 
-// Finish mirrors the SQL's owner predicate: only the holder may release the
-// claim, so a retrain that outlived its lease leaves the newer owner's claim and
-// next run alone.
-func (m *memSchedules) Finish(_ context.Context, owner, scope, key string, next time.Time, status string) error {
+// Finish mirrors the SQL's owner predicate: only the holder of the claim may
+// release it or write its outcome, so a retrain that outlived its lease leaves the
+// newer owner's claim, next run and status alone.
+func (m *memSchedules) Finish(_ context.Context, owner string, orgID int64, scope, key string, next time.Time, status string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.finish = append(m.finish, finishCall{Owner: owner, Scope: scope, Key: key, Next: next, Status: status})
-	k := schedKey(scope, key)
-	if lease, ok := m.leases[k]; ok && lease.owner != owner {
+	k := schedKey(scope, orgID, key)
+	if lease, ok := m.leases[k]; !ok || lease.owner != owner {
 		return nil
 	}
 	row := m.rows[k]
-	row.Scope, row.Key = scope, key
+	row.Scope, row.Key, row.OrgID = scope, key, orgID
 	row.NextRunAt, row.LastRunAt, row.LastStatus = next, time.Now(), status
 	m.rows[k] = row
 	delete(m.leases, k)
@@ -201,7 +223,7 @@ func (m *memSchedules) finished() []finishCall {
 func (m *memSchedules) seed(row ScheduleRow) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.rows[schedKey(row.Scope, row.Key)] = row
+	m.rows[schedKey(row.Scope, row.OrgID, row.Key)] = row
 }
 
 func adminCtx(orgID int64) backend.PluginContext {
@@ -495,14 +517,14 @@ func TestScheduleDelete(t *testing.T) {
 	sched := newMemSchedules()
 	app := schedulesApp(t, sched)
 	key := strings.Repeat("cd", 32)
+	other := strings.Repeat("ef", 32)
 	baseline := "deadbeef"
 	sched.seed(ScheduleRow{OrgID: 1, Scope: scopePanel, Key: key, Cron: "0 3 * * *", Timezone: "UTC", Enabled: true})
 	// The worker writes its rows with no org at all (the column default), which is
 	// why they must still be listed and editable here.
 	sched.seed(ScheduleRow{OrgID: 0, Scope: scopeBaseline, Key: baseline, Cron: "0 3 * * *", Timezone: "UTC", Enabled: true})
 
-	// The worker's baseline rows are visible and editable through the same API;
-	// only deleting them is refused.
+	// The worker's baseline rows are visible and editable through the same API.
 	if status, body := callRoute(t, app, adminCtx(1), http.MethodPut, "schedules",
 		[]byte(`{"scope":"baseline","key":"`+baseline+`","cron":"*/3 * * * *","timezone":"UTC","enabled":true}`)); status != http.StatusOK {
 		t.Fatalf("baseline put status=%d body=%s", status, body)
@@ -514,21 +536,67 @@ func TestScheduleDelete(t *testing.T) {
 		}
 	}
 
+	// Deleting a baseline row removes the fleet-wide row. A live hash's row comes
+	// back on the worker's next tick, which is what makes this the way out for a hash
+	// that stopped reporting: its row is otherwise retried forever.
 	status, body := callRoute(t, app, adminCtx(1), http.MethodDelete, "schedules?scope="+scopeBaseline+"&key="+baseline, nil)
-	if status != http.StatusBadRequest || !strings.Contains(string(body), errBaselineDelete.Error()) {
+	if status != http.StatusOK {
 		t.Fatalf("baseline delete status=%d body=%s", status, body)
 	}
-	if rows, _ := sched.List(ctx, 1); len(rows) != 2 {
-		t.Fatalf("baseline row was deleted: %+v", rows)
+	if rows, _ := sched.List(ctx, 1); len(rows) != 1 {
+		t.Fatalf("baseline row survived the delete: %+v", rows)
+	}
+
+	// Deleting another org's panel row is a no-op for this org's request.
+	sched.seed(ScheduleRow{OrgID: 2, Scope: scopePanel, Key: other, Cron: "0 3 * * *", Timezone: "UTC", Enabled: true})
+	if status, body := callRoute(t, app, adminCtx(1), http.MethodDelete, "schedules?scope="+scopePanel+"&key="+other, nil); status != http.StatusOK {
+		t.Fatalf("cross-org delete status=%d body=%s", status, body)
+	}
+	if rows, _ := sched.List(ctx, 2); len(rows) != 1 || rows[0].Key != other {
+		t.Fatalf("another org's row was deleted: %+v", rows)
 	}
 
 	status, body = callRoute(t, app, adminCtx(1), http.MethodDelete, "schedules?scope="+scopePanel+"&key="+key, nil)
 	if status != http.StatusOK {
 		t.Fatalf("panel delete status=%d body=%s", status, body)
 	}
-	rows, _ = sched.List(ctx, 1)
-	if len(rows) != 1 || rows[0].Scope != scopeBaseline {
+	if rows, _ := sched.List(ctx, 1); len(rows) != 0 {
 		t.Fatalf("panel row survived: %+v", rows)
+	}
+}
+
+// TestScheduleBaselinePutNeedsAnExistingRow pins the rule that separates the two
+// scopes on write: a baseline row describes work the fleet does for a hash it can
+// see, so an admin may retime one but never invent one, or the fleet would query
+// forever for a hash with no series and nothing on the page could remove it.
+func TestScheduleBaselinePutNeedsAnExistingRow(t *testing.T) {
+	sched := newMemSchedules()
+	app := schedulesApp(t, sched)
+	sched.seed(ScheduleRow{OrgID: 0, Scope: scopeBaseline, Key: "live", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true})
+	for _, tc := range []struct {
+		name  string
+		scope string
+		key   string
+		want  int
+	}{
+		{name: "an existing worker row can be retimed", scope: scopeBaseline, key: "live", want: http.StatusOK},
+		{name: "an invented baseline row is refused", scope: scopeBaseline, key: "invented", want: http.StatusNotFound},
+		{name: "a panel row may be created before the panel trains", scope: scopePanel, key: strings.Repeat("ab", 32), want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := callRoute(t, app, adminCtx(1), http.MethodPut, "schedules",
+				[]byte(`{"scope":"`+tc.scope+`","key":"`+tc.key+`","cron":"*/5 * * * *","timezone":"UTC","enabled":true}`))
+			if status != tc.want {
+				t.Fatalf("status=%d want %d body=%s", status, tc.want, body)
+			}
+		})
+	}
+	rows, err := sched.List(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows=%+v want the worker row and the panel row only", rows)
 	}
 }
 
@@ -586,21 +654,48 @@ func TestScheduleDefault(t *testing.T) {
 	}
 }
 
+// TestScheduleOrgIsolation pins the org boundary of the schedule table itself. A
+// panel's cache key is org-independent — the same dashboard and datasource uids
+// hash the same in every org — so (scope, key) as the whole primary key would make
+// org 2's fit rewrite org 1's cron and stored query objects, and org 2 could not
+// even list the row it wrote. org_id is part of the key, so each org owns its row.
 func TestScheduleOrgIsolation(t *testing.T) {
-	app := schedulesApp(t, newMemSchedules())
-	if status, body := callRoute(t, app, adminCtx(1), http.MethodPut, "schedules",
-		[]byte(`{"scope":"panel","key":"k","cron":"0 3 * * *","enabled":true}`)); status != http.StatusOK {
-		t.Fatalf("put status=%d body=%s", status, body)
+	ctx := context.Background()
+	shared := strings.Repeat("ab", 32)
+	sched := newMemSchedules()
+	app := schedulesApp(t, sched)
+
+	// Both orgs train a panel that hashes to the same key, each with its own cron.
+	for _, org := range []int64{1, 2} {
+		cron := "0 3 * * *"
+		if org == 2 {
+			cron = "*/7 * * * *"
+		}
+		if status, body := callRoute(t, app, adminCtx(org), http.MethodPut, "schedules",
+			[]byte(`{"scope":"panel","key":"`+shared+`","cron":"`+cron+`","enabled":true}`)); status != http.StatusOK {
+			t.Fatalf("org %d put status=%d body=%s", org, status, body)
+		}
 	}
-	status, body := callRoute(t, app, adminCtx(2), http.MethodGet, "schedules", nil)
-	if status != http.StatusOK {
-		t.Fatalf("status=%d body=%s", status, body)
-	}
-	var rows []scheduleDTO
-	if err := json.Unmarshal(body, &rows); err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("cross-org rows=%+v", rows)
+	for _, org := range []int64{1, 2} {
+		want := "0 3 * * *"
+		if org == 2 {
+			want = "*/7 * * * *"
+		}
+		status, body := callRoute(t, app, adminCtx(org), http.MethodGet, "schedules", nil)
+		if status != http.StatusOK {
+			t.Fatalf("org %d list status=%d body=%s", org, status, body)
+		}
+		var rows []scheduleDTO
+		if err := json.Unmarshal(body, &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 || rows[0].Key != shared || rows[0].Cron != want {
+			t.Fatalf("org %d sees %+v, want its own row with cron %q", org, rows, want)
+		}
+		// The store holds one row per org, each owned by the org that wrote it.
+		row, ok, err := sched.Row(ctx, org, scopePanel, shared)
+		if err != nil || !ok || row.OrgID != org || row.Cron != want {
+			t.Fatalf("org %d row ok=%v err=%v row=%+v", org, ok, err, row)
+		}
 	}
 }

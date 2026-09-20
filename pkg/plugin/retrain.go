@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/eduard-kolotushin/timeseries"
@@ -158,6 +159,9 @@ func parseRetrainSpec(raw []byte) (retrainSpec, error) {
 // a seam so the scheduler can be exercised without a Grafana.
 type framePoster interface {
 	fetchFrames(ctx context.Context, row ScheduleRow) (data.Frames, error)
+	// orgID is the Grafana org this process's credential belongs to, and the only
+	// one its queries can resolve datasources in.
+	orgID(ctx context.Context) (int64, error)
 }
 
 // grafanaPoster posts the stored query objects to Grafana's own query API. It
@@ -170,6 +174,10 @@ type grafanaPoster struct {
 	// now is the claim-time clock a relative train window is resolved against.
 	// NewGrafanaPoster leaves it nil and clock() falls back to time.Now.
 	now func() time.Time
+	// mu guards the resolved org. The credential does not change under a running
+	// plugin, so it is looked up once instead of once per tick.
+	mu  sync.Mutex
+	org int64
 }
 
 func newGrafanaPoster(cfg retrainConfig) *grafanaPoster {
@@ -185,6 +193,54 @@ func (p *grafanaPoster) clock() time.Time {
 		return p.now()
 	}
 	return time.Now()
+}
+
+// orgID reports the org of the credential this scheduler posts with, read from
+// Grafana's own /api/org. A datasourceUid is resolved inside the requesting org, so
+// this is what stops a retrain of one org's row from being fetched (or failing) as
+// another's: panelClaimSQL claims only this org's rows.
+func (p *grafanaPoster) orgID(ctx context.Context) (int64, error) {
+	p.mu.Lock()
+	cached := p.org
+	p.mu.Unlock()
+	if cached != 0 {
+		return cached, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url+"/api/org", nil)
+	if err != nil {
+		return 0, err
+	}
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDSQueryReplyBytes))
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return 0, fmt.Errorf("%w: /api/org status %d", errGrafanaUnauthorized, resp.StatusCode)
+		}
+		return 0, fmt.Errorf("forecast: /api/org status %d", resp.StatusCode)
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return 0, fmt.Errorf("forecast: /api/org: %w", err)
+	}
+	if out.ID == 0 {
+		return 0, errors.New("forecast: /api/org returned no org id")
+	}
+	p.mu.Lock()
+	p.org = out.ID
+	p.mu.Unlock()
+	return out.ID, nil
 }
 
 // dsQueryResponse is the subset of the /api/ds/query reply the scheduler reads.
@@ -669,7 +725,18 @@ func (a *App) runScheduler(ctx context.Context) {
 // newer owner holds.
 func (a *App) retrainDue(ctx context.Context) tickResult {
 	owner := retrainOwner()
-	rows, err := a.sched.Claim(ctx, owner, a.retrain.Lease, retrainClaimBatch)
+	// One credential, one org: Grafana resolves the stored queries' datasourceUids
+	// inside the org the credential belongs to, so a claim that reached another
+	// org's row would fetch that row's frames as this org's series — or fail — and
+	// then store the result under the other org's key. Only this org's rows are
+	// claimed; another org's row stays due and is refreshed by the overlay's
+	// needTrain path, which runs with that org's own request context.
+	org, err := a.poster.orgID(ctx)
+	if err != nil {
+		log.DefaultLogger.Error("retrain org", "err", err.Error())
+		return tickFromErr(err)
+	}
+	rows, err := a.sched.Claim(ctx, org, owner, a.retrain.Lease, retrainClaimBatch)
 	if err != nil {
 		log.DefaultLogger.Error("retrain claim", "err", err.Error())
 		return tickResult{}
@@ -705,7 +772,7 @@ func (a *App) retrainOne(ctx context.Context, owner string, row ScheduleRow) tic
 			next = when
 		}
 	}
-	if ferr := a.sched.Finish(ctx, owner, row.Scope, row.Key, next, status); ferr != nil {
+	if ferr := a.sched.Finish(ctx, owner, row.OrgID, row.Scope, row.Key, next, status); ferr != nil {
 		log.DefaultLogger.Error("retrain finish", "scope", row.Scope, "key", row.Key, "status", status, "err", ferr.Error())
 	} else {
 		log.DefaultLogger.Info("retrain", "scope", row.Scope, "key", row.Key, "status", status, "dur", time.Since(started).Round(time.Millisecond).String())
