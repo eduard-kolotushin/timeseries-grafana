@@ -11,7 +11,7 @@ import { from } from 'rxjs';
 import { abortableLastValue, abortError } from './abortable';
 import { trainMaxDataPoints, trainStepInterval } from './lookback';
 import { metricTargets } from './mixed';
-import { rewriteTrainTargets, TrainRewriteWindow } from './trainRewrite';
+import { rewriteTrainTargets, summarizeTrainTargets, TrainRewriteWindow } from './trainRewrite';
 
 /**
  * The datasource query objects that produced the training frames, verbatim, plus the
@@ -30,6 +30,23 @@ export type TrainQuerySource = {
    */
   relative?: boolean;
   lookbackMs?: number;
+  /**
+   * Which panel trained this row and on what query. Identification only, for the
+   * Retrain schedules table: none of it enters the cacheKey, so adding it cannot
+   * orphan a stored snapshot.
+   */
+  panelId?: number;
+  panelTitle?: string;
+  dashboardUid?: string;
+  querySummary?: string;
+};
+
+/** Where the training panel lives, and what it queries. Absent fields serialize away. */
+export type TrainProvenance = {
+  panelId?: number;
+  panelTitle?: string;
+  dashboardUid?: string;
+  querySummary?: string;
 };
 
 export type TrainQueryResult = {
@@ -40,15 +57,36 @@ export type TrainQueryResult = {
 };
 
 /**
+ * Keeps only the provenance a panel actually resolved: a partially filled object
+ * must not put empty identity into the stored spec or the request body.
+ */
+export function cleanProvenance(provenance: TrainProvenance | undefined): TrainProvenance {
+  const out: TrainProvenance = {};
+  if (provenance?.panelId) {
+    out.panelId = provenance.panelId;
+  }
+  if (provenance?.panelTitle) {
+    out.panelTitle = provenance.panelTitle;
+  }
+  if (provenance?.dashboardUid) {
+    out.dashboardUid = provenance.dashboardUid;
+  }
+  if (provenance?.querySummary) {
+    out.querySummary = provenance.querySummary;
+  }
+  return out;
+}
+
+/**
  * Run the panel's metric targets once over the training window. When `signal`
  * aborts, the in-flight datasource request is cancelled (not just ignored).
  */
 export async function queryTrainingFrames(
   request: DataQueryRequest | undefined,
-  window: TrainRewriteWindow,
+  window: TrainRewriteWindow & { provenance?: TrainProvenance },
   signal?: AbortSignal
 ): Promise<TrainQueryResult> {
-  const { fromMs, toMs, intervalMs } = window;
+  const { fromMs, toMs, intervalMs, provenance } = window;
   const targets = metricTargets(request?.targets ?? []);
   if (!request || targets.length === 0 || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
     return { frames: null };
@@ -134,6 +172,11 @@ export async function queryTrainingFrames(
         to: toMs,
         relative: lookbackMs > 0,
         lookbackMs,
+        ...cleanProvenance(provenance),
+        // Summarised from the panel's own targets, not the rewritten ones: the rewrite
+        // substitutes the train window into SQL text, and a label reads better (and stays
+        // stable between a probe and a fit) with the panel's macros in it.
+        querySummary: summarizeTrainTargets(ds.type || refType(group[0].datasource), group) || undefined,
       };
       frames.push(...resp.data);
     }
@@ -154,7 +197,7 @@ function refKey(ref: DataSourceRef | string | null | undefined): string {
   return ref.uid ?? ref.type ?? '';
 }
 
-function refType(ref: DataSourceRef | string | null | undefined): string {
+export function refType(ref: DataSourceRef | string | null | undefined): string {
   if (!ref || typeof ref === 'string') {
     return '';
   }

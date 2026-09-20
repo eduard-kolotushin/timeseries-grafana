@@ -180,6 +180,23 @@ func hasRow(rows []ScheduleRow, scope, key string) bool {
 	return false
 }
 
+// specOfKey reads one row's stored spec, so a merge can be compared byte for byte
+// (jsonb round-trips key order, which an equality on the merged value would miss).
+func specOfKey(t *testing.T, ctx context.Context, s *postgresStore, orgID int64, key string) string {
+	t.Helper()
+	rows, err := s.List(ctx, orgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Scope == scopePanel && row.Key == key {
+			return string(row.Spec)
+		}
+	}
+	t.Fatalf("no panel row for %s", key)
+	return ""
+}
+
 // TestPostgresSchedule exercises the claim protocol against a real Postgres:
 // the plugin's DDL, the panel-only claim predicate, the lease and the finish
 // round-trip are all SQL behaviour that no in-memory fake can vouch for.
@@ -330,6 +347,53 @@ func TestPostgresSchedule(t *testing.T) {
 	}
 	if mine[0].LastStatus != "ok" {
 		t.Fatalf("run history lost: %+v", mine[0])
+	}
+
+	// The overlay identifies its row on every request, probe included. The merge adds
+	// identity to the stored spec without touching the query objects the scheduler
+	// replays, must not create a row, and must not write when nothing changed.
+	prov := PanelProvenance{PanelID: 3, PanelTitle: "CPU", DashboardUID: "dash-1", QuerySummary: "Druid: minuteweek · minute"}
+	if err := s.Identify(ctx, orgID, key, prov); err != nil {
+		t.Fatal(err)
+	}
+	identified := specOfKey(t, ctx, s, orgID, key)
+	// jsonb normalises spacing, so compare values rather than document text.
+	var got map[string]any
+	if err := json.Unmarshal([]byte(identified), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["panelId"] != float64(3) || got["panelTitle"] != "CPU" || got["dashboardUid"] != "dash-1" || got["querySummary"] != "Druid: minuteweek · minute" {
+		t.Fatalf("identify wrote %+v", got)
+	}
+	// The merge adds identity only: the query objects the scheduler replays and the
+	// model fields the refit needs are untouched.
+	if got["model"] != "baseline" || got["season"] != "minute-week" {
+		t.Fatalf("identify damaged the spec: %+v", got)
+	}
+	if queries, ok := got["queries"].([]any); !ok || len(queries) != 1 {
+		t.Fatalf("identify dropped the query objects: %+v", got)
+	}
+	if err := s.Identify(ctx, orgID, key, prov); err != nil {
+		t.Fatal(err)
+	}
+	if again := specOfKey(t, ctx, s, orgID, key); again != identified {
+		t.Fatalf("an unchanged identify rewrote the spec: %s -> %s", identified, again)
+	}
+	// No row, no spec to merge into: a probe must never create a claimable row.
+	if err := s.Identify(ctx, orgID, key+"-absent", prov); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := s.List(ctx, orgID); err != nil {
+		t.Fatal(err)
+	} else if hasRow(panelRows(rows), scopePanel, key+"-absent") {
+		t.Fatalf("identify created a row: %+v", rows)
+	}
+	// Another org's panel must not reach this row.
+	if err := s.Identify(ctx, orgID+1, key, PanelProvenance{PanelTitle: "stolen"}); err != nil {
+		t.Fatal(err)
+	}
+	if after := specOfKey(t, ctx, s, orgID, key); after != identified {
+		t.Fatalf("another org identified the row: %s", after)
 	}
 
 	// A disabled row is not due even when its next run is in the past.

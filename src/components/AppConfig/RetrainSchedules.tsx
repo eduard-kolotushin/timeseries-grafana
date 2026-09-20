@@ -3,6 +3,7 @@ import { css } from '@emotion/css';
 import {
   Alert,
   Button,
+  ClipboardButton,
   Field,
   FieldSet,
   FilterInput,
@@ -14,8 +15,15 @@ import {
   Switch,
   useStyles2,
 } from '@grafana/ui';
+import { config } from '@grafana/runtime';
 import { reasonFromUnknown } from '../../forecast-panel/reasons';
-import { deleteSchedule, listSchedules, putSchedule, ScheduleRow } from '../../forecast-panel/scheduleApi';
+import {
+  deleteSchedule,
+  listSchedules,
+  putSchedule,
+  ScheduleRow,
+  ScheduleSource,
+} from '../../forecast-panel/scheduleApi';
 import { testIds } from '../testIds';
 
 const rowId = (row: ScheduleRow) => `${row.scope}/${row.key}`;
@@ -62,6 +70,22 @@ function matchesStatus(row: ScheduleRow, status: StatusFilter): boolean {
     case 'never':
       return !row.lastStatus;
   }
+}
+
+/** Deep link to the dashboard panel that trained a row; absent without a dashboard. */
+function dashboardHref(source: ScheduleSource): string | undefined {
+  if (!source.dashboardUid || !source.panelId) {
+    return undefined;
+  }
+  return `${config.appSubUrl}/d/${encodeURIComponent(source.dashboardUid)}?viewPanel=${source.panelId}`;
+}
+
+/** Search covers what identifies a row, not only the cache hash the table keys on. */
+function searchHaystack(row: ScheduleRow): string {
+  return [row.key, row.source?.panelTitle, row.source?.seriesName, row.source?.querySummary]
+    .filter((part): part is string => Boolean(part))
+    .join(' ')
+    .toLowerCase();
 }
 
 type ScheduleColumns = React.ComponentProps<typeof InteractiveTable<ScheduleRow>>['columns'];
@@ -170,7 +194,7 @@ export const RetrainSchedules = () => {
         (scope === 'all' || row.scope === scope) &&
         (enabled === 'all' || row.enabled === (enabled === 'enabled')) &&
         matchesStatus(row, status) &&
-        (needle === '' || row.key.toLowerCase().includes(needle))
+        (needle === '' || searchHaystack(row).includes(needle))
     );
   }, [rows, scope, enabled, status, search]);
 
@@ -184,6 +208,37 @@ export const RetrainSchedules = () => {
 
   const columns = useMemo<ScheduleColumns>(
     () => [
+      {
+        id: 'source',
+        header: 'Source',
+        // A panel row is identified by the dashboard panel that trained it: the title
+        // links to that panel, and the series plus query say which of its targets this
+        // row refits. A baseline row has none of this — its key is the metric hash.
+        minWidth: 260,
+        cell: ({ row }) => {
+          const source = row.original.source;
+          const name = source?.panelTitle || source?.seriesName || '';
+          if (!source || !name) {
+            return <span className={styles.nowrap}>—</span>;
+          }
+          const href = dashboardHref(source);
+          const series = source.seriesName && source.seriesName !== name ? source.seriesName : '';
+          return (
+            <div className={styles.wrap}>
+              {href ? <a href={href}>{name}</a> : <span>{name}</span>}
+              {(series || source.lookback || source.querySummary) && (
+                <div>
+                  {series && <code className={styles.wrap}>{series}</code>}
+                  {series && (source.lookback || source.querySummary) ? ' ' : null}
+                  {source.lookback && <span className={styles.nowrap}>{source.lookback}</span>}
+                  {source.lookback && source.querySummary ? ' ' : null}
+                  {source.querySummary && <span title={source.querySummary}>{source.querySummary}</span>}
+                </div>
+              )}
+            </div>
+          );
+        },
+      },
       { id: 'scope', header: 'Scope', cell: ({ row }) => row.original.scope },
       {
         id: 'key',
@@ -192,7 +247,18 @@ export const RetrainSchedules = () => {
         // of a one-character-wide sliver. Table width containment keeps this from pushing
         // the plugin details sidebar out; the table scrolls inside its own container.
         minWidth: 260,
-        cell: ({ row }) => <code className={styles.wrap}>{row.original.key}</code>,
+        cell: ({ row }) => (
+          <Stack direction="row" gap={1} alignItems="center">
+            <code className={styles.wrap}>{row.original.key}</code>
+            <ClipboardButton
+              getText={() => row.original.key}
+              icon="copy"
+              size="sm"
+              tooltip="Copy key"
+              aria-label={`${rowId(row.original)} copy key`}
+            />
+          </Stack>
+        ),
       },
       {
         id: 'cron',
@@ -279,8 +345,15 @@ export const RetrainSchedules = () => {
     <div data-testid={testIds.appConfig.retrainSchedules} className={styles.body}>
       <FieldSet label="Retrain schedules">
         <p>
-          One row per stored model. <code>panel</code> rows are refreshed by this Grafana backend on their cron;
-          <code>baseline</code> rows are claimed by the baselines worker and cannot be deleted here.
+          One row per stored model. <code>panel</code> rows are refreshed by this Grafana backend on their cron and
+          belong to this org; <code>baseline</code> rows are claimed by the baselines worker, are fleet-wide (they show
+          in every org, and their cron, timezone and enable state are shared by all of them) and cannot be deleted
+          here.
+        </p>
+        <p>
+          A <code>baseline</code> row&apos;s key is the upstream <code>metric_hash</code> — the only identity this
+          store keeps for it — so copy the key to match a row against a metric, and use Search to find a{' '}
+          <code>panel</code> row by its dashboard panel, series or query.
         </p>
         {error && (
           <div data-testid={testIds.appConfig.retrainError}>
@@ -294,7 +367,7 @@ export const RetrainSchedules = () => {
             <FilterInput
               escapeRegex={false}
               value={search}
-              placeholder="key"
+              placeholder="key, panel, series"
               width={40}
               onChange={(value) => {
                 setSearch(value);

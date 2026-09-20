@@ -39,6 +39,14 @@ type TrainSource struct {
 	// fallback for rows an older frontend wrote.
 	Relative   bool  `json:"relative,omitempty"`
 	LookbackMs int64 `json:"lookbackMs,omitempty"`
+	// Provenance for the schedules table's Source column: which dashboard panel
+	// trained this row and on what query. Identification only — no field here may
+	// enter the cacheKey fingerprint, or adding one would orphan every stored
+	// snapshot the panel can still reach.
+	PanelID      int    `json:"panelId,omitempty"`
+	PanelTitle   string `json:"panelTitle,omitempty"`
+	DashboardUID string `json:"dashboardUid,omitempty"`
+	QuerySummary string `json:"querySummary,omitempty"`
 }
 
 // ForecastRequest is the JSON body for POST /forecast.
@@ -57,6 +65,25 @@ type ForecastRequest struct {
 	CacheKey    string          `json:"cacheKey"`
 	Retrain     bool            `json:"retrain"`
 	TrainSource *TrainSource    `json:"trainSource,omitempty"`
+	// Provenance identifies the panel on both a probe and a fit, so a row written
+	// before the plugin recorded it is identified on the next dashboard load. It is
+	// deliberately outside trainSource: a probe never runs the training query.
+	Provenance *PanelProvenance `json:"provenance,omitempty"`
+}
+
+// PanelProvenance is the panel's own identity, as the overlay knows it from
+// PanelProps and the dashboard URL. Field tags match TrainSource's, because both
+// write the same keys into a schedule row's spec.
+type PanelProvenance struct {
+	PanelID      int    `json:"panelId,omitempty"`
+	PanelTitle   string `json:"panelTitle,omitempty"`
+	DashboardUID string `json:"dashboardUid,omitempty"`
+	QuerySummary string `json:"querySummary,omitempty"`
+}
+
+// empty reports whether the overlay resolved nothing, so a merge would be a no-op.
+func (p PanelProvenance) empty() bool {
+	return p.PanelID == 0 && p.PanelTitle == "" && p.DashboardUID == "" && p.QuerySummary == ""
 }
 
 // ForecastResponse is the JSON body returned by POST /forecast.
@@ -100,6 +127,9 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	}
 	if err := checkTrainLen(len(in.Times), len(in.Values)); err != nil {
 		return ForecastResponse{}, err
+	}
+	if in.Provenance != nil && in.CacheKey != "" && a.sched != nil {
+		a.identifyPanel(ctx, orgID, in.CacheKey, *in.Provenance)
 	}
 	hasTimes := len(in.Times) > 0 || len(in.Values) > 0
 	if in.CacheKey == "" {
@@ -172,6 +202,20 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 		out.Cached = true
 		return out, nil
 	})
+}
+
+// identifyPanel writes the panel's identity into an existing schedule row's spec.
+// A probe reaches here without ever running the training query, which is the point:
+// a row whose spec predates this field is identified on the next dashboard load
+// instead of waiting for a refit the scheduler cannot do for it (it has no panel
+// context). Like every other schedule write, it may never fail the query.
+func (a *App) identifyPanel(ctx context.Context, orgID int64, key string, prov PanelProvenance) {
+	if prov.empty() {
+		return
+	}
+	if err := a.sched.Identify(ctx, orgID, key, prov); err != nil {
+		log.DefaultLogger.Warn("schedule identify", "key", key, "err", err.Error())
+	}
 }
 
 // recordPanelSchedule registers (or refreshes) the trained panel's row in the

@@ -7,7 +7,21 @@ export const SCHEDULE_DEFAULT_RESOURCE = `${SCHEDULE_RESOURCE}/default`;
 
 export type ScheduleScope = 'panel' | 'baseline';
 
-/** One `forecast.retrain` row. The backend never echoes `spec`; only `hasSpec` leaks. */
+/** What a row belongs to, derived by the backend from the stored spec. */
+export type ScheduleSource = {
+  dashboardUid?: string;
+  panelId?: number;
+  panelTitle?: string;
+  datasourceUid?: string;
+  seriesName?: string;
+  querySummary?: string;
+  lookback?: string;
+};
+
+/**
+ * One `forecast.retrain` row. The backend never echoes `spec`; it sends `hasSpec`
+ * and the derived `source` (absent for a worker baseline row, which has no spec).
+ */
 export type ScheduleRow = {
   scope: ScheduleScope;
   key: string;
@@ -18,6 +32,7 @@ export type ScheduleRow = {
   lastRunAt?: string;
   lastStatus?: string;
   hasSpec?: boolean;
+  source?: ScheduleSource;
 };
 
 export function listSchedules(): Promise<ScheduleRow[]> {

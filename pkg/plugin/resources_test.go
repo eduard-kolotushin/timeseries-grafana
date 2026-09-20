@@ -671,6 +671,97 @@ func TestForecastScheduleDue(t *testing.T) {
 	}
 }
 
+// A probe never runs the training query, so it cannot write a spec — but it can
+// still say which panel is asking. That is what identifies a row written before the
+// plugin stored provenance, since the cron path has no panel context to identify it.
+func TestForecastProbeIdentifiesScheduleRow(t *testing.T) {
+	clearStoreEnv(t)
+	ctx := context.Background()
+	key := strings.Repeat("9a", 32)
+	legacy := json.RawMessage(`{"datasourceUid":"druid","queries":[{"refId":"A","builder":{"queryType":"timeseries"}}],"from":1,"to":2,"seriesName":"value","lookback":"21d","model":"baseline","season":"minute-week"}`)
+	sched := newMemSchedules()
+	sched.seed(ScheduleRow{
+		OrgID: 1, Scope: scopePanel, Key: key, Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+		Spec: legacy, NextRunAt: time.Now().Add(-time.Minute),
+	})
+	app := schedulesApp(t, sched)
+
+	probe := func(prov *PanelProvenance) ForecastResponse {
+		t.Helper()
+		body, _ := json.Marshal(ForecastRequest{Model: "baseline", From: 4000, To: 5000, CacheKey: key, Provenance: prov})
+		status, raw := callRoute(t, app, adminCtx(1), http.MethodPost, "forecast", body)
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	specOf := func() (retrainSpec, []byte) {
+		t.Helper()
+		rows, err := sched.List(ctx, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("rows=%+v", rows)
+		}
+		spec, err := parseRetrainSpec(rows[0].Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return spec, rows[0].Spec
+	}
+
+	// A due row needs training, which is also the request that identifies it.
+	if got := probe(&PanelProvenance{PanelID: 7, PanelTitle: "CPU", DashboardUID: "dash-1", QuerySummary: "Druid: minuteweek · minute"}); !got.NeedTrain {
+		t.Fatalf("due row: %+v", got)
+	}
+	spec, _ := specOf()
+	if spec.PanelID != 7 || spec.PanelTitle != "CPU" || spec.DashboardUID != "dash-1" {
+		t.Fatalf("probe did not identify the row: %+v", spec)
+	}
+	if spec.QuerySummary != "Druid: minuteweek · minute" {
+		t.Fatalf("probe did not label the row's query: %+v", spec)
+	}
+	// The merge adds identity only: the queries the scheduler replays and the model
+	// fields the refit needs are still there.
+	if len(spec.Queries) == 0 || spec.Model != "baseline" || spec.Season != "minute-week" || spec.SeriesName != "value" {
+		t.Fatalf("the merge damaged the spec: %+v", spec)
+	}
+	// A second probe with the same identity writes nothing: a dashboard view is not a
+	// reason to touch the row.
+	_, before := specOf()
+	if got := probe(&PanelProvenance{PanelID: 7, PanelTitle: "CPU", DashboardUID: "dash-1", QuerySummary: "Druid: minuteweek · minute"}); !got.NeedTrain {
+		t.Fatalf("second probe: %+v", got)
+	}
+	if _, after := specOf(); string(after) != string(before) {
+		t.Fatalf("identical provenance rewrote the spec: before=%s after=%s", before, after)
+	}
+
+	// A probe from a frontend that sends no provenance leaves the row alone.
+	_, before = specOf()
+	if got := probe(nil); !got.NeedTrain {
+		t.Fatalf("third probe: %+v", got)
+	}
+	if _, after := specOf(); string(after) != string(before) {
+		t.Fatalf("spec rewritten without provenance: before=%s after=%s", before, after)
+	}
+
+	// A probe is not a fit: it must never create a row, or the scheduler would claim
+	// one whose query objects it does not have.
+	other := ForecastRequest{Model: "baseline", From: 4000, To: 5000, CacheKey: strings.Repeat("9b", 32), Provenance: &PanelProvenance{PanelID: 9, PanelTitle: "Other", DashboardUID: "dash-2"}}
+	body, _ := json.Marshal(other)
+	if status, _ := callRoute(t, app, adminCtx(1), http.MethodPost, "forecast", body); status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	if rows, _ := sched.List(ctx, 1); len(rows) != 1 {
+		t.Fatalf("a probe created a row: %+v", rows)
+	}
+}
+
 // TestForecastRecordsTrainSource pins the fit half of the schedule contract: a
 // trained overlay stores the browser's trainSource so the backend can re-fit it
 // later, and a later retrain extends that row's schedule instead of resetting it.
@@ -730,6 +821,10 @@ func TestForecastRecordsTrainSource(t *testing.T) {
 		From:          1_700_000_000_000,
 		To:            1_700_100_000_000,
 		SeriesName:    "series-1",
+		PanelID:       7,
+		PanelTitle:    "CPU",
+		DashboardUID:  "dash-1",
+		QuerySummary:  "PromQL: up",
 	}
 	if status := fit(src); status != http.StatusOK {
 		t.Fatalf("status=%d", status)
@@ -762,6 +857,11 @@ func TestForecastRecordsTrainSource(t *testing.T) {
 	// be stored with it: without them a cron retrain fits the backend defaults instead.
 	if spec.Alpha != 0.4 || spec.Beta != 0.15 || spec.Period != 12 {
 		t.Fatalf("spec parameters were dropped: %+v", spec)
+	}
+	// The Retrain schedules table identifies a row by the dashboard panel that trained
+	// it, so the provenance the panel sent has to survive into the stored spec.
+	if spec.PanelID != 7 || spec.PanelTitle != "CPU" || spec.DashboardUID != "dash-1" || spec.QuerySummary != "PromQL: up" {
+		t.Fatalf("provenance was dropped from the spec: %+v", spec)
 	}
 
 	// An admin's cron and enable state survive the next retrain of the same panel.

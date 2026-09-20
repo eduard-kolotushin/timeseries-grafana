@@ -199,6 +199,8 @@ describe('cacheKey', () => {
     };
     // The replay payload rides along on the fit POST but is not part of the model identity:
     // offline retrains produce the same snapshot for a different query text, same targets.
+    // That includes the identification the schedules table reads off the row: storing
+    // provenance must never orphan the snapshot the panel is already serving.
     const withTrainSource = {
       ...base,
       trainSource: {
@@ -207,6 +209,10 @@ describe('cacheKey', () => {
         from: visFrom,
         to: visTo,
         seriesName: 'value train',
+        panelId: 7,
+        panelTitle: 'CPU',
+        dashboardUid: 'dash-1',
+        querySummary: 'Druid SQL: SELECT 1',
       },
       trainSeriesName: 'value train',
     };

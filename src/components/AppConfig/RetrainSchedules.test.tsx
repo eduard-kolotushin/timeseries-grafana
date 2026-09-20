@@ -10,6 +10,7 @@ const mockDelete = jest.fn();
 
 jest.mock('@grafana/runtime', () => ({
   getBackendSrv: () => ({ get: mockGet, put: mockPut, delete: mockDelete }),
+  config: { appSubUrl: '/grafana' },
 }));
 
 const panelRow: ScheduleRow = {
@@ -42,6 +43,21 @@ const errorRow: ScheduleRow = {
 };
 
 const neverRow: ScheduleRow = { ...panelRow, key: 'neverhash', lastStatus: undefined };
+
+/** A row trained by a panel that recorded where it lives and what it queried. */
+const sourcedRow: ScheduleRow = {
+  ...panelRow,
+  key: 'sourcedhash',
+  source: {
+    dashboardUid: 'dash-1',
+    panelId: 7,
+    panelTitle: 'CPU',
+    datasourceUid: 'prom',
+    seriesName: 'up{job="api"}',
+    querySummary: 'PromQL: sum(rate(http_requests_total[5m]))',
+    lookback: '21d',
+  },
+};
 
 const manyRows = (count: number): ScheduleRow[] =>
   Array.from({ length: count }, (_, i) => ({ ...panelRow, key: `panelhash${i}` }));
@@ -159,6 +175,39 @@ describe('RetrainSchedules', () => {
     fireEvent.click(await screen.findByLabelText('panel/panelhash save'));
     expect(await screen.findByText('forecast: admin required')).toBeInTheDocument();
     expect(screen.getByTestId(testIds.appConfig.retrainError)).toBeInTheDocument();
+  });
+
+  it('identifies a panel row by its dashboard panel, series and query', async () => {
+    renderSchedules([sourcedRow, baselineRow]);
+    const link = await screen.findByRole('link', { name: 'CPU' });
+    // The link is what turns a cache hash back into "the panel whose CPU chart this is".
+    expect(link.getAttribute('href')).toBe('/grafana/d/dash-1?viewPanel=7');
+    const row = rowOf('panel/sourcedhash cron');
+    expect(within(row).getByText('up{job="api"}')).toBeInTheDocument();
+    expect(within(row).getByText('PromQL: sum(rate(http_requests_total[5m]))')).toBeInTheDocument();
+    expect(within(row).getByText('21d')).toBeInTheDocument();
+  });
+
+  it('shows the scope per row and copies a key', async () => {
+    renderSchedules([sourcedRow, baselineRow]);
+    await screen.findByLabelText('panel/sourcedhash cron');
+    expect(within(rowOf('panel/sourcedhash cron')).getByText('panel')).toBeInTheDocument();
+    const baseline = rowOf('baseline/baselinehash cron');
+    expect(within(baseline).getByText('baseline')).toBeInTheDocument();
+    // A worker baseline row has no spec, so it has no source but keeps its hash.
+    expect(within(baseline).queryByRole('link')).toBeNull();
+    expect(screen.getByLabelText('baseline/baselinehash copy key')).toBeInTheDocument();
+  });
+
+  it('finds a row by the panel, series or query it belongs to', async () => {
+    renderSchedules([sourcedRow, panelRow]);
+    await screen.findByLabelText('panel/sourcedhash cron');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search' }), { target: { value: 'cpu' } });
+    // The hash the table keys on does not contain this text; the source does.
+    expect(screen.getByLabelText('panel/sourcedhash cron')).toBeInTheDocument();
+    expect(screen.queryByLabelText('panel/panelhash cron')).toBeNull();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search' }), { target: { value: 'http_requests_total' } });
+    expect(screen.getByLabelText('panel/sourcedhash cron')).toBeInTheDocument();
   });
 
   it('deletes panel rows only', async () => {

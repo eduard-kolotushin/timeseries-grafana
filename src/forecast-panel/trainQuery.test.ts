@@ -68,6 +68,7 @@ describe('queryTrainingFrames', () => {
       to: toMs,
       relative: false,
       lookbackMs: 0,
+      querySummary: 'PromQL: up',
     });
     // Identity, not a copy: the backend replays the untouched rewrite output.
     expect(result.source?.queries).toBe(prom.seen[0]);
@@ -92,6 +93,49 @@ describe('queryTrainingFrames', () => {
       to: toMs,
       relative: true,
       lookbackMs: toMs - fromMs,
+      querySummary: 'PromQL: up',
+    });
+  });
+
+  it('records the panel provenance that identifies the schedule row', async () => {
+    const prom = datasource([frame('up')]);
+    mockGet.mockResolvedValue(prom.ds);
+
+    const result = await queryTrainingFrames(request([{ uid: 'prom', type: 'prometheus' }]), {
+      fromMs,
+      toMs,
+      intervalMs: 60_000,
+      provenance: { panelId: 7, panelTitle: 'CPU', dashboardUid: 'dash-1' },
+    });
+
+    expect(result.source?.panelId).toBe(7);
+    expect(result.source?.panelTitle).toBe('CPU');
+    expect(result.source?.dashboardUid).toBe('dash-1');
+    expect(result.source?.querySummary).toBe('PromQL: up');
+  });
+
+  it('sends no provenance keys when the panel could not resolve them', async () => {
+    const prom = datasource([frame('up')]);
+    mockGet.mockResolvedValue(prom.ds);
+
+    const result = await queryTrainingFrames(request([{ uid: 'prom', type: 'prometheus' }]), {
+      fromMs,
+      toMs,
+      intervalMs: 60_000,
+      provenance: { panelId: undefined, panelTitle: '', dashboardUid: undefined },
+    });
+
+    expect(result.source?.panelId).toBeUndefined();
+    expect(result.source?.panelTitle).toBeUndefined();
+    expect(result.source?.dashboardUid).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(result.source))).toEqual({
+      datasourceUid: 'prom',
+      queries: prom.seen[0],
+      from: fromMs,
+      to: toMs,
+      relative: false,
+      lookbackMs: 0,
+      querySummary: 'PromQL: up',
     });
   });
 

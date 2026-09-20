@@ -75,7 +75,7 @@ Bound `POST /forecast` / `QueryData` body and train length, and concurrent Fit /
 
 ## v12 in scope
 
-Backend retrain scheduler: `forecast.retrain` (`scope` `panel` / `baseline`), `FOR UPDATE SKIP LOCKED` claims, `/api/ds/query` frame fetch from the stored `trainSource`, `GET|PUT|DELETE /schedules` (Admin) and `/schedules/default`, schedule UI. `needTrain` also fires when a schedule is due. `trainSource` stays out of the `cacheKey` fingerprint. No per-datasource logic in `pkg/`; a scheduler failure never fails a query. The forecast.retrain row table is a second app config page (`?page=schedules`), a peer tab of Overview and Configuration.
+Backend retrain scheduler: `forecast.retrain` (`scope` `panel` / `baseline`), `FOR UPDATE SKIP LOCKED` claims, `/api/ds/query` frame fetch from the stored `trainSource`, `GET|PUT|DELETE /schedules` (Admin) and `/schedules/default`, schedule UI. `needTrain` also fires when a schedule is due. `trainSource` stays out of the `cacheKey` fingerprint, provenance included. The schedules table identifies a `panel` row by its dashboard/panel/series/query (`GET /schedules` derives a `source` object; the spec's query objects never leave the backend), and every overlay request carries `provenance` (probe included) so the backend merges that identity into an existing row and a row written before it existed heals on the next dashboard load. A `baseline` row is fleet-wide (`org_id = 0`) and identifiable only by its `metric_hash`. No per-datasource logic in `pkg/`; a scheduler failure never fails a query. The forecast.retrain row table is a second app config page (`?page=schedules`), a peer tab of Overview and Configuration.
 
 ## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12 out of scope
 

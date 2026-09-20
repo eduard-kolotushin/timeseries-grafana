@@ -14,6 +14,7 @@ export const DS_PROMETHEUS = 'prometheus';
 export const DS_OPENSEARCH = 'grafana-opensearch-datasource';
 export const DS_POSTGRES = 'postgres';
 export const DS_POSTGRES_PLUGIN = 'grafana-postgresql-datasource';
+export const DS_DRUID = 'grafadruid-druid-datasource';
 
 const PG_TIME_MACROS = [
   '$__timeFilter',
@@ -95,6 +96,64 @@ function inferDatasourceType(target: unknown): string {
     return DS_POSTGRES;
   }
   return '';
+}
+
+/** Longest summary `summarizeTrainTargets` returns, prefix included. */
+const SUMMARY_LIMIT = 120;
+
+/**
+ * One-line identification of the targets a panel trains on. It is stored with the
+ * schedule row so the Retrain schedules table can say what a cache hash belongs to;
+ * type-keyed like the rewrite, so no datasource field name leaves this module.
+ */
+export function summarizeTrainTargets(dsType: string, targets: unknown[]): string {
+  const type = dsType || inferDatasourceType(targets[0]);
+  for (const target of targets) {
+    const summary = targetSummary(type, asObj(target));
+    if (summary) {
+      return clipSummary(summary);
+    }
+  }
+  return '';
+}
+
+function targetSummary(type: string, t: AnyTarget): string {
+  if (type === DS_PROMETHEUS) {
+    return prefixed('PromQL: ', t.expr);
+  }
+  if (type === DS_OPENSEARCH) {
+    const ppl = String(t.queryType ?? '').toLowerCase() === 'ppl';
+    return prefixed(ppl ? 'PPL: ' : 'Lucene: ', t.query);
+  }
+  if (isPostgresType(type)) {
+    return prefixed('SQL: ', t.rawSql);
+  }
+  if (type === DS_DRUID) {
+    const builder = asObj(t.builder);
+    const sql = prefixed('Druid SQL: ', builder.query);
+    if (sql) {
+      return sql;
+    }
+    // The Druid builder stores no query text: name the table it reads, and its rollup.
+    const table = asObj(builder.dataSource).name;
+    if (typeof table !== 'string' || !table) {
+      return '';
+    }
+    const granularity = typeof builder.granularity === 'string' && builder.granularity ? ` · ${builder.granularity}` : '';
+    return `Druid: ${table}${granularity}`;
+  }
+  return '';
+}
+
+function prefixed(prefix: string, value: unknown): string {
+  return typeof value === 'string' && value.trim() ? prefix + value : '';
+}
+
+function clipSummary(summary: string): string {
+  // Whitespace collapses first: a multi-line SQL target would otherwise store its
+  // newlines in the row and wrap the table cell onto a dozen lines.
+  const flat = summary.replace(/\s+/g, ' ').trim();
+  return flat.length > SUMMARY_LIMIT ? `${flat.slice(0, SUMMARY_LIMIT - 1)}…` : flat;
 }
 
 function rewritePrometheus<T>(targets: T[], window: TrainRewriteWindow): TrainRewriteResult<T> {

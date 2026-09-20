@@ -219,6 +219,54 @@ describe('loadOverlayForecasts', () => {
     expect(post.mock.calls[1][0].times).toEqual([1, 2]);
   });
 
+  it('identifies the panel on the probe as well as the fit', async () => {
+    const queryTrain = jest.fn(async () => ({ frames: [frame()] }));
+    const post = jest
+      .fn<Promise<ForecastResponse>, [Record<string, unknown>]>()
+      .mockResolvedValueOnce({ needTrain: true })
+      .mockResolvedValueOnce({ times: [3], values: [30] });
+    await loadOverlayForecasts({
+      visible,
+      fromMs: 3,
+      toMs: 4,
+      level: 0,
+      retrain: false,
+      fitBody: { model: 'naive' },
+      // The probe never runs the training query, so this is the only request that can
+      // identify a schedule row written before the plugin stored provenance.
+      provenance: { panelId: 7, panelTitle: 'CPU', dashboardUid: 'dash-1' },
+      cacheKeyFor: async () => 'aa'.repeat(32),
+      queryTrain,
+      post,
+    });
+    expect(post).toHaveBeenCalledTimes(2);
+    const want = { panelId: 7, panelTitle: 'CPU', dashboardUid: 'dash-1' };
+    expect(post.mock.calls[0][0].provenance).toEqual(want);
+    expect(post.mock.calls[1][0].provenance).toEqual(want);
+  });
+
+  it('sends no provenance for a panel that resolved none of it', async () => {
+    const queryTrain = jest.fn(async () => ({ frames: [frame()] }));
+    const post = jest
+      .fn<Promise<ForecastResponse>, [Record<string, unknown>]>()
+      .mockResolvedValueOnce({ needTrain: true })
+      .mockResolvedValueOnce({ times: [3], values: [30] });
+    await loadOverlayForecasts({
+      visible,
+      fromMs: 3,
+      toMs: 4,
+      level: 0,
+      retrain: false,
+      fitBody: { model: 'naive' },
+      provenance: { panelId: undefined, panelTitle: '', dashboardUid: undefined },
+      cacheKeyFor: async () => 'aa'.repeat(32),
+      queryTrain,
+      post,
+    });
+    expect('provenance' in post.mock.calls[0][0]).toBe(false);
+    expect('provenance' in post.mock.calls[1][0]).toBe(false);
+  });
+
   it('sends no trainSource when training frames carried none', async () => {
     const queryTrain = jest.fn(async () => ({ frames: [frame()] }));
     const post = jest

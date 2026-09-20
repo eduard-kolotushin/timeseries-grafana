@@ -35,6 +35,46 @@ type scheduleDTO struct {
 	LastRunAt  string `json:"lastRunAt,omitempty"`
 	LastStatus string `json:"lastStatus,omitempty"`
 	HasSpec    bool   `json:"hasSpec"`
+	// Source is derived from the stored spec; it is absent for a row without one
+	// (a worker baseline row) and never carries the spec's query objects.
+	Source *scheduleSourceDTO `json:"source,omitempty"`
+}
+
+// scheduleSourceDTO identifies what a row belongs to. The verbatim spec stays in
+// the backend: this is the handful of fields the Retrain schedules table needs to
+// say which dashboard panel trained a cache hash, and on what.
+type scheduleSourceDTO struct {
+	DashboardUID  string `json:"dashboardUid,omitempty"`
+	PanelID       int    `json:"panelId,omitempty"`
+	PanelTitle    string `json:"panelTitle,omitempty"`
+	DatasourceUID string `json:"datasourceUid,omitempty"`
+	SeriesName    string `json:"seriesName,omitempty"`
+	QuerySummary  string `json:"querySummary,omitempty"`
+	Lookback      string `json:"lookback,omitempty"`
+}
+
+// maxQuerySummary protects the list response from whatever a client stored: the
+// summary labels a table cell, it is not a place to park a query.
+const maxQuerySummary = 200
+
+// scheduleSourceFromSpec reads only the identification keys of a stored spec.
+// Unlike parseRetrainSpec it must never fail a listing: a malformed or absent spec
+// (a baseline row has NULL) costs that row its Source cell, not the whole table.
+func scheduleSourceFromSpec(raw []byte) *scheduleSourceDTO {
+	if len(raw) == 0 {
+		return nil
+	}
+	var src scheduleSourceDTO
+	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil
+	}
+	if src == (scheduleSourceDTO{}) {
+		return nil
+	}
+	if r := []rune(src.QuerySummary); len(r) > maxQuerySummary {
+		src.QuerySummary = string(r[:maxQuerySummary-1]) + "…"
+	}
+	return &src
 }
 
 func toScheduleDTO(row ScheduleRow) scheduleDTO {
@@ -46,6 +86,7 @@ func toScheduleDTO(row ScheduleRow) scheduleDTO {
 		Enabled:    row.Enabled,
 		LastStatus: row.LastStatus,
 		HasSpec:    len(row.Spec) > 0,
+		Source:     scheduleSourceFromSpec(row.Spec),
 	}
 	if !row.NextRunAt.IsZero() {
 		out.NextRunAt = row.NextRunAt.UTC().Format(time.RFC3339)

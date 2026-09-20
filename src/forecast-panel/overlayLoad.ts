@@ -11,7 +11,7 @@ import {
   isAbortError,
   reasonFromUnknown,
 } from './reasons';
-import { TrainQueryResult } from './trainQuery';
+import { TrainQueryResult, TrainProvenance, cleanProvenance } from './trainQuery';
 import { ForecastResponse } from './types';
 
 export type OverlayForecast = {
@@ -31,6 +31,12 @@ export type OverlayLoadArgs = {
   level: number;
   retrain: boolean;
   fitBody: OverlayPostBody;
+  /**
+   * Which panel is asking. It rides on every request, the probe included, so a
+   * schedule row written before the plugin stored provenance is identified without
+   * waiting for a refit.
+   */
+  provenance?: TrainProvenance;
   cacheKeyFor: (seriesName: string) => Promise<string>;
   queryTrain: () => Promise<TrainQueryResult>;
   post: (body: OverlayPostBody) => Promise<ForecastResponse>;
@@ -48,6 +54,8 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
   const need: SeriesPoints[] = [];
   let usedSaved = false;
   let overlayError: string | null = null;
+  const provenance = cleanProvenance(args.provenance);
+  const identify = Object.keys(provenance).length > 0 ? { provenance } : {};
 
   if (!args.retrain) {
     for (const points of args.visible) {
@@ -56,6 +64,7 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
         const key = await args.cacheKeyFor(points.name);
         const resp = await args.post({
           ...args.fitBody,
+          ...identify,
           cacheKey: key,
           from: args.fromMs,
           to: args.toMs,
@@ -122,6 +131,7 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
       const key = await args.cacheKeyFor(points.name);
       const body: OverlayPostBody = {
         ...args.fitBody,
+        ...identify,
         cacheKey: key,
         times: fit.times,
         values: fit.values,

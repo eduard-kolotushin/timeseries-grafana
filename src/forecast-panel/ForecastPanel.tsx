@@ -7,11 +7,12 @@ import {
   MutableDataFrame,
   PanelProps,
 } from '@grafana/data';
-import { PanelDataErrorView } from '@grafana/runtime';
+import { locationService, PanelDataErrorView } from '@grafana/runtime';
 import { LegendDisplayMode, TooltipDisplayMode } from '@grafana/schema';
 import { Alert, Button, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
 import { FORECAST_RESOURCE } from '../constants';
 import { postResource } from './abortable';
+import { dashboardUidFromPath } from './alertFromPanel';
 import { cacheKey, fitOptions } from './cacheKey';
 import { extractSeries } from './extract';
 import {
@@ -27,7 +28,8 @@ import { loadOverlayForecasts } from './overlayLoad';
 import { metricTargets, splitPanelFrames } from './mixed';
 import { REASON_INVALID_RANGE } from './reasons';
 import { queueRetrain, takeRetrain } from './retrain';
-import { queryTrainingFrames } from './trainQuery';
+import { refType, queryTrainingFrames } from './trainQuery';
+import { summarizeTrainTargets } from './trainRewrite';
 import { ForecastOptions, ForecastResponse } from './types';
 
 interface Props extends PanelProps<ForecastOptions> {}
@@ -42,6 +44,7 @@ export const ForecastPanel: React.FC<Props> = ({
   fieldConfig,
   replaceVariables,
   id,
+  title,
 }) => {
   const theme = useTheme2();
   const allTargets = data.request?.targets;
@@ -95,12 +98,22 @@ export const ForecastPanel: React.FC<Props> = ({
       const visibleFromMs = data.request?.range?.from?.valueOf();
       const visibleToMs = data.request?.range?.to?.valueOf();
       const targets = metricTargets(allTargets ?? []);
+      // Built once and shared: the probe needs it as much as the fit does. The summary
+      // comes from the panel's own targets, so a probe can identify a row that has not
+      // been retrained by a browser since the plugin started recording identity.
+      const provenance = {
+        panelId: id,
+        panelTitle: title,
+        dashboardUid: data.request?.dashboardUID || dashboardUidFromPath(locationService.getLocation().pathname),
+        querySummary: summarizeTrainTargets(refType(targets[0]?.datasource), targets) || undefined,
+      };
       const result = await loadOverlayForecasts({
         visible,
         fromMs: window.fromMs,
         toMs: window.toMs,
         level: forecastLevel(options),
         retrain,
+        provenance,
         fitBody: fitOptions(options),
         cacheKeyFor: (seriesName) =>
           cacheKey({
@@ -121,6 +134,9 @@ export const ForecastPanel: React.FC<Props> = ({
               visibleFromMs,
               visibleToMs,
               intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
+              // Identification for the schedule row this fit writes: which panel trains
+              // on what. Never part of the cacheKey.
+              provenance,
             },
             ac.signal
           ),

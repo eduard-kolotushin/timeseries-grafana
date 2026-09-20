@@ -57,6 +57,54 @@ type ScheduleStore interface {
 	Due(ctx context.Context, orgID int64, key string, now time.Time) (bool, error)
 	Claim(ctx context.Context, owner string, lease time.Duration, limit int) ([]ScheduleRow, error)
 	Finish(ctx context.Context, owner, scope, key string, next time.Time, status string) error
+	// Identify merges a panel's identity into an existing row's spec. It never
+	// creates a row: only a fit knows the query objects a claimable row needs.
+	Identify(ctx context.Context, orgID int64, key string, prov PanelProvenance) error
+}
+
+// identifySQL merges the identity keys into whatever the spec already holds. Two
+// guards matter: the row must exist with a spec (a provenance-only spec would be
+// claimed by the scheduler and fail to fetch), and the merged result must differ
+// from the stored one (the overlay identifies its row on every load, and a
+// dashboard view is not a reason to write).
+const identifySQL = `
+UPDATE forecast.retrain
+SET spec = spec || $3::jsonb, updated_at = now()
+WHERE scope = 'panel' AND key = $1 AND org_id = $2 AND spec IS NOT NULL
+  AND spec || $3::jsonb IS DISTINCT FROM spec
+`
+
+// Identify implements ScheduleStore.identifySQL: a JSONB merge of panelId,
+// panelTitle and dashboardUid, leaving the panel's queries and model fields alone.
+func (s *postgresStore) Identify(ctx context.Context, orgID int64, key string, prov PanelProvenance) error {
+	if err := s.ensureSchedules(ctx); err != nil {
+		return err
+	}
+	patch, err := provenanceJSON(prov)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, identifySQL, key, orgID, patch)
+	return err
+}
+
+// provenanceJSON renders only the fields the overlay resolved, so a merge never
+// blanks an identity a previous load stored.
+func provenanceJSON(prov PanelProvenance) ([]byte, error) {
+	patch := map[string]any{}
+	if prov.PanelID != 0 {
+		patch["panelId"] = prov.PanelID
+	}
+	if prov.PanelTitle != "" {
+		patch["panelTitle"] = prov.PanelTitle
+	}
+	if prov.DashboardUID != "" {
+		patch["dashboardUid"] = prov.DashboardUID
+	}
+	if prov.QuerySummary != "" {
+		patch["querySummary"] = prov.QuerySummary
+	}
+	return json.Marshal(patch)
 }
 
 // panelClaimSQL is the plugin half of the claim protocol. The predicate is
@@ -253,6 +301,10 @@ func (s errScheduleStore) Claim(context.Context, string, time.Duration, int) ([]
 }
 
 func (s errScheduleStore) Finish(context.Context, string, string, string, time.Time, string) error {
+	return s.err
+}
+
+func (s errScheduleStore) Identify(context.Context, int64, string, PanelProvenance) error {
 	return s.err
 }
 

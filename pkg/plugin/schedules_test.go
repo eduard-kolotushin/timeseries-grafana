@@ -91,6 +91,53 @@ func (m *memSchedules) Delete(_ context.Context, orgID int64, scope, key string)
 	return nil
 }
 
+// Identify mirrors identifySQL: a merge into an existing panel spec, never a new
+// row, never a spec Postgres would refuse to merge into, and never a write when the
+// values are already there.
+func (m *memSchedules) Identify(_ context.Context, orgID int64, key string, prov PanelProvenance) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := schedKey(scopePanel, key)
+	row, ok := m.rows[k]
+	if !ok || row.OrgID != orgID || len(row.Spec) == 0 {
+		return nil
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(row.Spec, &spec); err != nil {
+		return nil
+	}
+	patch, err := provenanceJSON(prov)
+	if err != nil {
+		return err
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(patch, &fields); err != nil {
+		return err
+	}
+	same := func(a, b any) bool {
+		ja, errA := json.Marshal(a)
+		jb, errB := json.Marshal(b)
+		return errA == nil && errB == nil && string(ja) == string(jb)
+	}
+	changed := false
+	for name, value := range fields {
+		if !same(spec[name], value) {
+			changed = true
+		}
+		spec[name] = value
+	}
+	if !changed {
+		return nil
+	}
+	merged, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	row.Spec = merged
+	m.rows[k] = row
+	return nil
+}
+
 func (m *memSchedules) Due(_ context.Context, orgID int64, key string, now time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -318,6 +365,105 @@ func TestScheduleListIncludesWorkerBaselineRows(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Scope != scopeBaseline || rows[0].Key != "ready" {
 		t.Fatalf("worker baseline row missing from the org list: %s", body)
+	}
+}
+
+// The Source column is the only thing that tells an admin which dashboard panel a
+// cache hash belongs to, so it has to survive every spec shape the store can hold —
+// and it must never become a back door for the stored query objects.
+func TestScheduleListSourceSummary(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	for _, tc := range []struct {
+		name     string
+		row      ScheduleRow
+		want     *scheduleSourceDTO
+		wantGone []string
+	}{
+		{
+			name: "provenance is summarised, the spec is not echoed",
+			row: ScheduleRow{OrgID: 1, Scope: scopePanel, Key: "panel-a", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+				Spec: json.RawMessage(`{"datasourceUid":"prom","queries":[{"refId":"A","expr":"marker-only-in-the-spec"}],"from":1700000000000,"to":1700100000000,"seriesName":"up","lookback":"21d","panelId":7,"panelTitle":"CPU","dashboardUid":"dash-1","querySummary":"PromQL: up"}`)},
+			want: &scheduleSourceDTO{
+				DashboardUID: "dash-1", PanelID: 7, PanelTitle: "CPU",
+				DatasourceUID: "prom", SeriesName: "up", QuerySummary: "PromQL: up", Lookback: "21d",
+			},
+			wantGone: []string{`"queries"`, "marker-only-in-the-spec", `"from"`},
+		},
+		{
+			// A row written before the frontend recorded provenance still names its
+			// series, which is most of what identifies it.
+			name: "a spec without provenance still identifies its series",
+			row: ScheduleRow{OrgID: 1, Scope: scopePanel, Key: "panel-b", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+				Spec: json.RawMessage(`{"datasourceUid":"prom","queries":[{"refId":"A"}],"from":1,"to":2,"seriesName":"up","lookback":"21d"}`)},
+			want: &scheduleSourceDTO{DatasourceUID: "prom", SeriesName: "up", Lookback: "21d"},
+		},
+		{
+			// The listing is an admin page, not the scheduler: a spec the scheduler
+			// would refuse must not empty the table.
+			name: "a malformed spec costs one row its source",
+			row: ScheduleRow{OrgID: 1, Scope: scopePanel, Key: "panel-c", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+				Spec: json.RawMessage(`{"queries":`)},
+		},
+		{
+			// A spec the worker might write for a baseline row carries no identity at
+			// all: the row's key is the metric hash.
+			name: "a spec with no identification keys has no source",
+			row: ScheduleRow{OrgID: 1, Scope: scopePanel, Key: "panel-d", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+				Spec: json.RawMessage(`{"model":"baseline","season":"minute-week"}`)},
+		},
+		{
+			name: "a worker baseline row has no spec to summarise",
+			row:  ScheduleRow{OrgID: 0, Scope: scopeBaseline, Key: "ready", Cron: "*/5 * * * *", Timezone: "UTC", Enabled: true},
+		},
+		{
+			name: "a stored summary is capped before it reaches the table",
+			row: ScheduleRow{OrgID: 1, Scope: scopePanel, Key: "panel-e", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+				Spec: json.RawMessage(`{"querySummary":"` + long + `"}`)},
+			want: &scheduleSourceDTO{QuerySummary: strings.Repeat("x", maxQuerySummary-1) + "…"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sched := newMemSchedules()
+			sched.seed(tc.row)
+			app := schedulesApp(t, sched)
+			// Ask as another org when the row is a worker baseline: those are fleet-wide,
+			// the rest are this org's.
+			org := int64(1)
+			if tc.row.Scope == scopeBaseline {
+				org = 2
+			}
+			status, body := callRoute(t, app, adminCtx(org), http.MethodGet, "schedules", nil)
+			if status != http.StatusOK {
+				t.Fatalf("list status=%d body=%s", status, body)
+			}
+			var rows []scheduleDTO
+			if err := json.Unmarshal(body, &rows); err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("rows=%s", body)
+			}
+			got := rows[0]
+			switch {
+			case tc.want == nil && got.Source != nil:
+				t.Fatalf("source=%+v want none", got.Source)
+			case tc.want != nil && got.Source == nil:
+				t.Fatalf("no source, want %+v", tc.want)
+			case tc.want != nil && *got.Source != *tc.want:
+				t.Fatalf("source=%+v want %+v", *got.Source, *tc.want)
+			}
+			if got.Key != tc.row.Key || got.Cron == "" {
+				t.Fatalf("row fields lost: %+v", got)
+			}
+			if got.HasSpec != (len(tc.row.Spec) > 0) {
+				t.Fatalf("hasSpec=%v spec=%s", got.HasSpec, tc.row.Spec)
+			}
+			for _, gone := range tc.wantGone {
+				if strings.Contains(string(body), gone) {
+					t.Fatalf("the list leaked %s: %s", gone, body)
+				}
+			}
+		})
 	}
 }
 
