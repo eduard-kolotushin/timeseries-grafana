@@ -118,10 +118,11 @@ Retrain stored snapshots on a cron with **no browser open**, and expose the sche
 - **The plugin fetches its own training data** with `POST <Grafana>/api/ds/query` and the query objects the overlay stored verbatim, so no datasource-specific field is ever interpreted in `pkg/`. This introduces **no per-datasource logic and no datasource HTTP client**: the request body is opaque JSON that came from Grafana's own frontend, and the response is decoded with the SDK's `data.Frame` JSON unmarshaller. The type-keyed train rewrite stays in the overlay frontend
 - **`trainSource` in the fit request**: `POST /forecast` gains an optional `trainSource {datasourceUid, queries, from, to, seriesName}` carrying exactly what the browser sent to the datasource. A successful fit upserts `forecast.retrain` for that `cacheKey` (never resetting an existing row's cron). `trainSource` is **not** part of the `cacheKey` fingerprint
 - **Resource routes**: `GET|PUT /schedules` and `DELETE /schedules?scope=&key=` on the app resource mux, Admin-gated through `backend.PluginConfigFromContext(ctx).User.Role` (`403` otherwise). `DELETE` on a `scope='baseline'` row is refused (`400`): the worker re-inserts it
-- **Configuration-page schedule UI**: a table of rows (scope, key, cron, timezone, next/last run, status) with cron + timezone editing, an enable toggle, and delete for panel rows, plus a default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`)
+- **Schedule UI**: a table of rows (scope, key, cron, timezone, next/last run, status) with cron + timezone editing, an enable toggle, and delete for panel rows, on the **Retrain schedules** app page (a tab beside Overview and Configuration), plus a default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`) on the Configuration page
 - **`needTrain` also fires when the schedule is due** (`next_run_at <= now()`), so a row the scheduler cannot retrain — no stored spec, scheduler disabled — is still refreshed by the next overlay load. `POST /forecast` is unchanged for every other caller
 - Config: `FORECAST_RETRAIN_ENABLED`, `FORECAST_RETRAIN_TICK`, `FORECAST_RETRAIN_LEASE`, `FORECAST_RETRAIN_CRON`, `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN`, following the existing `FORECAST_*` → `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / ini / jsonData / `secureJsonData` precedence
 - A scheduler failure never fails a query: if the scheduler is disabled or `/api/ds/query` is unreachable, `needTrain` on the next overlay load remains the retrain path
+- **Retrain schedules app page**: a second app config page (id `schedules`, title `Retrain schedules`) shows the `forecast.retrain` row table as a peer tab of Overview / Configuration at `/plugins/%PLUGIN_ID%?page=schedules`. The Default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`) stays on the Configuration page. Grafana gates every app config page on `plugins:write`; the schedule resource API keeps its own Admin gate.
 
 ## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12 non-goals
 
@@ -133,7 +134,7 @@ Do not add these without first updating this document:
 - Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (pgx snapshot store is v6)
 - Elasticsearch plugin type
 - Shipping Grafana alert rules or contact points
-- Extra app pages beyond the landing page and existing Configuration page
+- Extra app pages beyond the landing page, the existing Configuration page, and the Retrain schedules page
 - Duplicating Series or forecast algorithms
 - A Druid/Kafka ticker in this plugin (see `timeseries-baselines`); the v12 scheduler retrains **this plugin's** `forecast.snapshots`, it does not compute minute-of-week baselines
 - Consuming the metrics Kafka topic

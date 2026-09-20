@@ -35,19 +35,9 @@ const baselineRow: ScheduleRow = {
   lastStatus: 'ok',
 };
 
-const onDefaultCronChange = jest.fn();
-const onDefaultTimezoneChange = jest.fn();
-
 function renderSchedules(rows: ScheduleRow[]) {
   mockGet.mockResolvedValue(rows);
-  return render(
-    <RetrainSchedules
-      defaultCron="0 3 * * *"
-      defaultTimezone="UTC"
-      onDefaultCronChange={onDefaultCronChange}
-      onDefaultTimezoneChange={onDefaultTimezoneChange}
-    />
-  );
+  return render(<RetrainSchedules />);
 }
 
 describe('RetrainSchedules', () => {
@@ -55,8 +45,6 @@ describe('RetrainSchedules', () => {
     mockGet.mockReset();
     mockPut.mockReset();
     mockDelete.mockReset();
-    onDefaultCronChange.mockReset();
-    onDefaultTimezoneChange.mockReset();
   });
 
   it('renders one row per schedule with its next and last run', async () => {
@@ -101,13 +89,5 @@ describe('RetrainSchedules', () => {
     fireEvent.click(screen.getByLabelText('panel/panelhash delete'));
     await waitFor(() => expect(mockDelete).toHaveBeenCalledTimes(1));
     expect(mockDelete.mock.calls[0][0]).toContain('scope=panel&key=panelhash');
-  });
-
-  it('hands the default schedule inputs back to the settings form', async () => {
-    renderSchedules([]);
-    fireEvent.change(await screen.findByLabelText('Default retrain cron'), { target: { value: '*/7 * * * *' } });
-    fireEvent.change(screen.getByLabelText('Default retrain timezone'), { target: { value: 'Europe/Moscow' } });
-    expect(onDefaultCronChange).toHaveBeenCalledWith('*/7 * * * *');
-    expect(onDefaultTimezoneChange).toHaveBeenCalledWith('Europe/Moscow');
   });
 });

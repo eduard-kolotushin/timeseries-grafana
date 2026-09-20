@@ -1,29 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Field, FieldSet, Input, Switch } from '@grafana/ui';
+import { Alert, Button, FieldSet, Input, Switch } from '@grafana/ui';
 import { reasonFromUnknown } from '../../forecast-panel/reasons';
 import { deleteSchedule, listSchedules, putSchedule, ScheduleRow } from '../../forecast-panel/scheduleApi';
 import { testIds } from '../testIds';
 
-export type RetrainSchedulesProps = {
-  /** Default schedule; persisted by AppConfig's settings POST, not from here. */
-  defaultCron: string;
-  defaultTimezone: string;
-  onDefaultCronChange: (cron: string) => void;
-  onDefaultTimezoneChange: (timezone: string) => void;
-};
-
 const rowId = (row: ScheduleRow) => `${row.scope}/${row.key}`;
 
 /**
- * `forecast.retrain` rows served by the app plugin backend. Admin-only: a non-admin
- * sees the 403 body in the error alert instead of a table.
+ * `forecast.retrain` rows served by the app plugin backend, on the Retrain schedules
+ * app config page. Admin-only: a non-admin sees the 403 body in the error alert
+ * instead of a table.
  */
-export const RetrainSchedules = ({
-  defaultCron,
-  defaultTimezone,
-  onDefaultCronChange,
-  onDefaultTimezoneChange,
-}: RetrainSchedulesProps) => {
+export const RetrainSchedules = () => {
   const [rows, setRows] = useState<ScheduleRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -181,26 +169,6 @@ export const RetrainSchedules = ({
         >
           Refresh
         </Button>
-      </FieldSet>
-      <FieldSet label="Default retrain schedule">
-        <p>
-          Written to <code>jsonData.retrainCron</code> / <code>jsonData.retrainTimezone</code> by the Save button above
-          the table. Used for every model without a row of its own.
-        </p>
-        <Field label="Cron" description="5-field cron, or @hourly / @daily. The backend parses it per row.">
-          <Input
-            aria-label="Default retrain cron"
-            value={defaultCron}
-            onChange={(e) => onDefaultCronChange(e.currentTarget.value)}
-          />
-        </Field>
-        <Field label="Timezone" description="IANA zone, e.g. UTC or Europe/Moscow.">
-          <Input
-            aria-label="Default retrain timezone"
-            value={defaultTimezone}
-            onChange={(e) => onDefaultTimezoneChange(e.currentTarget.value)}
-          />
-        </Field>
       </FieldSet>
     </div>
   );

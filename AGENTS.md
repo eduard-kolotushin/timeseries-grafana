@@ -75,11 +75,11 @@ Bound `POST /forecast` / `QueryData` body and train length, and concurrent Fit /
 
 ## v12 in scope
 
-Backend retrain scheduler: `forecast.retrain` (`scope` `panel` / `baseline`), `FOR UPDATE SKIP LOCKED` claims, `/api/ds/query` frame fetch from the stored `trainSource`, `GET|PUT|DELETE /schedules` (Admin) and `/schedules/default`, Configuration-page schedule UI. `needTrain` also fires when a schedule is due. `trainSource` stays out of the `cacheKey` fingerprint. No per-datasource logic in `pkg/`; a scheduler failure never fails a query.
+Backend retrain scheduler: `forecast.retrain` (`scope` `panel` / `baseline`), `FOR UPDATE SKIP LOCKED` claims, `/api/ds/query` frame fetch from the stored `trainSource`, `GET|PUT|DELETE /schedules` (Admin) and `/schedules/default`, schedule UI. `needTrain` also fires when a schedule is due. `trainSource` stays out of the `cacheKey` fingerprint. No per-datasource logic in `pkg/`; a scheduler failure never fails a query. The forecast.retrain row table is a second app config page (`?page=schedules`), a peer tab of Overview and Configuration.
 
 ## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12 out of scope
 
-Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages, baseline publisher process, a job queue.
+Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages beyond the landing, Configuration, and Retrain schedules pages, baseline publisher process, a job queue.
 
 ## Workflow
 

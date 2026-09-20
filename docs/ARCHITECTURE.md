@@ -16,7 +16,8 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/forecast-panel/mixed.ts` | Metric vs Forecast datasource targets/frames on Mixed overlay |
 | `src/forecast-panel/alertFromPanel.ts` | Overlay options New alert rule: Grafana `/alerting/new` defaults from live panel queries |
 | `src/forecast-datasource/` | Nested queryable datasource for alerting (`kind` forecast / lower / upper) |
-| `src/components/AppConfig/` | Overlay Postgres DSN for the snapshot store |
+| `src/components/AppConfig/` | Configuration tab: snapshot-store DSN + default retrain schedule |
+| `src/pages/` | App config page bodies; the `schedules` tab renders the `forecast.retrain` table |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules; fit path records `trainSource` and upserts the `panel` schedule row |
 | `pkg/plugin/limits.go` | Train-length / body caps and Fit / ForecastRange inflight semaphore |

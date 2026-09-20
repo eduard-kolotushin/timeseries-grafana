@@ -3,7 +3,6 @@ import { AppPluginMeta, PluginConfigPageProps } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
 import { Button, Field, FieldSet, Input, SecretInput } from '@grafana/ui';
 import { testIds } from '../testIds';
-import RetrainSchedules from './RetrainSchedules';
 
 export type ForecastStoreJsonData = {
   storeHost?: string;
@@ -92,12 +91,22 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
           Save
         </Button>
       </FieldSet>
-      <RetrainSchedules
-        defaultCron={retrainCron}
-        defaultTimezone={retrainTimezone}
-        onDefaultCronChange={setRetrainCron}
-        onDefaultTimezoneChange={setRetrainTimezone}
-      />
+      <FieldSet label="Default retrain schedule">
+        <p>
+          Written to <code>jsonData.retrainCron</code> / <code>jsonData.retrainTimezone</code> by the Save button above.
+          A model with no row of its own uses this cron and timezone; per-model rows are edited on the{' '}
+          <strong>Retrain schedules</strong> tab.
+        </p>
+        <Field label="Cron" description="5-field cron, or @hourly / @daily. The backend parses it per row.">
+          <Input value={retrainCron} onChange={(e: ChangeEvent<HTMLInputElement>) => setRetrainCron(e.target.value)} />
+        </Field>
+        <Field label="Timezone" description="IANA zone, e.g. UTC or Europe/Moscow.">
+          <Input
+            value={retrainTimezone}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setRetrainTimezone(e.target.value)}
+          />
+        </Field>
+      </FieldSet>
       <p>Plugin id: {plugin.meta.id}</p>
       <p>
         Env <code>FORECAST_STORE_*</code> (not forwarded into plugin processes on Grafana 12.4+ by default) and
