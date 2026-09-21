@@ -1,14 +1,14 @@
 # 11. Страницы app-плагина
 
-Страниц три: лендинг (только текст), Configuration (DSN снимка) и Retrain schedules (таблица `forecast.retrain`, Admin). Оверлей `/forecast` с них не вызывается. `GET /ping` есть (`{"message":"ok"}`), но панель его не вызывает.
+Страницы три: лендинг (только текст), Configuration (DSN снимков) и Retrain schedules (таблица `forecast.retrain`, права Admin). Оверлей `/forecast` с них не вызывается. `GET /ping` существует (`{"message":"ok"}`), но панель его не использует.
 
-Configuration сохраняет `storeHost` / port / database / user / ssl / password через `POST /api/plugins/.../settings`; env `FORECAST_STORE_*` в процессе Grafana перекрывает сохранённые поля.
+Configuration сохраняет `storeHost` / port / database / user / ssl / password через `POST /api/plugins/.../settings`; переменные окружения `FORECAST_STORE_*` в процессе Grafana перекрывают сохранённые значения.
 
-Retrain schedules (`?page=schedules`) читает `GET /schedules` и правит строки через `PUT` / `DELETE /schedules` и `POST /schedules/default`. Всё под Admin. Таблица показывает `scope` (`panel` или `baseline`), Source, ключ с копированием, cron, timezone, enabled, следующий и последний запуск, `last_status`. Поиск идёт по ключу, заголовку панели, имени ряда и сводке запроса.
+Retrain schedules (`?page=schedules`) читает `GET /schedules` и правит строки через `PUT` / `DELETE /schedules` и `POST /schedules/default`. Всё это требует прав Admin. Таблица показывает `scope` (`panel` или `baseline`), Source, ключ с возможностью копирования, cron, timezone, enabled, следующий и последний запуски, `last_status`. Поиск идёт по ключу, заголовку панели, имени ряда и сводке запроса.
 
 Source — это производный `source` из бэкенда, а не спека: `dashboardUid`, `panelId`, `panelTitle` (со ссылкой на `?viewPanel=`), `datasourceUid`, `seriesName`, `lookback` и однострочная `querySummary`. Спека и объекты запросов наружу не отдаются никогда.
 
-Орг-семантика видна по строке: `panel` — строка этой org, `baseline` — общая для всех org (`org_id = 0`), её cron / timezone / enabled общие, а опознаётся она только ключом `metric_hash`. `baseline` нельзя создать этой страницей (неизвестный ключ — 404), но можно изменить и удалить.
+Принадлежность строки организации видна по `scope`: `panel` — строка этой организации, `baseline` — общая для всех организаций (`org_id = 0`), её cron / timezone / enabled общие, а опознаётся она только по ключу `metric_hash`. Строку `baseline` нельзя создать этой страницей (неизвестный ключ — 404), но можно изменить и удалить.
 
 ```mermaid
 sequenceDiagram
@@ -33,8 +33,8 @@ sequenceDiagram
   App->>BE: PUT или DELETE schedules
   BE->>PG: UPSERT или DELETE
   Admin->>Grafana: Открыть лендинг приложения
-  Grafana->>App: Home текст добавить панель оверлея
+  Grafana->>App: Лендинг: текст про добавление панели оверлея
   Grafana->>BE: CheckHealth
   BE-->>Grafana: HealthStatusOk
-  Note over App,BE: Landing и Config не делают POST forecast
+  Note over App,BE: Landing и Config не вызывают POST /forecast
 ```

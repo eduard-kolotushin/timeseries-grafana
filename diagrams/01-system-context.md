@@ -1,10 +1,10 @@
 # 1. Контекст системы
 
-Кто общается с плагином и что он не должен хостить. Страниц три: лендинг — только текст, Configuration хранит DSN снимка и `/forecast` не вызывает, Retrain schedules показывает и правит строки расписаний. Видимый запрос панели идёт всегда. Второй запрос источника (обучение) — только при `needTrain` или Retrain.
+Кто взаимодействует с плагином и что плагин не должен размещать у себя. Страницы три: лендинг — только текст, Configuration хранит DSN снимков и `/forecast` не вызывает, Retrain schedules показывает и правит строки расписаний. Видимый запрос панели выполняется всегда; второй запрос к источнику данных (обучение) — только при `needTrain` или нажатии Retrain.
 
-Grafana alerting ходит не в панель, а во вложенный источник **Forecast** (`QueryData`): он только `Restore` + `ForecastRange` по `cacheKey`, никогда не обучает. Оба процесса `gpx_forecast` (app и datasource) читают одну таблицу снимков в Postgres.
+Grafana alerting обращается не к панели, а во вложенный источник **Forecast** (`QueryData`): он выполняет только `Restore` + `ForecastRange` по `cacheKey` и никогда не обучает. Оба процесса `gpx_forecast` (app и datasource) читают одну и ту же таблицу снимков в Postgres.
 
-Третий участник — автономный пересчёт по cron внутри процесса app (`FORECAST_RETRAIN_CRON`, тик 30 с): он берёт **свои** строки `forecast.retrain` (`scope=panel`, своя org) через `FOR UPDATE SKIP LOCKED`, тянет фреймы через `/api/ds/query` самой Grafana по сохранённому `trainSource`, обучает, пишет снимок и закрывает строку. Строки `scope=baseline` (`org_id = 0`, видны во всех org, опознаются только по `metric_hash`) пишет и закрывает соседний `timeseries-baselines`; DDL таблицы делает только плагин. Ошибка планировщика не влияет ни на запрос панели, ни на alerting.
+Третий участник — автономный пересчёт по cron внутри процесса app (`FORECAST_RETRAIN_CRON`, тик 30 с): он забирает **свои** строки `forecast.retrain` (`scope=panel`, своя организация) через `FOR UPDATE SKIP LOCKED`, тянет фреймы через `/api/ds/query` самой Grafana по сохранённому `trainSource`, обучает, пишет снимок и завершает обработку строки. Строки `scope=baseline` (`org_id = 0`, видны во всех организациях, опознаются только по `metric_hash`) пишет и завершает соседний процесс `timeseries-baselines`; DDL таблицы выполняет только плагин. Ошибка планировщика не влияет ни на запрос панели, ни на alerting.
 
 Рантайм (Compose, Helm) — в `../timeseries-grafana-sandbox/diagrams/`; планировщик подробнее — в [13-retrain-scheduler.md](13-retrain-scheduler.md).
 
@@ -19,7 +19,7 @@ flowchart LR
   DSBE["Forecast datasource gpx_forecast"]
   Alert["Grafana alerting"]
   DS["Источник данных дашборда"]
-  PG["overlay-postgres schema forecast"]
+  PG["overlay-postgres схема forecast"]
   RT[("forecast.retrain")]
   TS["модуль timeseries"]
   FC["модуль timeseries-forecast"]
@@ -29,8 +29,8 @@ flowchart LR
   Grafana --> Panel
   Grafana --> DS
   Grafana --> Pages
-  Panel -->|"видимые фреймы запроса"| Grafana
-  Panel -->|"проба POST без times"| AppBE
+  Panel -->|"запрос видимых фреймов"| Grafana
+  Panel -->|"пробный POST без times"| AppBE
   Panel -->|"при needTrain: запрос обучения"| DS
   Alert -->|"QueryData refId cacheKey kind"| DSBE
   Pages -->|"schedules только Admin"| AppBE
@@ -39,7 +39,7 @@ flowchart LR
   DSBE --> FC
   AppBE -->|"pgx Put и Get"| PG
   DSBE -->|"pgx Get"| PG
-  AppBE -->|"апсерт строки панели и провенанс"| RT
+  AppBE -->|"upsert строки панели и провенанс"| RT
   Sched -->|"claim и Finish"| RT
   Sched -->|"POST api/ds/query с trainSource"| Grafana
   Sched -->|"Fit и Put снимка"| PG

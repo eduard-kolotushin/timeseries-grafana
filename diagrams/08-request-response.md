@@ -1,13 +1,13 @@
 # 8. Тела запроса и ответа
 
-Как панель кладёт полосы на фреймы Grafana:
+Как панель накладывает полосы неопределённости на фреймы Grafana:
 
-- Поле значения прогноза, цвет warning
-- Скрытые `{name} lower` и `{name} upper`
-- `custom.fillBelowTo` на upper → полоса интервала
-- `hideFrom.legend/tooltip` на полях границ
+- поле значения прогноза, цвет warning;
+- скрытые поля `{name} lower` и `{name} upper`;
+- `custom.fillBelowTo` на upper → полоса интервала;
+- `hideFrom.legend/tooltip` на полях границ.
 
-Проба не шлёт `times`/`values`. Fit шлёт их вместе с тем же `cacheKey`. `retrain` на бэкенде важен только когда `times` нет.
+Пробный запрос не отправляет `times`/`values`. Fit отправляет их вместе с тем же `cacheKey`. Бэкенд учитывает `retrain` только когда `times` нет.
 
 ```mermaid
 flowchart TB
@@ -25,10 +25,10 @@ flowchart TB
   end
 
   subgraph resp["Тело ответа"]
-    OT["times"] --> OV["values null значит NaN"]
+    OT["times"] --> OV["values null означает NaN"]
     OV --> OL["lower опционально"]
     OL --> OU["upper опционально"]
-    OU --> NT["needTrain HTTP 200 на промахе"]
+    OU --> NT["needTrain HTTP 200 при промахе"]
     NT --> CH["cached true после Restore"]
   end
 

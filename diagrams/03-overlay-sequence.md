@@ -1,6 +1,6 @@
 # 3. Последовательность оверлея
 
-К моменту монтирования `ForecastPanel` Grafana уже запросила видимый диапазон панели. Панель не учит модель на каждом refresh: сначала POST без `times` (`cacheKey` + окно прогноза). Обучающий запрос источника — один на панель и только если есть `needTrain` или нажат Retrain; `needTrain` приходит и тогда, когда у строки расписания этой панели подошёл срок (её переобучит либо планировщик, либо сама панель — см. [13-retrain-scheduler.md](13-retrain-scheduler.md)).
+К моменту монтирования `ForecastPanel` Grafana уже выполнила запрос видимого диапазона панели. Панель не переобучает модель при каждом обновлении: сначала отправляется POST без `times` (`cacheKey` + окно прогноза). Обучающий запрос к источнику данных — один на панель и только если пришёл `needTrain` или нажат Retrain; `needTrain` приходит и тогда, когда у строки расписания этой панели подошёл срок (её переобучит либо планировщик, либо сама панель — см. [13-retrain-scheduler.md](13-retrain-scheduler.md)).
 
 Источник: `src/forecast-panel/overlayLoad.ts`, `ForecastPanel.tsx`.
 
@@ -16,7 +16,7 @@ sequenceDiagram
   participant BE as gpx_forecast
   participant Lib as timeseries-forecast
 
-  User->>Grafana: Открыть дашборд или сменить время или опции
+  User->>Grafana: Открыть дашборд, сменить время или опции
   Grafana->>DS: Запрос видимого диапазона панели
   DS-->>Grafana: data.series фреймы истории
   Grafana->>Panel: PanelProps data timeRange options
@@ -25,14 +25,14 @@ sequenceDiagram
   BE->>Lib: Restore затем ForecastRange
   Lib-->>BE: сетка times и values
   BE-->>Panel: ForecastResponse cached true
-  Panel->>Grafana: история плюс прогноз Using saved model
+  Panel->>Grafana: история плюс прогноз, Using saved model
 ```
 
-Проба на каждый видимый ряд. Если все попали — `queryTrainingFrames` не вызывается.
+Пробный запрос отправляется для каждого видимого ряда. Если попали все ряды, `queryTrainingFrames` не вызывается.
 
 ## Промах или Retrain (один train на панель)
 
-Retrain пропускает пробу. Иначе ряды с `needTrain` копятся; затем один `queryTrainingFrames`.
+Retrain пропускает пробный запрос (иначе ряды с `needTrain` накапливались бы); затем выполняется один `queryTrainingFrames`.
 
 ```mermaid
 sequenceDiagram
@@ -58,13 +58,13 @@ sequenceDiagram
   Panel->>Grafana: история плюс прогноз
 ```
 
-HTTP 200 на промахе нужен чтобы `getBackendSrv` не бросал исключение. Пустой train — `REASON_TRAIN_EMPTY`, без подстановки видимого ряда.
+HTTP 200 при промахе нужен, чтобы `getBackendSrv` не бросал исключение. Пустое обучение — `REASON_TRAIN_EMPTY`, без подстановки видимого ряда.
 
-Проба без `times` заодно вливает провенанс панели в уже существующую строку расписания (`Identify`), а успешный fit апсертит её целиком: спека = `trainSource` + модель, cron и enabled админа не сбрасываются. Обе записи в `forecast.retrain` ошибкой оверлея не становятся — только запись в логе.
+Пробный запрос без `times` заодно переносит провенанс панели в уже существующую строку расписания (`Identify`), а успешный fit перезаписывает её целиком через upsert: спека = `trainSource` + модель, cron и enabled администратора не сбрасываются. Ни одна из этих записей в `forecast.retrain` не становится ошибкой оверлея — только записью в логе.
 
 ## Отмена устаревшей загрузки
 
-Каждый `load` получает `AbortController` из `OverlayLoadGate` (опция `maxInflightLoads`, по умолчанию 1). Новый refresh или смена опций отменяет самый старый. Отмена — не просто флаг: `postResource` и `queryTrainingFrames` идут через `abortableLastValue`, который отписывается от Observable `getBackendSrv().fetch` / `ds.query`; RxJS `fromFetch` при этом обрывает HTTP-запрос, бэкенд видит `context.Canceled` и освобождает слот лимитера.
+Каждый `load` получает `AbortController` из `OverlayLoadGate` (опция `maxInflightLoads`, по умолчанию 1). Новое обновление или смена опций отменяют самый старый запрос. Отмена — не просто флаг: `postResource` и `queryTrainingFrames` идут через `abortableLastValue`, который отписывается от Observable у `getBackendSrv().fetch` / `ds.query`; RxJS `fromFetch` при этом обрывает HTTP-запрос, бэкенд видит `context.Canceled` и освобождает слот лимитера.
 
 Источник: `src/forecast-panel/abortable.ts`, `overlayInflight.ts`.
 
@@ -80,7 +80,7 @@ sequenceDiagram
   Panel->>Gate: start maxInflightLoads
   Gate-->>Panel: AbortController A
   Panel->>BE: POST forecast (fetch Observable, signal A)
-  Grafana->>Panel: PanelProps refresh 2 пока A в полёте
+  Grafana->>Panel: PanelProps refresh 2, пока A в полёте
   Panel->>Gate: start
   Gate->>Gate: abort A (лимит достигнут)
   Gate-->>Panel: AbortController B
