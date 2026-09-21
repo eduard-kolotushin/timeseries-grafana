@@ -37,7 +37,9 @@ LoadBalancer's host port, published by Docker Desktop's kind cloud provider (see
 ## Environment under test
 
 Both environments were exercised on 2026-09-21 (13:07–14:2x MSK) from the same source revisions, and both were
-left running afterwards.
+left running afterwards. A third pass the same day (14:16–14:31 UTC) added a **temporary second release** of the
+same chart with two Grafana replicas over one Postgres, to observe the HA claim [Scaling and HA](#scaling-and-ha);
+it was removed again at the end of the run.
 
 | | Compose sandbox | Kubernetes (Helm) |
 | --- | --- | --- |
@@ -776,6 +778,78 @@ The two processes meet at exactly two places, both in the overlay Postgres:
   owned by the plugin, which is why the K8s worker logged `relation "forecast.retrain" does not exist` until the
   plugin's store path had run once.
 
+## Scaling and HA
+
+`gpx_forecast` is a Grafana **backend plugin**, not a service: Grafana spawns the binary from its plugin
+directory and dials the gRPC address the child announces in the plugin handshake (`pkg/main.go` serves through
+`datasource.Manage` and `app.Manage`). There is no remote or externally hosted mode — the SDK's standalone
+support (`internal/standalone`, `standalone.txt`) exists so an IDE can debug a plugin against a local plugin
+directory, and even that needs Grafana's plugins dir. So the backend runs **where Grafana runs**: one
+`gpx_forecast` process per plugin (overlay app, Forecast datasource) **per Grafana replica**, and the only
+scaling axis is more Grafana replicas over one Postgres. That is safe because the *queue* coordinates, not the
+processes: [`FOR UPDATE SKIP LOCKED` is what makes Grafana HA safe](ARCHITECTURE.md) — one plugin process per
+replica, all ticking, each due row retrained by exactly one of them, no leader and no lock table.
+
+Observed live (Kubernetes, 2026-09-21, 14:16–14:31 UTC) with a temporary second release of the same chart: the
+`timeseries` release's single Grafana pod plus two `fx-ha` replicas — **three scheduler processes**, all ticking
+every 30 s against the one overlay Postgres, all inheriting `FORECAST_STORE_*` and the `*/5 * * * *` cron.
+
+| Mechanism | Where | Observation |
+| --- | --- | --- |
+| **Claim** — `scope='panel' AND org_id=$org AND enabled AND spec IS NOT NULL AND next_run_at <= now() AND (claimed_until IS NULL OR claimed_until < now())`, then `LIMIT <batch> FOR UPDATE SKIP LOCKED` | `pkg/plugin/schedule.go` (`panelClaimSQL`) | Three rows were due at 14:20:00, 14:25:00 and 14:30:00 and still untouched at 14:20:12, 14:20:27 and 14:25:15; each slot produced **exactly three retrains**, all from one replica (`fx-ha-grafana-687dcc9476-7svct`): 14:20:28.499/.691/.960, 14:25:28.480/.700/.951, 14:30:28.408/.594/.846. Per-pod `status=ok` counts over 14:19–14:31: `7svct` **10**, `9hrmh` 0, `timeseries` 0 (nine slot retrains plus the lease one below) — a double claim would read 6 per slot, a stalled claim 0 |
+| **Lease** — `claimed_by=$owner, claimed_until=now()+$lease` (default `FORECAST_RETRAIN_LEASE`, 5 m), and a held lease is excluded from every later claim | same statement | A row forced to `claimed_by='ghost-holder', claimed_until=now()+100s, next_run_at=now()` (due from 14:26:05, lease until 14:27:45) stayed untouched across the nine ticks of the three processes in that window (30 s apart, 14:26:28–14:27:28) and was retrained **exactly once**, 13 s after the lease expired: 14:27:58.409, `dur=235ms` |
+| **Owner-guarded finish** — `… WHERE … AND claimed_by=$owner`, then `next_run_at = nextRun(cron, timezone, now)` | `pkg/plugin/schedule.go` (`Finish`) | Every retrain cleared the claim (`claimed_by`/`claimed_until` back to `NULL`), left `last_status=ok` and pushed `next_run_at` to the next cron slot (14:20:28 → 14:25:00, 14:25:28 → 14:30:00, 14:30:28 → 14:35:00); `forecast.snapshots.updated_at` moved with each one (14:20:28.47/.69/.93, 14:25:28.45/.69/.92, 14:30:28.39/.59/.82) |
+| **Snapshot upsert** — `ON CONFLICT (org_id, cache_key) DO UPDATE` | `pkg/plugin/store_postgres.go` | Two replicas may fit the same key without error; each retrain stored exactly one snapshot per row |
+| **Org-bound claim** — the credential's own org once per process (`GET /api/org`), `org_id = $org` in the predicate | `pkg/plugin/schedule.go`, `pkg/plugin/retrain.go` | All three processes were anonymous-Admin org 1 and competed for the same rows (the other-org case is F18) |
+| **Per-process read-through cache** (256 entries, 30 s TTL) | [ARCHITECTURE.md](ARCHITECTURE.md) (store section) | Cross-replica *visibility* observed: 45 probes sent through the **`timeseries` release's** process (whose own scheduler claimed nothing) walked the whole cycle while a replica retrained — `{"needTrain":true}` for the 18 probes that landed while the ghost lease held (14:26:05–14:27:54) and for the 5 that landed in the 14:30:00 slot, then the restored forecast within 6 s of the retrain that finished at 14:27:58.409, and `"cached":true` on a probe 72 s after the 14:20:28 retrain. The 30 s **staleness** window itself was not timed (no warm entry across another replica's retrain) |
+
+The recipe is the sandbox's own values plus these overrides (replicas share Grafana's database, not a PVC):
+
+```bash
+helm upgrade --install fx-ha ../timeseries-k8s/charts/timeseries -n timeseries -f helm/timeseries-values.yaml \
+  --set grafana.replicas=2 \
+  --set grafana.persistence.enabled=false \
+  --set grafana.env.GF_DATABASE_TYPE=postgres \
+  --set grafana.env.GF_DATABASE_HOST=overlay-postgres.overlay-postgres.svc:5432 \
+  --set grafana.env.GF_DATABASE_NAME=grafana_ha \
+  --set grafana.env.GF_DATABASE_USER=overlay \
+  --set grafana.env.GF_DATABASE_PASSWORD=overlay \
+  --set grafana.env.GF_DATABASE_SSL_MODE=disable \
+  --set baselines.enabled=false
+```
+
+- **Shared Grafana state instead of a PVC.** The chart's default install keeps Grafana's own state in SQLite on
+  an RWO claim, which two pods cannot mount, so the replica set points Grafana at Postgres and drops
+  persistence. Both replicas then provision the same dashboards and datasources into that database (observed in
+  `resource` and `data_source` of `grafana_ha`) and write the same `forecast.*` tables through
+  `FORECAST_STORE_*`.
+- **Configure the database by env, not through `grafana.ini`.** This chart keys the ini as the literal dotted
+  key `grafana.ini`, so `--set grafana.ini.database.type=postgres` builds a nested map the chart never reads: the
+  replicas first came up on SQLite, with no `[database]` section in the rendered ini. `GF_DATABASE_*` is what
+  Grafana reads — the pods logged `Config overridden from Environment variable var="GF_DATABASE_TYPE=postgres"`
+  and `Connecting to DB dbtype=postgres`, and the fixture dashboard appeared in `grafana_ha`.
+- **No ingress needed.** The scheduler is internal: the second release's LoadBalancer stayed `<pending>` and its
+  replicas only had to reach Grafana and the datasources in-cluster. Each replica's scheduler fetches frames from
+  `FORECAST_GRAFANA_URL` — the sandbox's `http://127.0.0.1:3000`, i.e. **its own** Grafana (observed: `…-7svct`
+  logged `dsUid=druid … queryData … status=ok` for the retrain it had claimed).
+- **`baselines.enabled=false`** keeps the run from starting a second `timeseries-baselines` fleet; the two claim
+  disjoint scopes anyway (`baseline` vs this org's `panel`).
+
+What it does not change:
+
+- The three load caps (`MAX_TRAIN_POINTS`, `MAX_INFLIGHT`, the 16 MiB body cap) are **per process**, so N
+  replicas mean N× the fleet-wide fit concurrency: the queue bounds who retrains, not how much compute exists.
+- Every replica ticks and any of them may win — the `timeseries` process lost all three observed slots only
+  because a replica's tick came first each time (the rows were still due 27 s into the slot); nothing is pinned
+  to the oldest pod.
+- A replica's retrain goroutine starts with its **app plugin instance** (`pkg/plugin/app.go`, `newApp`), not
+  with the pod: here both replicas were up at 14:15, served their app at 14:16:28 and claimed their first slot at
+  14:20:28.
+- A process that dies mid-retrain releases nothing: its claim expires with the lease and the next tick after that
+  retries the row — the ghost row above is that case seen from the other side.
+- Adding a replica needs no plugin configuration, no leader and no lock table; the claim predicate plus the lease
+  is the whole protocol.
+
 ## Verified live, not verified live
 
 Everything in the scenario lines above was observed on a running system. The following claims come from the
@@ -791,6 +865,7 @@ source and are **not** backed by a live observation in this run:
 | `DRUID_MAX_INFLIGHT` saturation | `druid.go`, `limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
 | `FORECAST_MAX_INFLIGHT` env/ini precedence | `pkg/plugin/limits.go` | Only the jsonData path was used (the Compose env does not set it). |
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
+| A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |
 
 ## Discrepancies found
 
