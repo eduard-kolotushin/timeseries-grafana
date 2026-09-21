@@ -1,6 +1,6 @@
 # 3. Последовательность оверлея
 
-К моменту монтирования `ForecastPanel` Grafana уже запросила видимый диапазон панели. Панель не учит модель на каждом refresh: сначала POST без `times` (`cacheKey` + окно прогноза). Обучающий запрос источника — один на панель и только если есть `needTrain` или нажат Retrain.
+К моменту монтирования `ForecastPanel` Grafana уже запросила видимый диапазон панели. Панель не учит модель на каждом refresh: сначала POST без `times` (`cacheKey` + окно прогноза). Обучающий запрос источника — один на панель и только если есть `needTrain` или нажат Retrain; `needTrain` приходит и тогда, когда у строки расписания этой панели подошёл срок (её переобучит либо планировщик, либо сама панель — см. [13-retrain-scheduler.md](13-retrain-scheduler.md)).
 
 Источник: `src/forecast-panel/overlayLoad.ts`, `ForecastPanel.tsx`.
 
@@ -60,6 +60,8 @@ sequenceDiagram
 
 HTTP 200 на промахе нужен чтобы `getBackendSrv` не бросал исключение. Пустой train — `REASON_TRAIN_EMPTY`, без подстановки видимого ряда.
 
+Проба без `times` заодно вливает провенанс панели в уже существующую строку расписания (`Identify`), а успешный fit апсертит её целиком: спека = `trainSource` + модель, cron и enabled админа не сбрасываются. Обе записи в `forecast.retrain` ошибкой оверлея не становятся — только запись в логе.
+
 ## Отмена устаревшей загрузки
 
 Каждый `load` получает `AbortController` из `OverlayLoadGate` (опция `maxInflightLoads`, по умолчанию 1). Новый refresh или смена опций отменяет самый старый. Отмена — не просто флаг: `postResource` и `queryTrainingFrames` идут через `abortableLastValue`, который отписывается от Observable `getBackendSrv().fetch` / `ds.query`; RxJS `fromFetch` при этом обрывает HTTP-запрос, бэкенд видит `context.Canceled` и освобождает слот лимитера.
@@ -85,5 +87,5 @@ sequenceDiagram
   Note over Panel,BE: отписка от Observable A → HTTP A обрывается → context.Canceled в Go
   Panel->>BE: POST forecast (signal B)
   BE-->>Panel: ForecastResponse для B
-  Panel->>Grafana: фреймы; результат A отброшен как AbortError
+  Panel->>Grafana: фреймы, результат A отброшен как AbortError
 ```

@@ -4,7 +4,7 @@
 
 Переобучение: кнопка Retrain на оверлее (этот `panelId`) или в опциях панели (`queueRetrainAll`). Смена отпечатка (запрос / модель / строки trainRange) даёт другой `cacheKey` и снова `needTrain`.
 
-Не входят в ключ: видимый диапазон дашборда, окно прогноза, `level` / `showInterval`, `interval` / `intervalMs` / `maxDataPoints` цели.
+Не входят в ключ: видимый диапазон дашборда, окно прогноза, `level` / `showInterval`, `interval` / `intervalMs` / `maxDataPoints` цели, а также `trainSource` целиком — его окно и поля опознания (`panelId`, `panelTitle`, `dashboardUid`, `querySummary`). Апсерт расписания поэтому никогда не плодит новый снимок (см. [13-retrain-scheduler.md](13-retrain-scheduler.md)).
 
 Видимые ISO / rfc3339 / unix ms в targets заменяются на `__TIME__` перед хешем.
 

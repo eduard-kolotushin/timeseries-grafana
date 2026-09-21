@@ -19,7 +19,9 @@ flowchart TB
     P --> S["season calendar"]
     S --> L["level 0 если showInterval выключен иначе interval по умолчанию 0.95"]
     L --> K["cacheKey SHA-256 hex 64"]
-    K --> R["retrain опционально"]
+    K --> TS["trainSource: datasourceUid queries from to seriesName relative lookbackMs"]
+    TS --> PR["провенанс: panelId panelTitle dashboardUid querySummary только при fit"]
+    PR --> R["retrain опционально"]
   end
 
   subgraph resp["Тело ответа"]

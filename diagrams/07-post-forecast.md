@@ -8,7 +8,9 @@ Grafana проксирует это в процесс плагина как `Cal
 
 Пустой `cacheKey` — старое поведение: нужны `times`, без persist.
 
-Проба: `cacheKey` есть, `times` нет. Попадание — `Restore` + `ForecastRange`, `cached: true`. Промах / нет store / `retrain` — `{ needTrain: true }` и HTTP 200. Проба без снимка слот не занимает.
+Проба: `cacheKey` есть, `times` нет. Попадание — `Restore` + `ForecastRange`, `cached: true`. Промах / нет store / `retrain` / просроченное расписание — `{ needTrain: true }` и HTTP 200. Проба без снимка слот не занимает.
+
+Две записи в `forecast.retrain` идут по краям этого потока и никогда не ломают ответ: проба без `times` и без `retrain` вливает провенанс панели в уже существующую строку (`Identify`), а успешный fit апсертит строку целиком (`recordPanelSchedule`: спека = `trainSource` + модель). Cron и enabled, выставленные админом, при этом сохраняются; ошибка любой из записей — только запись в логе. Подробности — в [13-retrain-scheduler.md](13-retrain-scheduler.md).
 
 Fit: `times` есть — под семафором `Fit*` → `ForecastRange` → `SnapshotOf`; затем `Put` снаружи семафора. Ошибка `Put` — HTTP 500 (прогноз не возвращается молча без сохранения).
 
@@ -29,7 +31,8 @@ flowchart TD
   Bad -->|да| E400k["HTTP 400 invalid cacheKey"]
   Bad -->|нет| Len{"times длиннее MAX_TRAIN_POINTS?"}
   Len -->|да| E413
-  Len -->|нет| Empty{"cacheKey пустой?"}
+  Len -->|нет| Ident["Identify: провенанс пробы в существующую строку"]
+  Ident --> Empty{"cacheKey пустой?"}
   Empty -->|да| Sem1{"слот лимитера?"}
   Sem1 -->|нет| E429["HTTP 429 busy"]
   Sem1 -->|да| FitReq["fitRequest ForecastRange"]
@@ -41,7 +44,9 @@ flowchart TD
   Put -->|ошибка| E500
   Has -->|нет| Skip{"retrain или store nil?"}
   Skip -->|да| Need["needTrain HTTP 200"]
-  Skip -->|нет| Get["store Get org_id cacheKey снаружи семафора"]
+  Skip -->|нет| Due{"строка расписания просрочена?"}
+  Due -->|да| Need
+  Due -->|нет| Get["store Get org_id cacheKey снаружи семафора"]
   Get --> Err{"ошибка store?"}
   Err -->|да| E500["HTTP 500"]
   Err -->|нет| Hit{"снимок есть?"}
@@ -50,7 +55,8 @@ flowchart TD
   Sem3 -->|нет| E429
   Sem3 -->|да| Rest["Restore ForecastRange cached true"]
   FitReq --> Grid["times unix ms и values; NaN в null"]
-  Put -->|ok| Grid
+  Put -->|ok| Sched["recordPanelSchedule: апсерт строки панели в forecast.retrain"]
+  Sched --> Grid
   Rest --> Grid
   Grid --> Lvl{"level не ноль?"}
   Lvl -->|да| Band["ForecastIntervalRange в lower и upper"]
