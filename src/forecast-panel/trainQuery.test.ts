@@ -1,6 +1,7 @@
 import { DataFrame, DataQueryRequest, FieldType, MutableDataFrame, dateTime } from '@grafana/data';
 import { of } from 'rxjs';
-import { queryTrainingFrames } from './trainQuery';
+import { REASON_UNSUPPORTED_PROM_INSTANT } from './reasons';
+import { queryTrainingFrames, trainRejectReason } from './trainQuery';
 
 const mockGet = jest.fn();
 
@@ -46,6 +47,47 @@ function datasource(data: DataFrame[]) {
     },
   };
 }
+
+describe('trainRejectReason', () => {
+  const rewriteWindow = { fromMs, toMs, intervalMs: 60_000 };
+
+  const req = (targets: unknown[]): DataQueryRequest =>
+    ({ targets, intervalMs: 60_000 } as unknown as DataQueryRequest);
+
+  const prometheus = (extra: Record<string, unknown>) => ({
+    refId: 'A',
+    datasource: { uid: 'prometheus', type: 'prometheus' },
+    expr: 'up',
+    ...extra,
+  });
+
+  const druid = { refId: 'B', datasource: { uid: 'druid', type: 'grafadruid-druid-datasource' } };
+
+  const cases: Array<[string, unknown[], string | undefined]> = [
+    ['an instant Prometheus target', [prometheus({ instant: true, range: false })], REASON_UNSUPPORTED_PROM_INSTANT],
+    ['a range Prometheus target', [prometheus({ instant: false, range: true })], undefined],
+    [
+      'an instant target beside a range target on the same datasource',
+      [prometheus({ instant: true, range: false }), prometheus({ refId: 'B', instant: false, range: true })],
+      undefined,
+    ],
+    ['a Druid target', [druid], undefined],
+    [
+      'an instant Prometheus target beside a trainable Druid target',
+      [prometheus({ instant: true, range: false }), druid],
+      undefined,
+    ],
+  ];
+
+  it.each(cases)('%s → %s', (_name, targets, want) => {
+    expect(trainRejectReason(req(targets), rewriteWindow)).toBe(want);
+  });
+
+  it('says nothing when the panel has no targets', () => {
+    expect(trainRejectReason(undefined, rewriteWindow)).toBeUndefined();
+    expect(trainRejectReason(req([]), rewriteWindow)).toBeUndefined();
+  });
+});
 
 describe('queryTrainingFrames', () => {
   beforeEach(() => mockGet.mockReset());

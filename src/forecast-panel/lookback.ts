@@ -215,13 +215,20 @@ function parseTimeRange(
  * window came from a lookback against the panel's own now, which is what a cron
  * retrain must re-resolve instead of replaying `fromMs`/`toMs` verbatim.
  */
-export type TrainWindow = {
+/** A training window resolved from the picker or from the Auto lookback. */
+export type ResolvedTrainWindow = {
   fromMs: number;
   toMs: number;
   relative: boolean;
   /** Width to re-resolve at claim time. 0 when the window is absolute. */
   lookbackMs: number;
 };
+
+export type TrainWindow = ResolvedTrainWindow | { invalid: true };
+
+export function isInvalidTrainWindow(w: TrainWindow): w is { invalid: true } {
+  return 'invalid' in w;
+}
 
 /** Training from/to window. Explicit empty picker is Auto (ignores legacy `lookback`). */
 export function resolveTrainWindow(
@@ -241,6 +248,9 @@ export function resolveTrainWindow(
       // them verbatim is the only faithful retrain.
       return { ...parsed, relative: false, lookbackMs: 0 };
     }
+    // An explicit picker that will not parse is not Auto: the two windows look alike in
+    // the editor, so both report the same way (see resolveForecastWindow).
+    return { invalid: true };
   }
   const lookbackMs =
     options.trainRange != null && isExplicitAutoTrainRange(options.trainRange)

@@ -19,6 +19,7 @@ import {
   dashboardNowMs,
   forecastLevel,
   isInvalidForecastWindow,
+  isInvalidTrainWindow,
   resolveForecastWindow,
   resolveTrainWindow,
   trainStepMs,
@@ -26,9 +27,9 @@ import {
 import { OverlayLoadGate } from './overlayInflight';
 import { loadOverlayForecasts } from './overlayLoad';
 import { metricTargets, splitPanelFrames } from './mixed';
-import { REASON_INVALID_RANGE } from './reasons';
+import { REASON_INVALID_RANGE, REASON_INVALID_TRAIN_RANGE } from './reasons';
 import { queueRetrain, takeRetrain } from './retrain';
-import { refType, queryTrainingFrames } from './trainQuery';
+import { refType, queryTrainingFrames, trainRejectReason } from './trainQuery';
 import { summarizeTrainTargets } from './trainRewrite';
 import { ForecastOptions, ForecastResponse } from './types';
 
@@ -53,7 +54,14 @@ export const ForecastPanel: React.FC<Props> = ({
     () => splitPanelFrames(data.series, allTargets ?? []).history,
     [data.series, allTargets]
   );
-  const [frames, setFrames] = useState<DataFrame[]>(historyFrames);
+  // Frames the panel can actually draw. A frame with no rows — an instant query evaluated
+  // past its data — has nothing to plot and Grafana's TimeSeries panel throws on one, where
+  // Grafana's own panel answers the same frame with `No data`; such a frame is never plotted.
+  const graphableFrames = useMemo(
+    () => historyFrames.filter((frame) => extractSeries(frame, historyFrames).length > 0),
+    [historyFrames]
+  );
+  const [frames, setFrames] = useState<DataFrame[]>(graphableFrames);
   const [error, setError] = useState<string | null>(null);
   const [forecastToMs, setForecastToMs] = useState<number | undefined>();
   const [usedSaved, setUsedSaved] = useState(false);
@@ -74,7 +82,7 @@ export const ForecastPanel: React.FC<Props> = ({
       const nowMs = dashboardNowMs(timeZone);
       const window = resolveForecastWindow(options, nowMs, timeZone);
 
-      const visible = historyFrames.flatMap((series) => extractSeries(series, historyFrames));
+      const visible = graphableFrames.flatMap((series) => extractSeries(series, graphableFrames));
       for (const points of visible) {
         history.push(toFrame(points.name, points.times, points.values));
       }
@@ -89,15 +97,47 @@ export const ForecastPanel: React.FC<Props> = ({
         }
         return;
       }
+      const trainWindow = resolveTrainWindow(options, timeRange.to.valueOf(), timeZone);
+      const visibleFromMs = data.request?.range?.from?.valueOf();
+      const visibleToMs = data.request?.range?.to?.valueOf();
+      const targets = metricTargets(allTargets ?? []);
+      if (isInvalidTrainWindow(trainWindow)) {
+        if (!cancelled) {
+          setError(REASON_INVALID_TRAIN_RANGE);
+          setForecastToMs(undefined);
+          setUsedSaved(false);
+          setFrames(history);
+          finished = true;
+        }
+        return;
+      }
+      // Built once and shared: the probe needs it as much as the fit does, and it is what
+      // tells the panel its targets can never train, even when it has nothing to draw.
+      const rewriteWindow = {
+        fromMs: trainWindow.fromMs,
+        toMs: trainWindow.toMs,
+        relative: trainWindow.relative,
+        lookbackMs: trainWindow.lookbackMs,
+        visibleFromMs,
+        visibleToMs,
+        intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
+      };
+      const trainReject = trainRejectReason(data.request, rewriteWindow);
+      if (trainReject) {
+        if (!cancelled) {
+          setError(trainReject);
+          setForecastToMs(undefined);
+          setUsedSaved(false);
+          setFrames(history);
+          finished = true;
+        }
+        return;
+      }
       if (!cancelled) {
         setForecastToMs(window.toMs);
       }
 
       retrain = takeRetrain(id);
-      const trainWindow = resolveTrainWindow(options, timeRange.to.valueOf(), timeZone);
-      const visibleFromMs = data.request?.range?.from?.valueOf();
-      const visibleToMs = data.request?.range?.to?.valueOf();
-      const targets = metricTargets(allTargets ?? []);
       // Built once and shared: the probe needs it as much as the fit does. The summary
       // comes from the panel's own targets, so a probe can identify a row that has not
       // been retrained by a browser since the plugin started recording identity.
@@ -127,13 +167,7 @@ export const ForecastPanel: React.FC<Props> = ({
           queryTrainingFrames(
             data.request,
             {
-              fromMs: trainWindow.fromMs,
-              toMs: trainWindow.toMs,
-              relative: trainWindow.relative,
-              lookbackMs: trainWindow.lookbackMs,
-              visibleFromMs,
-              visibleToMs,
-              intervalMs: trainStepMs(options.model, options.season, data.request?.intervalMs ?? 0),
+              ...rewriteWindow,
               // Identification for the schedule row this fit writes: which panel trains
               // on what. Never part of the cacheKey.
               provenance,
@@ -165,22 +199,34 @@ export const ForecastPanel: React.FC<Props> = ({
       }
     };
     // `options` is a new object whenever any panel option changes, so it covers every field the load reads.
-  }, [id, title, retrainNonce, data.request, historyFrames, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main]);
+  }, [id, title, retrainNonce, data.request, graphableFrames, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main]);
 
+  // `frames` (state) carries the history plus the forecast once the load finished; before
+  // that the drawable history is what there is to show.
   const plotFrames = useMemo(
     () =>
       applyFieldOverrides({
-        data: frames,
+        data: frames.length > 0 ? frames : graphableFrames,
         fieldConfig,
         replaceVariables,
         theme,
         timeZone,
       }),
-    [frames, fieldConfig, replaceVariables, theme, timeZone]
+    [frames, graphableFrames, fieldConfig, replaceVariables, theme, timeZone]
   );
 
-  if (historyFrames.length === 0 && data.series.length === 0) {
-    return <PanelDataErrorView fieldConfig={fieldConfig} panelId={id} data={data} needsTimeField needsNumberField />;
+  // Nothing to draw: Grafana's own empty state, with the reason the panel resolved above it.
+  if (plotFrames.length === 0) {
+    return (
+      <>
+        {error && (
+          <Alert title="Forecast failed" severity="error">
+            {error}
+          </Alert>
+        )}
+        <PanelDataErrorView fieldConfig={fieldConfig} panelId={id} data={data} needsTimeField needsNumberField />
+      </>
+    );
   }
 
   let toMs = timeRange.to.valueOf();

@@ -1,6 +1,14 @@
-import { absoluteDayBound, applyLookbackRange, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, forecastLevel, isoUtc, isInvalidForecastWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, timeZoneFromScene, trainMaxDataPoints, trainStepInterval, trainStepMs } from './lookback';
+import { absoluteDayBound, applyLookbackRange, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, forecastLevel, isoUtc, isInvalidForecastWindow, isInvalidTrainWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, timeZoneFromScene, trainMaxDataPoints, trainStepInterval, trainStepMs, type ResolvedTrainWindow, type TrainWindow } from './lookback';
 
 const day = 24 * 60 * 60 * 1000;
+
+/** A resolved window with the invalid marker ruled out, so a case can read its bounds. */
+function resolved(w: TrainWindow): ResolvedTrainWindow {
+  if (isInvalidTrainWindow(w)) {
+    throw new Error('expected a resolved training window');
+  }
+  return w;
+}
 
 describe('autoLookback', () => {
   it.each([
@@ -68,7 +76,7 @@ describe('resolveTrainWindow', () => {
   });
 
   it('reports a lookback window as relative so a retrain re-resolves it', () => {
-    const w = resolveTrainWindow({ model: 'baseline', season: 'minute-week' }, panelTo);
+    const w = resolved(resolveTrainWindow({ model: 'baseline', season: 'minute-week' }, panelTo));
     expect(w.lookbackMs).toBe(21 * day);
     expect(w.relative).toBe(true);
     expect(w.toMs - w.fromMs).toBe(w.lookbackMs);
@@ -88,25 +96,24 @@ describe('resolveTrainWindow', () => {
   });
 
   it('parses a relative Grafana range', () => {
-    const { fromMs, toMs, relative, lookbackMs } = resolveTrainWindow(
-      { model: 'holt', trainRange: { from: 'now-7d', to: 'now' } },
-      panelTo,
-      'utc'
+    const { fromMs, toMs, relative, lookbackMs } = resolved(
+      resolveTrainWindow({ model: 'holt', trainRange: { from: 'now-7d', to: 'now' } }, panelTo, 'utc')
     );
     expect(Math.abs(toMs - fromMs - 7 * day)).toBeLessThan(2);
     expect(relative).toBe(false);
     expect(lookbackMs).toBe(0);
   });
 
-  it('falls back to Auto when from is not before to', () => {
+  it('reports an invalid window instead of Auto when from is not before to', () => {
+    const w = resolveTrainWindow({ model: 'holt', trainRange: { from: 'now', to: 'now-1h' } }, panelTo, 'utc');
+    expect(isInvalidTrainWindow(w)).toBe(true);
+    expect(w).toEqual({ invalid: true });
+  });
+
+  it('reports an unparseable picker as invalid too', () => {
     expect(
-      resolveTrainWindow({ model: 'holt', trainRange: { from: 'now', to: 'now-1h' } }, panelTo, 'utc')
-    ).toEqual({
-      fromMs: panelTo - 7 * day,
-      toMs: panelTo,
-      relative: true,
-      lookbackMs: 7 * day,
-    });
+      resolveTrainWindow({ model: 'holt', trainRange: { from: 'not-a-date', to: 'also-not' } }, panelTo, 'utc')
+    ).toEqual({ invalid: true });
   });
 });
 
@@ -343,16 +350,18 @@ describe('absoluteDayBound / civilYmd', () => {
     expect(civilYmd(utcEvening, 'utc')).toEqual({ year: 2026, month: 9, day: 7 });
     expect(civilYmd(utcEvening, 'Europe/Moscow')).toEqual({ year: 2026, month: 9, day: 8 });
     expect(absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'Europe/Moscow', false)).toBe('2026-09-08 00:00:00');
-    const parsed = resolveTrainWindow(
-      {
-        model: 'holt',
-        trainRange: {
-          from: absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'Europe/Moscow', false),
-          to: absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'Europe/Moscow', true),
+    const parsed = resolved(
+      resolveTrainWindow(
+        {
+          model: 'holt',
+          trainRange: {
+            from: absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'Europe/Moscow', false),
+            to: absoluteDayBound({ year: 2026, month: 9, day: 8 }, 'Europe/Moscow', true),
+          },
         },
-      },
-      0,
-      'Europe/Moscow'
+        0,
+        'Europe/Moscow'
+      )
     );
     // 2026-09-08 00:00:00 MSK = 2026-09-07 21:00:00Z
     expect(parsed.fromMs).toBe(Date.UTC(2026, 8, 7, 21, 0, 0));

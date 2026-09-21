@@ -1,5 +1,6 @@
 import {
   DataFrame,
+  DataQuery,
   DataQueryRequest,
   DataQueryResponse,
   DataSourceRef,
@@ -118,16 +119,7 @@ export async function queryTrainingFrames(
     __to: { text: String(toMs), value: String(toMs) },
   };
 
-  const groups = new Map<string, typeof targets>();
-  for (const target of targets) {
-    const key = refKey(target.datasource);
-    const group = groups.get(key);
-    if (group) {
-      group.push(target);
-    } else {
-      groups.set(key, [target]);
-    }
-  }
+  const groups = groupByDatasource(targets);
 
   const frames: DataFrame[] = [];
   let source: TrainQuerySource | undefined;
@@ -185,6 +177,46 @@ export async function queryTrainingFrames(
     return { frames, source };
   }
   return { frames: null, reason: skipReason };
+}
+
+/** Targets grouped by the datasource that answers for them, in first-seen order. */
+function groupByDatasource<T extends { datasource?: DataQuery['datasource'] }>(targets: T[]): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const target of targets) {
+    const key = refKey(target.datasource);
+    const group = groups.get(key);
+    if (group) {
+      group.push(target);
+    } else {
+      groups.set(key, [target]);
+    }
+  }
+  return groups;
+}
+
+/**
+ * The reason a group of the panel's metric targets can never train, or undefined. It mirrors
+ * the per-group rejection `queryTrainingFrames` applies, without resolving a datasource or
+ * running a query, so a panel that has nothing to draw can still say why nothing will ever be
+ * fitted. The type comes from the target ref alone where the fit path also asks the registry:
+ * this pre-check stays silent in a case the fit path can still name, and never names one the
+ * fit path would not.
+ */
+export function trainRejectReason(
+  request: DataQueryRequest | undefined,
+  window: TrainRewriteWindow
+): string | undefined {
+  let reason: string | undefined;
+  for (const group of groupByDatasource(metricTargets(request?.targets ?? [])).values()) {
+    const rewritten = rewriteTrainTargets(refType(group[0].datasource), group, window);
+    if (rewritten.targets.length > 0) {
+      // One group the rewrite keeps is enough: `queryTrainingFrames` trains it and reports
+      // no reason, so naming one here would refuse a fit the fit path performs.
+      return undefined;
+    }
+    reason = reason ?? rewritten.reason;
+  }
+  return reason;
 }
 
 function refKey(ref: DataSourceRef | string | null | undefined): string {
