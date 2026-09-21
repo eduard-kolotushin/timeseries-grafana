@@ -113,6 +113,18 @@ func TestCheckTrainLen(t *testing.T) {
 	}
 }
 
+// The SDK's own default receive limit is the body cap's twin, and a body at the cap then
+// fails the transport before the handler can answer 413.
+func TestGRPCSettingsClearsTheBodyCap(t *testing.T) {
+	got := GRPCSettings().MaxReceiveMsgSize
+	if got <= int(maxForecastBodyBytes) {
+		t.Fatalf("gRPC receive limit %d does not clear the %d byte body cap", got, maxForecastBodyBytes)
+	}
+	if int64(got) <= int64(defaultMaxForecastBody) {
+		t.Fatalf("gRPC receive limit %d does not clear the SDK's own default of %d", got, defaultMaxForecastBody)
+	}
+}
+
 func TestRecoverHTTP(t *testing.T) {
 	rr := httptest.NewRecorder()
 	func() {

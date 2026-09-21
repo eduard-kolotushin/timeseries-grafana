@@ -18,13 +18,13 @@ const (
 
 func main() {
 	if datasourceMode() {
-		if err := datasource.Manage(datasourcePluginID, plugin.NewDatasource, datasource.ManageOpts{}); err != nil {
+		if err := datasource.Manage(datasourcePluginID, plugin.NewDatasource, datasource.ManageOpts{GRPCSettings: plugin.GRPCSettings()}); err != nil {
 			log.DefaultLogger.Error(err.Error())
 			os.Exit(1)
 		}
 		return
 	}
-	if err := app.Manage(appPluginID, plugin.NewApp, app.ManageOpts{}); err != nil {
+	if err := app.Manage(appPluginID, plugin.NewApp, app.ManageOpts{GRPCSettings: plugin.GRPCSettings()}); err != nil {
 		log.DefaultLogger.Error(err.Error())
 		os.Exit(1)
 	}
