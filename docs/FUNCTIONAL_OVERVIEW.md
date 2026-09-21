@@ -40,8 +40,8 @@ left running afterwards.
 | | Compose sandbox | Kubernetes (Helm) |
 | --- | --- | --- |
 | Grafana | 13.1.0 (`commit b309c9bb3b81a748c3a75289236a27309ed2566a`), `http://localhost:3000`, anonymous Admin, org 1 | 13.1.0, `svc/timeseries-grafana` (LoadBalancer `EXTERNAL-IP 172.18.0.5:80`, not host-reachable → `kubectl -n timeseries port-forward svc/timeseries-grafana 30001:80`), anonymous Admin, org 1 |
-| Plugin build | `dist/` mounted from the workspace: `gpx_forecast_linux_amd64` sha256 `34bf53244166948b6a0bbfc9fb79f942da2a4dbd229b54a5b1cba91ae98b43d6`, `module.js` sha256 `42564adfe17e496b3463f344d49fd7c0db3477c978f0e0e5fb3c7e8e13977f15` — both byte-identical inside the Grafana container | images built from the same pinned refs: `ghcr.io/eduard-kolotushin/timeseries-grafana:0.1.0` (`b466f49309cf`, built 13:59:36) and `…-baselines:0.1.0` (`11adb8b064c9`, built 13:59:58), imported into the node's containerd with `docker save … \| docker exec -i desktop-control-plane ctr -n k8s.io images import -` |
-| Source revisions | `timeseries-grafana` `d6399e5a3451c4cacf433736d28c80a966235502`, `timeseries-baselines` `179a1551e4dd1064b93cbdd42d12fb684a20dfcd` | same two commits, baked into the images by `timeseries-k8s` `PLUGIN_REF` / `BASELINES_REF` |
+| Plugin build | `dist/` mounted from the workspace: `gpx_forecast_linux_amd64` sha256 `34bf53244166948b6a0bbfc9fb79f942da2a4dbd229b54a5b1cba91ae98b43d6`, `module.js` sha256 `42564adfe17e496b3463f344d49fd7c0db3477c978f0e0e5fb3c7e8e13977f15` — both byte-identical inside the Grafana container. The discrepancy fixes were verified on a rebuild of the same tree: `gpx_forecast_linux_amd64` `a034c1ca02c028f065f0bc8eb206e8fec12b950a04d4f22126c9fbfae7c1d4df`, `forecast-panel/module.js` `429a2f99d4257049fdc13c4b7132df4c5a92600b3c0b8d586d6194808e6b4c80` | images built from the same pinned refs: `ghcr.io/eduard-kolotushin/timeseries-grafana:0.1.0` (`b466f49309cf`, built 13:59:36) and `…-baselines:0.1.0` (`11adb8b064c9`, built 13:59:58), imported into the node's containerd with `docker save … \| docker exec -i desktop-control-plane ctr -n k8s.io images import -`; the fix run rebuilt and re-imported the Grafana image from `PLUGIN_REF=8f2a9ff…` (`477c42ed65ff`, manifest `b542555444440409b2ad9e03925141a2c98e58aefd50d66590a1df0ec6665fb8`) and rolled the Deployment |
+| Source revisions | `timeseries-grafana` `d6399e5a3451c4cacf433736d28c80a966235502`, `timeseries-baselines` `179a1551e4dd1064b93cbdd42d12fb684a20dfcd` | same two commits, baked into the images by `timeseries-k8s` `PLUGIN_REF` / `BASELINES_REF`. The discrepancy fixes add `10a23cc` and `8f2a9ff` to `timeseries-grafana` (the worker is unchanged) and move the K8s pin to `8f2a9ff` |
 | Data plane | Druid 37.0.0 (`http://localhost:8888`, datasource `druid`, tables `minuteweek`/`metrics`/`baselines`), Kafka 3.9.1 (`metrics`, `baselines`), OpenSearch 2.18.0, Prometheus 2.55.1, overlay Postgres 17.6 (schema `forecast`) | Helm releases `kafka`, `druid`, `prometheus`, `opensearch`, `overlay-postgres`, `timeseries` — all `deployed` on one kind node (`desktop-control-plane`, v1.36.1, containerd 2.3.1) |
 | Worker | `alpine:3.21` + `/usr/local/bin/baselines` (sha256 `c725417cbd3a84cbb97258b8d40e5368bd9e2434f18373f938c26d748a072c7a`), env from `docker-compose.yaml` | Deployment `timeseries-baselines` (`SHARD_DNS=timeseries-baselines-headless`, `SHARD_MEMBERSHIP=store`), env from ConfigMap `timeseries-baselines-env` |
 | Configuration source | provisioning `provisioning/plugins/apps.yaml` + `docker-compose.yaml` env | ConfigMaps `timeseries-forecast-app` (app `apps.yaml`), `timeseries-forecast-datasource`, `timeseries-forecast-store`, `timeseries-baselines-env` |
@@ -50,7 +50,9 @@ left running afterwards.
 The Kubernetes plugin image cannot be pulled from GHCR (`timeseries-k8s` carries no `v*` tag, so the two
 `:0.1.0` tags are unpublished): both pods first came up `ErrImagePull` / `ImagePullBackOff`, and only the
 `ctr -n k8s.io images import` step above made them `1/1 Running`. The Compose sandbox needed no such step
-(it mounts the workspace `dist/`).
+(it mounts the workspace `dist/`). The Kubernetes dashboards are provisioned **read-only** (`Cannot save
+provisioned dashboard`), so the panel checks in the discrepancy fixes ran against a throwaway copy of
+`forecast-minute-week`, which was deleted afterwards.
 
 ## timeseries-grafana functions
 
@@ -77,7 +79,7 @@ The Kubernetes plugin image cannot be pulled from GHCR (`timeseries-k8s` carries
 | **Function** | One request shape for three jobs, chosen by the body: **fit** (`times`+`values`), **fit and persist** (fit + `cacheKey`), **restore** (`cacheKey`, no points). |
 | **Who can use** | Any user — no Admin gate (unlike `/schedules`). Live: the overlay panel (anonymous Admin) and an unauthenticated `curl` both got 200. |
 | **How configured** | Nothing beyond the plugin being enabled; the store DSN decides whether a `cacheKey` persists (F20). |
-| **Input params** | `times` (int64 ms, ascending, unique), `values` (number or `null`), `model` (`naive`\|`mean`\|`drift`\|`seasonal`\|`baseline`\|`ses`\|`holt`), `from`/`to` (int64 ms, the forecast window), `alpha`, `beta`, `period`, `season` (`hour`\|`day`\|`week`\|`minute-week`), `calendar` (`""`\|`ru`), `level` (0..1; 0 omits bands), `cacheKey` (64 lowercase hex), `retrain` (bool), `trainSource`, `provenance`. Limits: ≤100000 training points, body ≤16 MiB (see [Discrepancies](#discrepancies-found)), 4 concurrent Fit/ForecastRange calls. |
+| **Input params** | `times` (int64 ms, ascending, unique), `values` (number or `null`), `model` (`naive`\|`mean`\|`drift`\|`seasonal`\|`baseline`\|`ses`\|`holt`), `from`/`to` (int64 ms, the forecast window), `alpha`, `beta`, `period`, `season` (`hour`\|`day`\|`week`\|`minute-week`), `calendar` (`""`\|`ru`), `level` (0..1; 0 omits bands), `cacheKey` (64 lowercase hex), `retrain` (bool), `trainSource`, `provenance`. Limits: ≤100000 training points, body ≤16 MiB (413 beyond it), 4 concurrent Fit/ForecastRange calls. |
 | **Expected result** | 200 with `times`/`values` (and `lower`/`upper` when `level≠0`); points start at `last_time + step` and are clipped to `[from,to]`. An empty fit → 400 `forecast: series is empty`. With `cacheKey`+points the snapshot is stored and the panel's schedule row is written. |
 
 **Positive — Compose:** 300 points ending now, `model:"holt"`, `from=now`, `to=now+2h` →
@@ -282,9 +284,9 @@ options back to `{alpha:0.8,beta:0.2,calendar:"",horizon:180,model:"baseline",pe
 
 **Negative — Compose:** an inverted **Forecast range** (`2027-01-01 → 2026-01-01`) → `Forecast failed` /
 `Forecast range is inverted or invalid`, **no** `/api/ds/query` and **no** `/forecast` request. An inverted
-**Training period** behaves differently — it falls back to Auto and trains: the train window on the wire was
-`2026-08-31T14:01:12Z → 2026-09-21T14:01:12Z` with `trainSource {relative:true, lookbackMs:1814400000}` and a
-30006-point fit ([Discrepancies](#discrepancies-found)).
+**Training period** reports the same way — `Forecast failed` / `Training period is inverted or invalid`, history
+still drawn, no train query and no `/forecast` even after `Retrain` (it used to fall back to the Auto window and
+train 30006 points; see [Discrepancies](#discrepancies-found)).
 
 **Kubernetes:** the same dashboard and option set (the panels come from the ConfigMap); the K8s store shows the
 resulting `panel` rows with `cron */5 * * * *`.
@@ -348,9 +350,9 @@ server row unchanged. Pressing *Delete* on the fixture row removed it immediatel
 `POST /resources/forecast` with `times` (30011 points), `values`, `provenance`, `cacheKey` and
 `trainSource {datasourceUid:"druid", queries:[…], from, to, relative:true, lookbackMs:1814400000}`.
 
-**Negative — Compose:** not reproduced; pointing panel 1 at a Prometheus **instant** query (`expr:"up"`,
-`instant:true`) and pressing `Retrain` rendered the panel's empty state instead of
-`Prometheus instant queries cannot train a forecast` ([Discrepancies](#discrepancies-found)).
+**Negative — Compose:** pointing panel 1 at a Prometheus **instant** query (`expr:"up"`, `instant:true`) →
+`Forecast failed` / `Prometheus instant queries cannot train a forecast`, no train query and no `/forecast`
+(see [Discrepancies](#discrepancies-found) for the panel error this used to be).
 
 **Kubernetes:** the same action against the port-forwarded Grafana (the panels are the same plugin build).
 
@@ -778,9 +780,8 @@ source and are **not** backed by a live observation in this run:
 
 | Claim | Where it lives | Why it was not observed |
 | --- | --- | --- |
-| `Prometheus instant queries cannot train a forecast` (and the OpenSearch/Postgres rejections) | `src/forecast-panel/reasons.ts`, `trainRewrite.ts` | Pointing the panel at a Prometheus instant target and pressing Retrain rendered the panel's empty state and emitted no reason (see Discrepancies). The OpenSearch and Postgres branches were not set up at all. |
+| The OpenSearch and Postgres train rejections | `src/forecast-panel/reasons.ts`, `trainRewrite.ts` | No OpenSearch or Postgres panel exists in the sandbox dashboards; the Prometheus branch is live (F13). |
 | `Dashboard must be saved before alerts can be added.` | `src/forecast-panel/alertFromPanel.ts:4` | The positive (`/alerting/new` with defaults) was verified; the unsaved-dashboard case needs a brand-new unsaved dashboard with the panel, which was not built. |
-| `forecast: request body too large` (413) | `pkg/plugin/limits.go` (16 MiB) | Unreachable through Grafana — see Discrepancies. |
 | Scheduler auto-disable after repeated 401/403 | `pkg/plugin/retrain.go` (`errGrafanaUnauthorized`) | Needs three consecutive rejected fetches across cron ticks; the Compose sandbox uses anonymous Admin and the token path was only exercised in its working (empty-token) form. |
 | Druid/Postgres/OpenSearch train-query rewrites beyond Druid | `src/forecast-panel/trainRewrite.ts` | Only the Druid builder and Druid SQL targets exist in the sandbox dashboard. |
 | `Copy source from query A` (Forecast editor) | `src/forecast-datasource/` | Opt-in, manual feature; the Forecast editor was not driven by hand. |
@@ -790,35 +791,39 @@ source and are **not** backed by a live observation in this run:
 
 ## Discrepancies found
 
-Live results that contradict what the code or the docs lead one to expect. Recorded, not fixed (this task
-changed no product code).
+Live results that contradicted what the code or the docs led one to expect. All three defects are fixed, and each
+post-fix observation is recorded beside its pre-fix one; item 4 lists the run's side effects with their verdicts.
 
-### 1. The 16 MiB body cap can never answer 413 through Grafana
+### 1. The 16 MiB body cap could never answer 413 through Grafana — fixed
 
 `pkg/plugin/limits.go` caps the request body at `defaultMaxForecastBody = 16 << 20` and maps `errBodyTooLarge` to
-413. The plugin SDK's default receive limit is the **same number**:
+413, but the plugin SDK's default receive limit was the **same number**:
 `grafana-plugin-sdk-go@v0.296.1/backend/serve.go:32 defaultServerMaxReceiveMessageSize = 1024 * 1024 * 16`.
-A body of exactly the cap already exceeds the *gRPC message* limit once framing is added, so the SDK rejects the
-call before the handler's `MaxBytesReader` can run.
+A body at the cap already exceeded the *gRPC message* limit once framing was added, so the SDK rejected the call
+before the handler's `MaxBytesReader` could run.
+
+The fix serves both plugin processes with `GRPCSettings{MaxReceiveMsgSize: cap + cap}` (`pkg/plugin/limits.go`,
+`pkg/main.go`), so the plugin's own cap is the limit a caller meets: an oversize body now reaches the handler and
+only a message above the 32 MiB transport ceiling is refused by the SDK. The cap itself stays 16 MiB, and
+`TestGRPCSettingsClearsTheBodyCap` fails if the two limits are ever equalised again.
 
 ```bash
 # body = JSON with a junk field of N MiB, times/values empty
-for mb in 3 4 5 8 12 13 14 15 16 17 16.5; do … curl -s -w '%{http_code}' … ; done
+for mb in 15 16 16.5 17 20; do … curl --data-binary @body-$mb.json … ; done
 ```
 
-| Body | Result |
-| --- | --- |
-| 3, 4, 5, 8, 12, 13, 14, 15 MiB | 400 `forecast: series is empty` (the handler saw the body) |
-| 16 MiB, 16.5 MiB, 17 MiB, 20 MiB | 500 `{"statusCode":500,"messageId":"plugin.requestFailureError","message":"An error occurred within the plugin"}` |
+| Body | Before | After |
+| --- | --- | --- |
+| 15 MiB | 400 `forecast: series is empty` | 400 `forecast: series is empty` |
+| 16 MiB, 16.5 MiB, 17 MiB, 20 MiB | 500 `{"statusCode":500,"messageId":"plugin.requestFailureError",…}` | **413** `forecast: request body too large` |
+| 33 MiB | 500 | 500 — above the transport ceiling, refused by the SDK and not by the plugin |
 
-So `forecast: request body too large` is unreachable in-tree; a caller that really sends an oversize body gets
-the generic SDK failure instead. (`forecast: training series exceeds 100000 points` → 413 **is** reachable and
-was observed on both environments.)
+The same sweep on the Kubernetes release answers 413 for 16, 16.5, 17 and 20 MiB.
 
-### 2. Only the *forecast* range produces the invalid-range reason; an inverted *training* range silently trains the Auto window
+### 2. An inverted *Training period* silently trained the Auto window — fixed
 
 The panel reports `Forecast range is inverted or invalid` for an inverted **Forecast range** (observed, no
-requests sent). An inverted **Training period** is instead treated as unusable and falls back to Auto:
+requests sent), but an inverted **Training period** was treated as unusable and fell back to Auto:
 
 ```bash
 # dashboard JSON: panels[0].options.trainRange = {from: "2026-09-17T00:00:00Z", to: "2001-01-01T00:00:00Z"}
@@ -827,27 +832,60 @@ requests sent). An inverted **Training period** is instead treated as unusable a
 #   FIT panel=1 points=30006 trainSource={"relative":true,"lookbackMs":1814400000}
 ```
 
-`resolveTrainWindow` (`src/forecast-panel/lookback.ts:227`) returns the Auto window whenever
-`parseTimeRange` cannot parse the pair, so this is deliberate for the picker; it is worth stating because the
-two pickers look alike and only one of them is validated.
+`resolveTrainWindow` returned the Auto window whenever `parseTimeRange` could not parse the pair, so one of two
+pickers that look alike was validated and the other was not.
 
-### 3. The Prometheus-instant rejection is not reachable from a panel that has no drawable series
+The fix marks a non-empty picker it cannot parse as invalid (an empty picker still means Auto, an absolute
+window is still a window) and the panel shows the reason. With the same inverted picker applied through the
+dashboard API, the wire after the fix is:
+
+- panel 1: `Forecast failed` / `Training period is inverted or invalid`, history still drawn;
+- the load sent only the three display `/api/ds/query` requests — no `…-train` query and no `/forecast`;
+- pressing `Retrain` sent **nothing** (0 requests).
+
+The Kubernetes release, rebuilt from the fix commit, reports the same reason and likewise sends nothing on
+`Retrain` (checked on a throwaway copy: the provisioned dashboards there are read-only).
+
+### 3. The Prometheus-instant rejection was unreachable, and the panel threw instead — fixed
 
 With panel 1's datasource and target replaced by a Prometheus instant query (`expr:"up"`, `instant:true`,
-`range:false`) and `Retrain` pressed, the panel rendered its empty state and **no** reason text appeared
-(`/cannot train|Prometheus|failed/` matched nothing) — although `Retrain` was clicked and three `/forecast`
-requests were on the wire (the other two panels plus panel 1's probe). The literal
-`Prometheus instant queries cannot train a forecast` exists in `src/forecast-panel/reasons.ts` and the guard in
-`trainRewrite.ts`, but the overlay never reached the train step in this configuration, so the message did not
-surface where the documentation implies it would.
+`range:false`), the panel emitted **no** reason text (`/cannot train|Prometheus|failed/` matched nothing) even
+though `Retrain` was pressed. The literal `Prometheus instant queries cannot train a forecast` exists in
+`src/forecast-panel/reasons.ts` and the guard in `trainRewrite.ts`, but two defects kept it off the screen:
 
-### 4. Small, recorded side effects of the run (not defects)
+- the overlay only asked the rewrite while it had a series to attribute a fit to, and rendered Grafana's empty
+  state on top of any reason it did resolve;
+- with the dashboard's configured future range (`to=now+3h`) the whole panel threw
+  `TypeError: Cannot read properties of undefined (reading 'name')`: a Prometheus instant query evaluated past
+  its data returns an **empty frame**, and the panel passed that frame to Grafana's `TimeSeries` — an A/B against
+  the pre-fix build reproduces it, and Grafana's own time series panel answers the same frame with `No data`.
+
+The fix computes the per-group rewrite rejection without resolving a datasource or running a query
+(`trainQuery.trainRejectReason`), checks it — and the invalid picker — before the panel loads anything, and plots
+only frames that have something to draw.
+
+| Panel 1 = Prometheus instant | Before | After |
+| --- | --- | --- |
+| dashboard range `to=now+3h` (the provisioned dashboard) | `An unexpected error happened` | `Forecast failed` / `Prometheus instant queries cannot train a forecast` over Grafana's `No data` |
+| dashboard range `to=now` | reason shown (reachable by accident, via the probe) | reason shown, the one series drawn |
+| `/forecast` and `…-train` requests from panel 1 | none (the panel threw first) | none (the target can never train) |
+
+The Kubernetes release, rebuilt from the fix commit, answers both ranges the same way: the reason over Grafana's
+`No data` at `to=now+3h`, the reason plus the series at `to=now`, with no `…-train` query and no `/forecast` from
+that panel (again on a throwaway copy of the read-only provisioned dashboard).
+
+The untouched dashboard still renders after the fix: three panels with history, forecast and bands, and the
+`forecast.retrain` rows keep `last_status ok` on the `*/5` cron.
+
+### 4. Small side effects of the run — verdicts
 
 - The Compose app jsonData gained `retrainTimezone: "UTC"` when the Configuration page saved the valid cron
-  (F11) — the same value the scheduler already used; both stacks were otherwise left as found.
+  (F11). Intended, not a defect: the page shows `UTC` when jsonData carries no timezone
+  (`AppConfig.tsx`: `useState(json.retrainTimezone ?? 'UTC')`) and Save writes the whole form — the value the
+  scheduler already used.
 - The Kubernetes worker logs `ERROR msg=schedule … relation "forecast.retrain" does not exist` on its first ticks
-  until the plugin has created the table: documented in `timeseries-baselines/AGENTS.md`, but noisy enough to
-  deserve a line in a deployment runbook.
+  until the plugin has created the table: `timeseries-baselines/AGENTS.md` gives that table to the plugin, so the
+  line is a deployment note rather than a defect.
 - The K8s LoadBalancer's `EXTERNAL-IP` (`172.18.0.5`) is not reachable from the Docker Desktop host, so every
   Kubernetes check in this document went through `kubectl port-forward svc/timeseries-grafana 30001:80`; the
   chart's documented `make helm-grafana` fallback is the right default there.
