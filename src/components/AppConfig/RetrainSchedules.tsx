@@ -135,21 +135,38 @@ export const RetrainSchedules = () => {
   const [status, setStatus] = useState<StatusFilter>('all');
   const [page, setPage] = useState(1);
 
-  const load = useCallback(async () => {
+  // Every fetch is triggered by bumping `reload`, so the effect body only starts
+  // the request and never calls a function that sets state synchronously.
+  const [reload, setReload] = useState(0);
+
+  const refresh = useCallback(() => {
     setLoading(true);
-    try {
-      setRows(await listSchedules());
-      setError(null);
-    } catch (e) {
-      setError(reasonFromUnknown(e));
-    } finally {
-      setLoading(false);
-    }
+    setReload((n) => n + 1);
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const next = await listSchedules();
+        if (!cancelled) {
+          setRows(next);
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(reasonFromUnknown(e));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reload]);
 
   const patch = useCallback((row: ScheduleRow, next: Partial<ScheduleRow>) => {
     setRows((prev) => prev.map((r) => (rowId(r) === rowId(row) ? { ...r, ...next } : r)));
@@ -161,14 +178,14 @@ export const RetrainSchedules = () => {
       try {
         await putSchedule(row);
         setError(null);
-        await load();
+        refresh();
       } catch (e) {
         setError(reasonFromUnknown(e));
       } finally {
         setBusy(null);
       }
     },
-    [load]
+    [refresh]
   );
 
   const remove = useCallback(
@@ -177,14 +194,14 @@ export const RetrainSchedules = () => {
       try {
         await deleteSchedule(row.scope, row.key);
         setError(null);
-        await load();
+        refresh();
       } catch (e) {
         setError(reasonFromUnknown(e));
       } finally {
         setBusy(null);
       }
     },
-    [load]
+    [refresh]
   );
 
   const filtered = useMemo(() => {
@@ -417,7 +434,7 @@ export const RetrainSchedules = () => {
           fill="outline"
           data-testid={testIds.appConfig.retrainRefresh}
           disabled={loading}
-          onClick={() => void load()}
+          onClick={refresh}
         >
           Refresh
         </Button>

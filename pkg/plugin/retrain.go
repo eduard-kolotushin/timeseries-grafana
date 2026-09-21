@@ -348,7 +348,7 @@ func seriesFromFrames(frames data.Frames, spec retrainSpec) (timeseries.Series[f
 	times := make([]time.Time, 0, n)
 	values := make([]float64, 0, n)
 	for i := range n {
-		ts, ok := timeField.At(i).(time.Time)
+		ts, ok := timeAt(timeField, i)
 		if !ok {
 			continue
 		}
@@ -643,6 +643,21 @@ func numericAt(f *data.Field, i int) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// timeAt reads one timestamp the way numericAt reads one value: a field decoded
+// from /api/ds/query is nullable whenever the reply marked it so, and Grafana's
+// SQL datasources always do (sqlutil's NullTimeConverter builds a []*time.Time
+// column). Asserting time.Time alone dropped every point of such a reply, so a
+// Postgres panel's cron retrain could never fit. ConcreteAt is the SDK's own
+// nullable-aware accessor; its encoder reads time fields the same way.
+func timeAt(f *data.Field, i int) (time.Time, bool) {
+	v, ok := f.ConcreteAt(i)
+	if !ok {
+		return time.Time{}, false
+	}
+	ts, ok := v.(time.Time)
+	return ts, ok
 }
 
 // tickResult is what one tick of the scheduler observed. It is what lets

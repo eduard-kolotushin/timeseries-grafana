@@ -49,31 +49,36 @@ const CALENDAR_OPTIONS: Array<SelectableValue<ForecastDataQuery['calendar']>> = 
 ];
 
 export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
-  const [sourceDs, setSourceDs] = useState<DataSourceApi | null>(null);
+  // The resolved instance is kept together with the uid it belongs to, so the
+  // editor the render picks is derived instead of mirrored: clearing it when the
+  // uid goes away is a render-time fact, not a setState inside an effect.
+  const [resolvedDs, setResolvedDs] = useState<{ uid: string; ds: DataSourceApi | null } | null>(null);
   const dsRef = sourceDatasource(query);
+  const dsUid = dsRef?.uid;
 
   useEffect(() => {
-    let cancelled = false;
-    if (!dsRef?.uid) {
-      setSourceDs(null);
+    if (!dsUid) {
       return;
     }
+    let cancelled = false;
     getDataSourceSrv()
-      .get(dsRef.uid)
+      .get(dsUid)
       .then((ds) => {
         if (!cancelled) {
-          setSourceDs(ds);
+          setResolvedDs({ uid: dsUid, ds });
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setSourceDs(null);
+          setResolvedDs({ uid: dsUid, ds: null });
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [dsRef?.uid]);
+  }, [dsUid]);
+
+  const sourceDs = dsUid && resolvedDs?.uid === dsUid ? resolvedDs.ds : null;
 
   const fingerprint = [
     query.seriesName,

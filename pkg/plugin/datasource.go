@@ -80,6 +80,10 @@ func (d *Datasource) ensureStore(ctx context.Context, pCtx backend.PluginContext
 }
 
 func (d *Datasource) Dispose() {
+	// ensureStore assigns store and close under d.mu, so the handle has to be
+	// read under it too: Dispose can run while a query is still connecting.
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.close != nil {
 		d.close()
 	}

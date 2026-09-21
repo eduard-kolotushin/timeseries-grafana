@@ -156,4 +156,4 @@ Do not add these without first updating this document:
 - The retrain scheduler must never fail a query: an unreachable `/api/ds/query`, a disabled scheduler, or a claim error leaves `needTrain` as the retrain path
 - A schedule row belongs to one org: `forecast.retrain` is keyed `(scope, org_id, key)`, `ensureSQL` migrates an older table to it in place, and a table left on the old key fails the schedule store instead of sharing rows between orgs
 - The scheduler claims and retrains only the org its Grafana credential belongs to; another org's row stays due for that org's own overlay load
-- GitHub Actions on `main` runs `gofmt`, `go test`, and frontend typecheck/jest/webpack
+- GitHub Actions on `main` runs `gofmt` over `./pkg` and `Magefile.go`, `go test -race`, and frontend lint/typecheck/jest/webpack

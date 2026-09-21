@@ -165,7 +165,7 @@ export const ForecastPanel: React.FC<Props> = ({
       }
     };
     // `options` is a new object whenever any panel option changes, so it covers every field the load reads.
-  }, [id, retrainNonce, data.request, historyFrames, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main]);
+  }, [id, title, retrainNonce, data.request, historyFrames, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main]);
 
   const plotFrames = useMemo(
     () =>

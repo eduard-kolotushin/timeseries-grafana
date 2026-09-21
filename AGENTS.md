@@ -89,4 +89,4 @@ Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see 
 - `make build` writes frontend + Linux backend to `dist/`
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`
 - Cluster images and Helm live in `timeseries-k8s` (build from a git pin of this repo)
-- GitHub Actions on `main`: `gofmt`, `go test`, frontend typecheck/jest/webpack
+- GitHub Actions on `main`: `gofmt` over `./pkg` and `Magefile.go`, `go test -race`, frontend lint/typecheck/jest/webpack

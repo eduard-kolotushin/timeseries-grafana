@@ -413,6 +413,16 @@ func TestSeriesFromFrames(t *testing.T) {
 		}
 		return out
 	}
+	// What every Grafana SQL datasource's reply decodes into: a *time.Time column.
+	nullableMinutes := func(n int) []*time.Time {
+		out := make([]*time.Time, n)
+		for i := range out {
+			t := t0.Add(time.Duration(i) * time.Minute)
+			out[i] = &t
+		}
+		return out
+	}
+	stamp := func(t time.Time) *time.Time { return &t }
 	named := data.Frames{data.NewFrame("A",
 		data.NewField("Time", nil, minutes(3)),
 		data.NewField("other", nil, []*float64{f64ptr(1), f64ptr(2), f64ptr(3)}),
@@ -433,6 +443,15 @@ func TestSeriesFromFrames(t *testing.T) {
 	renamed := data.Frames{data.NewFrame("A",
 		data.NewField("Time", nil, minutes(2)),
 		data.NewField("metric", nil, []*float64{f64ptr(5), f64ptr(6)}).SetConfig(&data.FieldConfig{DisplayName: "My Series"}),
+	)}
+	nullableTime := data.Frames{data.NewFrame("A",
+		data.NewField("time", nil, nullableMinutes(3)),
+		data.NewField("value", nil, []*float64{f64ptr(1), f64ptr(2), f64ptr(3)}),
+	)}
+	// A NULL timestamp drops its own point and nothing else.
+	nullTimestamp := data.Frames{data.NewFrame("A",
+		data.NewField("time", nil, []*time.Time{stamp(t0), nil, stamp(t0.Add(2 * time.Minute))}),
+		data.NewField("value", nil, []*float64{f64ptr(1), f64ptr(2), f64ptr(3)}),
 	)}
 	// One point over the train cap: the reply is bounded only by the decoder
 	// buffer, so the refusal has to come before the slices are allocated.
@@ -467,6 +486,20 @@ func TestSeriesFromFrames(t *testing.T) {
 			frames:     named,
 			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: "series-1"}},
 			wantValues: []float64{10, 30},
+			wantTimes:  2,
+		},
+		{
+			name:       "a nullable time field is read, not dropped",
+			frames:     nullableTime,
+			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: "value"}},
+			wantValues: []float64{1, 2, 3},
+			wantTimes:  3,
+		},
+		{
+			name:       "a null timestamp drops only its own point",
+			frames:     nullTimestamp,
+			spec:       retrainSpec{TrainSource: TrainSource{SeriesName: "value"}},
+			wantValues: []float64{1, 3},
 			wantTimes:  2,
 		},
 		{
@@ -590,6 +623,42 @@ func TestSeriesFromFrames(t *testing.T) {
 	}
 	if _, err := seriesFromFrames(gapped, retrainSpec{Season: "hour"}); err != nil {
 		t.Fatalf("hourly seasonality must accept a gapped series: %v", err)
+	}
+}
+
+// TestSeriesFromFramesNullableTimeReply pins the wire case the scheduler actually
+// meets: a frame decoded from a Grafana SQL datasource's /api/ds/query reply,
+// whose time column is marked nullable. json.Unmarshal into dsQueryResponse is
+// the same path fetchFrames takes.
+func TestSeriesFromFramesNullableTimeReply(t *testing.T) {
+	const reply = `{"results":{"A":{"status":200,"frames":[{"schema":{"fields":[` +
+		`{"name":"time","type":"time","typeInfo":{"frame":"time.Time","nullable":true}},` +
+		`{"name":"value","type":"number","typeInfo":{"frame":"float64","nullable":true}}]},` +
+		`"data":{"values":[[1700000000000,1700000060000,1700000120000],[1,2,3]]}}]}}}`
+	var out dsQueryResponse
+	if err := json.Unmarshal([]byte(reply), &out); err != nil {
+		t.Fatal(err)
+	}
+	frames := out.Results["A"].Frames
+	if len(frames) != 1 || len(frames[0].Fields) != 2 {
+		t.Fatalf("decoded %d frames", len(frames))
+	}
+	// The decode is the point: a reply that says "nullable" must come back as a
+	// nullable time field, or this test would pass with the bug still in place.
+	if got := frames[0].Fields[0].Type(); got != data.FieldTypeNullableTime {
+		t.Fatalf("time field type = %v, want %v", got, data.FieldTypeNullableTime)
+	}
+	series, err := seriesFromFrames(frames, retrainSpec{TrainSource: TrainSource{SeriesName: "value"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if series.Len() != 3 {
+		t.Fatalf("len=%d want 3", series.Len())
+	}
+	for i, want := range []float64{1, 2, 3} {
+		if got := series.Values()[i]; got != want {
+			t.Fatalf("value[%d]=%v want %v", i, got, want)
+		}
 	}
 }
 

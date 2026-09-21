@@ -124,6 +124,22 @@ export const TrainRangeEditor = ({
   const [search, setSearch] = useState('');
   const [showCalendar, setShowCalendar] = useState(false);
 
+  // Opening the picker reloads the draft fields from the panel's current value.
+  // That is a render-time derivation, not an effect: setting state in an effect
+  // made React render the popup twice for data it already had.
+  const draftKey = [open, value?.from, value?.to, context.options?.lookback, auto, kind].join('\u0000');
+  const [draftedKey, setDraftedKey] = useState(draftKey);
+  if (draftedKey !== draftKey) {
+    setDraftedKey(draftKey);
+    if (open) {
+      const next = pickerRaw(kind, value, context.options?.lookback, auto);
+      setFrom(next.from);
+      setTo(next.to);
+      setSearch('');
+      setShowCalendar(false);
+    }
+  }
+
   const close = () => {
     setOpen(false);
     setPlaced(false);
@@ -144,17 +160,6 @@ export const TrainRangeEditor = ({
     setAnchor((prev) => (prev.left === next.left && prev.top === next.top ? prev : next));
     setPlaced(true);
   }, []);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    const next = pickerRaw(kind, value, context.options?.lookback, auto);
-    setFrom(next.from);
-    setTo(next.to);
-    setSearch('');
-    setShowCalendar(false);
-  }, [open, value, context.options?.lookback, auto, kind]);
 
   useLayoutEffect(() => {
     if (!open) {

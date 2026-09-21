@@ -35,12 +35,13 @@ jobs:
           node-version: "22"
           cache: npm
       - name: Format
-        run: test -z "$(gofmt -l ./pkg)"
+        run: test -z "$(gofmt -l ./pkg ./Magefile.go)"
       - name: Go test
-        run: go test ./pkg/...
+        run: go test -race ./pkg/...
       - name: Frontend
         run: |
           npm ci
           npm run typecheck
+          npm run lint
           npm run test:ci
           npm run build
