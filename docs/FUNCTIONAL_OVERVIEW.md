@@ -28,8 +28,10 @@ KAFKA='docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --b
 ```
 
 `docker compose` commands run in `C:/Users/Eduard/Cursor/timeseries-grafana-sandbox`. In the Kubernetes
-environment the same route is `B=http://127.0.0.1:30001/api/plugins/eduardkolotushin-forecast-app/resources`
-(port-forward), and Postgres is reached with
+environment the same route is `B=http://localhost:80/api/plugins/eduardkolotushin-forecast-app/resources` — the
+LoadBalancer's host port, published by Docker Desktop's kind cloud provider (see
+[Environment under test](#environment-under-test)); `kubectl -n timeseries port-forward svc/timeseries-grafana
+30001:80`, which the sandbox `make helm-grafana` runs, answers the same. Postgres is reached with
 `kubectl -n overlay-postgres exec deploy/overlay-postgres -- psql -U overlay -d overlay -tAc "<sql>"`.
 
 ## Environment under test
@@ -39,7 +41,7 @@ left running afterwards.
 
 | | Compose sandbox | Kubernetes (Helm) |
 | --- | --- | --- |
-| Grafana | 13.1.0 (`commit b309c9bb3b81a748c3a75289236a27309ed2566a`), `http://localhost:3000`, anonymous Admin, org 1 | 13.1.0, `svc/timeseries-grafana` (LoadBalancer `EXTERNAL-IP 172.18.0.5:80`, not host-reachable → `kubectl -n timeseries port-forward svc/timeseries-grafana 30001:80`), anonymous Admin, org 1 |
+| Grafana | 13.1.0 (`commit b309c9bb3b81a748c3a75289236a27309ed2566a`), `http://localhost:3000`, anonymous Admin, org 1 | 13.1.0, `svc/timeseries-grafana` — LoadBalancer `EXTERNAL-IP 172.18.0.5:80` (a cluster-internal address); the host reaches it at `http://localhost:80` through Docker Desktop's kind cloud provider (`kindccm-…`, `envoyproxy/envoy:v1.36.7`, `0.0.0.0:80->80/tcp`), and `kubectl -n timeseries port-forward svc/timeseries-grafana 30001:80` (what `make helm-grafana` runs) serves the same — anonymous Admin, org 1 |
 | Plugin build | `dist/` mounted from the workspace: `gpx_forecast_linux_amd64` sha256 `34bf53244166948b6a0bbfc9fb79f942da2a4dbd229b54a5b1cba91ae98b43d6`, `module.js` sha256 `42564adfe17e496b3463f344d49fd7c0db3477c978f0e0e5fb3c7e8e13977f15` — both byte-identical inside the Grafana container. The discrepancy fixes were verified on a rebuild of the same tree: `gpx_forecast_linux_amd64` `a034c1ca02c028f065f0bc8eb206e8fec12b950a04d4f22126c9fbfae7c1d4df`, `forecast-panel/module.js` `429a2f99d4257049fdc13c4b7132df4c5a92600b3c0b8d586d6194808e6b4c80` | images built from the same pinned refs: `ghcr.io/eduard-kolotushin/timeseries-grafana:0.1.0` (`b466f49309cf`, built 13:59:36) and `…-baselines:0.1.0` (`11adb8b064c9`, built 13:59:58), imported into the node's containerd with `docker save … \| docker exec -i desktop-control-plane ctr -n k8s.io images import -`; the fix run rebuilt and re-imported the Grafana image from `PLUGIN_REF=8f2a9ff…` (`477c42ed65ff`, manifest `b542555444440409b2ad9e03925141a2c98e58aefd50d66590a1df0ec6665fb8`) and rolled the Deployment |
 | Source revisions | `timeseries-grafana` `d6399e5a3451c4cacf433736d28c80a966235502`, `timeseries-baselines` `179a1551e4dd1064b93cbdd42d12fb684a20dfcd` | same two commits, baked into the images by `timeseries-k8s` `PLUGIN_REF` / `BASELINES_REF`. The discrepancy fixes add `10a23cc` and `8f2a9ff` to `timeseries-grafana` (the worker is unchanged) and move the K8s pin to `8f2a9ff` |
 | Data plane | Druid 37.0.0 (`http://localhost:8888`, datasource `druid`, tables `minuteweek`/`metrics`/`baselines`), Kafka 3.9.1 (`metrics`, `baselines`), OpenSearch 2.18.0, Prometheus 2.55.1, overlay Postgres 17.6 (schema `forecast`) | Helm releases `kafka`, `druid`, `prometheus`, `opensearch`, `overlay-postgres`, `timeseries` — all `deployed` on one kind node (`desktop-control-plane`, v1.36.1, containerd 2.3.1) |
@@ -354,7 +356,7 @@ server row unchanged. Pressing *Delete* on the fixture row removed it immediatel
 `Forecast failed` / `Prometheus instant queries cannot train a forecast`, no train query and no `/forecast`
 (see [Discrepancies](#discrepancies-found) for the panel error this used to be).
 
-**Kubernetes:** the same action against the port-forwarded Grafana (the panels are the same plugin build).
+**Kubernetes:** the same action against the Kubernetes Grafana at `http://localhost:80` (the panels are the same plugin build).
 
 ### F14. New alert rule from the panel options
 
@@ -376,7 +378,8 @@ and the panel's Druid target — and the editor rendered `1. Enter alert rule na
 (`src/forecast-panel/alertFromPanel.ts: 'Dashboard must be saved before alerts can be added.'`) and is emitted
 when the panel has no dashboard UID.
 
-**Kubernetes:** the same option on the same build; the rule editor opened on the port-forwarded Grafana.
+**Kubernetes:** the same option on the same build; the rule editor opened on the Kubernetes Grafana (that check
+ran through `make helm-grafana`'s port-forward, which serves the same pod).
 
 ### F15. Mixed overlay (metric + Forecast datasource)
 
@@ -818,7 +821,7 @@ for mb in 15 16 16.5 17 20; do … curl --data-binary @body-$mb.json … ; done
 | 16 MiB, 16.5 MiB, 17 MiB, 20 MiB | 500 `{"statusCode":500,"messageId":"plugin.requestFailureError",…}` | **413** `forecast: request body too large` |
 | 33 MiB | 500 | 500 — above the transport ceiling, refused by the SDK and not by the plugin |
 
-The same sweep on the Kubernetes release answers 413 for 16, 16.5, 17 and 20 MiB.
+The same sweep on the Kubernetes release over `http://localhost:80` answers 413 for 16, 16.5, 17 and 20 MiB.
 
 ### 2. An inverted *Training period* silently trained the Auto window — fixed
 
@@ -886,6 +889,8 @@ The untouched dashboard still renders after the fix: three panels with history, 
 - The Kubernetes worker logs `ERROR msg=schedule … relation "forecast.retrain" does not exist` on its first ticks
   until the plugin has created the table: `timeseries-baselines/AGENTS.md` gives that table to the plugin, so the
   line is a deployment note rather than a defect.
-- The K8s LoadBalancer's `EXTERNAL-IP` (`172.18.0.5`) is not reachable from the Docker Desktop host, so every
-  Kubernetes check in this document went through `kubectl port-forward svc/timeseries-grafana 30001:80`; the
-  chart's documented `make helm-grafana` fallback is the right default there.
+- The K8s LoadBalancer's `EXTERNAL-IP` (`172.18.0.5`) is a cluster-internal address, but the service is
+  reachable from the Docker Desktop host at `http://localhost:80`: Docker Desktop's kind cloud provider runs
+  `envoyproxy/envoy:v1.36.7` (`kindccm-…`, `0.0.0.0:80->80/tcp`) in front of it. The overview run reached Grafana
+  through `kubectl port-forward svc/timeseries-grafana 30001:80` instead — the same pod, and the 413 sweep plus
+  the two panel reasons were re-checked over `http://localhost:80`.
