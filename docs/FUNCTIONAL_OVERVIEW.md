@@ -229,7 +229,7 @@ row immediately (no confirmation dialog) as observed on Compose.
 | --- | --- |
 | **Function** | Turn a stored snapshot back into a frame so Grafana alerting can query the forecast and its interval by `refId`. This is the **only** way to read a snapshot from another datum. |
 | **Who can use** | **Alert rule** (Grafana alerting) or any datasource query. No Admin gate; the datasource's own jsonData carries the store (F20). |
-| **How configured** | Datasource jsonData `storeHost…` (or a `store_url` URL) (alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`), or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
+| **How configured** | Datasource jsonData `storeHost`/`storePort`/… (field-wise; a URL is env/ini only) (alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`), or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
 | **Input params** | Query `{kind: "forecast"\|"lower"\|"upper", cacheKey, level?}` inside a normal `/api/ds/query` body with `from`/`to`. Each query's JSON is capped at 64 KiB (`maxQueryJSONBytes`); a larger one is rejected rather than decoded. |
 | **Expected result** | 200 with one frame per query and real values; a miss is an error: `needTrain: train on the Forecast overlay panel first`; unknown `kind` → 400. |
 
@@ -503,7 +503,7 @@ all retrained to `ok`).
 | **Function** | Decide where fitted snapshots live; with no DSN the plugin still fits and forecasts, it just cannot remember. |
 | **Who can use** | **Operator** (deployment config), plus **Admin** through the Configuration page (F11). |
 | **How configured** | In order: process env `FORECAST_STORE_URL`/`FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `…_DATASOURCE_*` / `GrafanaCfg` (`[plugin.eduardkolotushin-forecast-app]`, `[plugin.eduardkolotushin-forecast-datasource]`), then jsonData / `secureJsonData`. |
-| **Input params** | `storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword` (or a `store_url` URL; the camel `storeUrl` is not read). |
+| **Input params** | `storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword` — field-wise only: a URL comes from `FORECAST_STORE_URL`/the ini, never from jsonData, and a jsonData `storeUrl` (camel) is not read at all. |
 | **Expected result** | With a store: snapshots in `forecast.snapshots (org_id, cache_key, snapshot jsonb, updated_at)` and schedules usable. Without: `/schedules` is 503 and every probe answers `needTrain`. |
 
 **Positive — Compose:** the Configuration page values (`overlay-postgres`/`5432`/`overlay`/`overlay`/`disable`)

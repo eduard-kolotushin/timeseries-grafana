@@ -66,7 +66,7 @@ DSN resolution (first non-empty wins per field; URL short-circuits the rest):
 
 1. Process env `FORECAST_STORE_URL` / `FORECAST_STORE_*` (only if Grafana forwards host env; Grafana 12.4+ does not by default)
 2. Grafana ini-to-env `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` or `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`, and `GrafanaCfg` keys (`store_host`, `store_port`, …) from `[plugin.eduardkolotushin-forecast-app]` or `[plugin.eduardkolotushin-forecast-datasource]`
-3. jsonData / secureJsonData (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`; or a `store_url` URL, which short-circuits the fields above — the camel `storeUrl` spelling is not read): app Configuration page for the overlay process; Forecast datasource jsonData for alerting `QueryData`. If datasource jsonData has no host, `QueryData` also tries parent `AppInstanceSettings` when Grafana sends them
+3. jsonData / secureJsonData (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword` — field-wise only; **no** jsonData key supplies a URL, and the camel `storeUrl` is not read at all, though a jsonData carrying it still counts as "has a store" and suppresses the parent fallback below): app Configuration page for the overlay process; Forecast datasource jsonData for alerting `QueryData`. If datasource jsonData has no host, `QueryData` also tries parent `AppInstanceSettings` when Grafana sends them
 
 CI/CD merges [`conf/forecast.ini.template`](../conf/forecast.ini.template) into `grafana.ini` (Grafana expands `${FORECAST_STORE_*}`). `org_id` comes from plugin context. No DSN: persist off.
 
