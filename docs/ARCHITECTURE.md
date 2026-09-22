@@ -20,7 +20,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/pages/` | App config page bodies; the `schedules` tab renders the `forecast.retrain` table |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules; fit path records `trainSource` and upserts the `panel` schedule row |
-| `pkg/plugin/limits.go` | Train-length / body caps and Fit / ForecastRange inflight semaphore |
+| `pkg/plugin/limits.go` | Train-length / body caps, the pre-decode per-element budget, the one-window `maxForecastPoints` cap and the Fit / ForecastRange inflight semaphore |
 | `pkg/plugin/store.go` | SnapshotStore interface; bounded TTL read-through cache over pgx `forecast.snapshots` |
 | `pkg/plugin/schedule.go` | `ScheduleStore` over `forecast.retrain` (list / read one row / upsert / delete / due / claim / finish / identify) |
 | `pkg/plugin/retrain.go` | Unattended retrain scheduler: ticker, claim, `/api/ds/query` frame fetch, fit, `Put`, `Finish` |
@@ -87,11 +87,12 @@ Created by `ensureSQL` alongside `forecast.snapshots`; `gpx_forecast` is its onl
 | `scope`, `org_id`, `key` | The primary key. `panel` + this org + `cacheKey`, or `baseline` + `0` + `metric_hash` (written by sibling `timeseries-baselines`, fleet-wide by construction since it has no org) |
 | `cron`, `timezone` | Retrain schedule. 5-field `cron.ParseStandard` form plus `@daily` / `@hourly` / `@every 1h`; `timezone` is an IANA name |
 | `enabled` | Claimed only when true |
-| `spec JSONB` | `panel`: the whole `trainSource` (datasource uid, the verbatim query objects, the train window, the series name, `relative`/`lookbackMs`, and the identification keys `panelId`, `panelTitle`, `dashboardUid`, `querySummary`) plus the model fields the refit needs: `model`, `alpha`, `beta`, `period`, `season`, `calendar`, `lookback` (the operator-readable width). `baseline`: the worker's model spec. NULL means unclaimable |
+| `spec JSONB` | `panel`: the whole `trainSource` (datasource uid, the verbatim query objects, the train window, the series name, `relative`/`lookbackMs`, and the identification keys `panelId`, `panelTitle`, `dashboardUid`, `querySummary`) plus the model fields the refit needs: `model`, `alpha`, `beta`, `period`, `season`, `calendar`, `lookback` (the operator-readable width). `baseline`: the worker's model spec. NULL means unclaimable, as does a `queries` that is not a non-empty array |
 | `next_run_at` | Due when `<= now()`. NULL means never |
 | `last_run_at`, `last_status` | `ok` or `error: <message>` |
 | `claimed_by`, `claimed_until` | Lease; claimable while `claimed_until IS NULL OR claimed_until < now()` |
 | `updated_at` | Autotouched by the upsert |
+| `superseded_at` | Set when a newer key from the same dashboard panel replaced this row (see Claiming). A stamped row is never claimed; selecting its key again clears the stamp |
 
 `org_id` is part of the key because a `cacheKey` is **org-independent**: the fingerprint is the targets, options, series name and train window, so the same dashboard provisioned into two orgs hashes the same. Keyed `(scope, key)` those two orgs shared one row, and whichever org fitted last would overwrite the other's `cron`, `enabled` and stored query objects — while the org it overwrote could not even list the row, because `List` filters by org. `ensureSQL` migrates such a table in place (`DROP CONSTRAINT` + `ADD PRIMARY KEY (scope, org_id, key)` inside a `DO` block that only acts when the catalog still reports the two-column key), keeping every row's org, and `scheduleKeySQL` makes `ensureSchedules` refuse a table left on the old key rather than serve it: a runtime user that may not `ALTER` gets `errScheduleKey` on every schedule call (logged, never propagated into a query) instead of a silent cross-org write.
 
@@ -102,7 +103,10 @@ Created by `ensureSQL` alongside `forecast.snapshots`; `gpx_forecast` is its onl
 ```sql
 WITH due AS (
   SELECT scope, org_id, key FROM forecast.retrain
-  WHERE scope = 'panel' AND org_id = $4 AND enabled AND spec IS NOT NULL AND next_run_at IS NOT NULL AND next_run_at <= now()
+  WHERE scope = 'panel' AND org_id = $4 AND enabled AND spec IS NOT NULL
+    AND jsonb_typeof(spec->'queries') = 'array' AND spec->'queries' <> '[]'::jsonb
+    AND superseded_at IS NULL
+    AND next_run_at IS NOT NULL AND next_run_at <= now()
     AND (claimed_until IS NULL OR claimed_until < now())
   ORDER BY next_run_at LIMIT $1 FOR UPDATE SKIP LOCKED
 )
@@ -126,7 +130,9 @@ WHERE scope = $1 AND org_id = $2 AND key = $3 AND claimed_by = $6  -- $6 = owner
 
 The plugin's owner is `host:pid`, resolved once per tick and used for both the claim and every finish; a worker's owner is its `SHARD_ID`/self id. The predicate is the whole guard — **not** `claimed_by IS NULL OR claimed_by = owner`, which would let a retrain that outlived its lease write its own outcome over a row the newer owner had already finished and released. Both `Finish` and `Done` therefore update zero rows for a stale owner, and zero rows is logged at Debug as a lost claim, not an error.
 
-The `panel` predicate requires `spec IS NOT NULL` and the `baseline` predicate is the same shape with `scope='baseline'`: **the plugin never claims a row it cannot fetch**, and the worker never claims a panel row it has no overlay frontend for. A `panel` row without a spec (an overlay trained by an older frontend) is still valid — it just retrains through `needTrain` on the next overlay load.
+The `panel` predicate requires `spec IS NOT NULL`, a `queries` that is a non-empty array (a stored `null` or `[]` is a row `/api/ds/query` answers `400 query.noQueries` for, so the claim refuses it rather than erroring on every slot) and `superseded_at IS NULL`; the `baseline` predicate is the same shape with `scope='baseline'` and the same superseded check. **The plugin never claims a row it cannot fetch**, and the worker never claims a panel row it has no overlay frontend for. A `panel` row without a spec, or with an empty query list (an overlay trained by an older frontend), is still valid — it just retrains through `needTrain` on the next overlay load.
+
+**Superseding** is how a panel stops paying for a key it no longer uses. The overlay's `cacheKey` covers the training window, so changing the picker mints a new key and writes a new row while the old key's row would otherwise keep its cron forever. `recordPanelSchedule` therefore clears its own row's stamp and, in the same statement, stamps `superseded_at = now()` on the same org's `panel` rows that carry the same `dashboardUid` + `panelId` but a different key. Only a spec with that identity may retire another row — a `cacheKey`-only fit knows no panel and supersedes nothing — and selecting the old key again clears its stamp, so the switch is reversible. The lease is derived from `retrainClaimBatch` and `frameFetchTimeout` (`batch × timeout + timeout + 1m`, 6m today) so a batch of slow fetches can never outlive the claim it took.
 
 ### Tick
 
@@ -170,7 +176,7 @@ Train step follows the model, not the dashboard interval:
 
 ## Training window
 
-`trainRange` is Grafana raw from/to (`now-7d`/`now`, or absolute `YYYY-MM-DD HH:mm:ss` in the **dashboard** timezone, same as the dashboard time picker). The overlay panel parses those strings with `PanelProps.timeZone` and reports whether the result was a lookback (`relative` + `lookbackMs`, re-resolved at retrain time) or an explicit picker (`relative: false`, replayed verbatim). Empty / Auto windows (legacy `lookback` duration still applies if `trainRange` was never saved):
+`trainRange` is Grafana raw from/to (`now-7d`/`now`, or absolute `YYYY-MM-DD HH:mm:ss` in the **dashboard** timezone, same as the dashboard time picker). The overlay panel parses those strings with `PanelProps.timeZone` and reports whether the result was a lookback (`relative` + `lookbackMs`, re-resolved at retrain time) or an explicit picker (`relative: false`, replayed verbatim). A picker pair is stored as a lookback when it is expressible as one — `from` is a pure relative bound (`now`, `now-7d`, `now+6h`) and `to` is exactly `now`, which is what every Quick range is — because the picker shows those as "the last N"; a calendar or hand-typed absolute pick, a window that does not end at `now` (`now-24h` → `now-1h`), and a rounded bound (`now/d`) stay absolute, since a stored width cannot replay them faithfully. Empty / Auto windows (legacy `lookback` duration still applies if `trainRange` was never saved):
 
 | Model | Lookback |
 | --- | --- |
@@ -192,7 +198,7 @@ Train step follows the model, not the dashboard interval:
 | seasonal naive | 24h |
 | naive, mean, drift, SES, Holt | 6h |
 
-The backend emits `last + k×step` points inside that window (skip-ahead; no backcast before `last+step`).
+The backend emits `last + k×step` points inside that window (skip-ahead; no backcast before `last+step`). One window is capped at `maxForecastPoints` (1e6) points on every path: a `[from, to]` that needs more is a 413 reason, and the library enforces the same bound as `forecast.MaxForecastPoints`.
 
 ## Resource routes
 
@@ -201,13 +207,13 @@ The app resource mux is reachable at `/api/plugins/eduardkolotushin-forecast-app
 | Route | Handler | Notes |
 | --- | --- | --- |
 | `GET /ping` | `handlePing` | Liveness, no auth |
-| `POST /forecast` | `handleForecast` | Fit / probe / Restore; body capped at 16 MiB and `MAX_TRAIN_POINTS` |
+| `POST /forecast` | `handleForecast` | Fit / probe / Restore; body capped at 16 MiB, a body too large for a legal training series refused before decoding, `MAX_TRAIN_POINTS` and `maxForecastPoints` (one emitted window) both answered with 413 |
 | `GET /schedules` | `handleSchedules` | This org's `panel` rows plus every fleet-wide `baseline` row, **Admin only** |
-| `PUT /schedules` | `handleSchedules` | Retime `{scope, key, cron, timezone, enabled}`; validates the cron and timezone. A `baseline` key must already exist (`404`) — those rows are the worker's, so an admin may retime one but never invent one |
+| `PUT /schedules` | `handleSchedules` | Retime `{scope, key, cron, timezone, enabled}`; validates the cron and timezone, and an absent `enabled` keeps the stored value. A `baseline` key must already exist (`404`) — those rows are the worker's, so an admin may retime one but never invent one |
 | `DELETE /schedules?scope=&key=` | `handleSchedules` | This org's `panel` row, or the fleet-wide `baseline` row; the worker re-creates a live hash's row on its next tick, so deleting a retired hash's row is how its forever-retry ends |
 | `POST /schedules/default` | `handleScheduleDefault` | Validates `{cron, timezone}`; the Configuration page calls it before its settings POST and refuses to save a rejected default |
 
-The Admin gate is `backend.PluginConfigFromContext(req.Context()).User.Role != "Admin"` → `403 "forecast: admin required"`. Responses never echo a row's `spec`: the list carries `scope, key, cron, timezone, enabled, nextRunAt, lastRunAt, lastStatus, hasSpec` plus the derived `source` (`dashboardUid`, `panelId`, `panelTitle`, `datasourceUid`, `seriesName`, `querySummary`, `lookback`), which `scheduleSourceFromSpec` reads out of the stored spec with a lenient unmarshal — a malformed or absent spec costs that row its Source cell, never the listing, and `querySummary` is capped at 200 runes on the way out whatever a client stored. `source` is absent for a `baseline` row (the worker writes no spec), whose only identity is its `metric_hash` key.
+The Admin gate is `backend.PluginConfigFromContext(req.Context()).User.Role != "Admin"` → `403 "forecast: admin required"`. Responses never echo a row's `spec`: the list carries `scope, key, cron, timezone, enabled, nextRunAt, lastRunAt, lastStatus, hasSpec, supersededAt` plus the derived `source` (`dashboardUid`, `panelId`, `panelTitle`, `datasourceUid`, `seriesName`, `querySummary`, `lookback`), which `scheduleSourceFromSpec` reads out of the stored spec with a lenient unmarshal — a malformed or absent spec costs that row its Source cell, never the listing, and `querySummary` is capped at 200 runes on the way out whatever a client stored. `source` is absent for a `baseline` row (the worker writes no spec), whose only identity is its `metric_hash` key.
 
 Every overlay request — the `needTrain` probe included — carries a top-level `provenance {panelId, panelTitle, dashboardUid, querySummary}`, which is deliberately **not** part of `trainSource` (a probe never runs the training query). `Identify` merges those keys into an existing panel row's spec with `spec || $patch`, guarded so it can never create a row (only a fit knows the query objects a claim needs) and never writes when the merge would change nothing (`spec || $3::jsonb IS DISTINCT FROM spec`); errors are logged, never returned. It runs on the **read** paths only: a request that carries training points writes the whole spec — provenance included — through `recordPanelSchedule` anyway, so merging there would be a redundant round trip on the request the user is waiting for, while the cached-load path it does serve already reads this row (`Due`, `Get`). That is how a row written before this field existed becomes identifiable on the next dashboard load, since the cron path has no panel context to fill it in. `recordPanelSchedule` reads its one row by key (`Row`) rather than listing the table, which would transfer and decode every worker baseline row per fit. `querySummary` is summarised from the panel's **own** targets, not the rewritten ones, so the probe and the fit produce the same label — a Postgres rewrite substitutes literal timestamps into SQL text, which would otherwise flip the cell on every load.
 
@@ -220,7 +226,7 @@ Grafana unified alerting evaluates backend datasource queries, not overlay panel
 3. Query C (optional): `kind: upper` or `lower` at coverage `level` (default 0.95).
 4. Expression: A vs B, or A vs C.
 
-`QueryData` looks up the snapshot and emits one time series frame. On miss it returns an error (`needTrain`); it does not fit and does not query other datasources. Train on the overlay first. If the store DSN is missing in this process, the error is `snapshot store not configured (needTrain)` — that is not a cache miss.
+`QueryData` looks up the snapshot and emits one time series frame. On miss it returns an error (`needTrain`); it does not fit and does not query other datasources. A query whose `cacheKey` is absent or empty answers that same `needTrain` error — a just-added editor row has no key yet — while a key that is present but malformed stays a `400`. Train on the overlay first. If the store DSN is missing in this process, the error is `snapshot store not configured (needTrain)` — that is not a cache miss.
 
 Mixed overlay + Forecast query: the overlay plots POST forecast only. The Forecast query editor does not auto-fill; **Copy source from query A** is opt-in for the fingerprint. Grafana’s panel Alert tab exists only for Time series / Graph. Overlay options **New alert rule** navigates to `/alerting/new` with live queries (including Mixed Forecast rows), default reduce + threshold, and dashboard/panel annotations. On Grafana 13 scenes, live targets come from the editor scene query runner (`__grafanaSceneContext`), not `getDashboardSaveModel` (that helper still calls `getSaveModelCloneOld`). Dashboard must be saved. Panel menu More → New alert rule and Alerting → New alert rule remain. Do not ship alert rules.
 
@@ -232,7 +238,8 @@ Same as `timeseries-forecast`: grid `last + k * step` for `k ≥ 1`, clipped to 
 
 `gpx_forecast` is a separate process from Grafana, but a large train body or many concurrent Fit / `ForecastRange` calls can still OOM the plugin or stall Grafana’s plugin proxy. v11 bounds that:
 
-- Decode `POST /forecast` with a max body (16 MiB); reject `len(times)` / `len(values)` above `MAX_TRAIN_POINTS` (100k) with 413
+- Decode `POST /forecast` with a max body (16 MiB), refuse a body larger than a legal training series (two arrays of `MAX_TRAIN_POINTS` elements at ~32 bytes each) with 413 **before** the decoder runs, and reject `len(times)` / `len(values)` above `MAX_TRAIN_POINTS` (100k) with 413
+- Cap one emitted window at `maxForecastPoints` (1e6), checked before the fit on the fit, restore and datasource paths, and map the library's own `forecast.ErrTooManyPoints` to the same 413. Without it a request whose `to` is far enough made `ForecastRange` allocate billions of points and killed the process with no error surfaced
 - Inflight semaphore around CPU work only: Fit / SnapshotOf / ForecastRange (overlay) and Restore + ForecastRange (`QueryData`). Snapshot store `Get`/`Put` run outside the semaphore so a slow Postgres does not hold compute slots and turn into 429s; pgxpool bounds the DB side. Default 4, from `FORECAST_MAX_INFLIGHT` / `GF_PLUGIN_*_MAX_INFLIGHT` / GrafanaCfg `max_inflight` / jsonData `maxInflight`. Excess is 429, not an unbounded queue. NeedTrain probes without a snapshot do not take a slot
 - Overlay: `maxInflightLoads` panel option (default 1); series POSTs stay sequential; 413/429/5xx set a reason and stop further series POSTs; no automatic retry. Aborting a stale load unsubscribes the `fetch` / `ds.query` Observable, which cancels the HTTP request, so the backend sees `context.Canceled` and frees its slot instead of finishing work nobody will draw
 - Train `maxDataPoints` stays `min(100000, …)` so Grafana datasource queries are not a second unbounded path
