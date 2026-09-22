@@ -49,7 +49,7 @@ it was removed again at the end of the run.
 | Data plane | Druid 37.0.0 (`http://localhost:8888`, datasource `druid`, tables `minuteweek`/`metrics`/`baselines`), Kafka 3.9.1 (`metrics`, `baselines`), OpenSearch 2.18.0, Prometheus 2.55.1, overlay Postgres 17.6 (schema `forecast`) | Helm releases `kafka`, `druid`, `prometheus`, `opensearch`, `overlay-postgres`, `timeseries` — all `deployed` on one kind node (`desktop-control-plane`, v1.36.1, containerd 2.3.1) |
 | Worker | `alpine:3.21` + `/usr/local/bin/baselines` (sha256 `c725417cbd3a84cbb97258b8d40e5368bd9e2434f18373f938c26d748a072c7a`), env from `docker-compose.yaml` | Deployment `timeseries-baselines` (`SHARD_DNS=timeseries-baselines-headless`, `SHARD_MEMBERSHIP=store`), env from ConfigMap `timeseries-baselines-env` |
 | Configuration source | provisioning `provisioning/plugins/apps.yaml` + `docker-compose.yaml` env | ConfigMaps `timeseries-forecast-app` (app `apps.yaml`), `timeseries-forecast-datasource`, `timeseries-forecast-store`, `timeseries-baselines-env` |
-| Notable | 20 containers, ~4.2 GiB resident | 15.6 GiB allocatable; the two stacks ran **concurrently** without an OOM (≈4 GiB used); no metrics-server |
+| Notable | 18 containers, ~4.2 GiB resident | 15.6 GiB allocatable; the two stacks ran **concurrently** without an OOM (≈4 GiB used); no metrics-server |
 
 The Kubernetes plugin image cannot be pulled from GHCR (`timeseries-k8s` carries no `v*` tag, so the two
 `:0.1.0` tags are unpublished): both pods first came up `ErrImagePull` / `ImagePullBackOff`, and only the
@@ -220,7 +220,7 @@ row immediately (no confirmation dialog) as observed on Compose.
 | **Function** | Turn a stored snapshot back into a frame so Grafana alerting can query the forecast and its interval by `refId`. This is the **only** way to read a snapshot from another datum. |
 | **Who can use** | **Alert rule** (Grafana alerting) or any datasource query. No Admin gate; the datasource's own jsonData carries the store (F20). |
 | **How configured** | Datasource jsonData `storeHost…`/`storeUrl` (alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`), or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
-| **Input params** | Query `{kind: "forecast"\|"lower"\|"upper", cacheKey, level?}` inside a normal `/api/ds/query` body with `from`/`to`. |
+| **Input params** | Query `{kind: "forecast"\|"lower"\|"upper", cacheKey, level?}` inside a normal `/api/ds/query` body with `from`/`to`. Each query's JSON is capped at 64 KiB (`maxQueryJSONBytes`); a larger one is rejected rather than decoded. |
 | **Expected result** | 200 with one frame per query and real values; a miss is an error: `needTrain: train on the Forecast overlay panel first`; unknown `kind` → 400. |
 
 **Positive — Kubernetes:** `POST /api/ds/query` with `{"kind":"forecast","cacheKey":"1a…1a","level":0.95}` →
@@ -323,7 +323,7 @@ ConfigMap (`apps.yaml` → `jsonData.storeHost: overlay-postgres.overlay-postgre
 | **Function** | A page over the `forecast.retrain` table: what will retrain, when, how it last went, and what it belongs to. |
 | **Who can use** | **Admin** (peer tab of Overview and Configuration on the plugin configuration page). |
 | **How configured** | Store required (F20). Rows come from the overlay's fits (F2) and from the worker (F25). |
-| **Input params** | Filters *Search* / *Scope* (All, panel, baseline) / *Enabled* (All, Enabled, Disabled) / *Status* (All, ok, error, never run); per-row cron, timezone and enabled editors; per-row *copy key*, *Save*, *Delete*; a *Source* deep link for `panel` rows. |
+| **Input params** | Filters *Search* / *Scope* (All, panel, baseline) / *Enabled* (All, Enabled, Disabled) / *Status* (All, ok, error, never run); per-row cron, timezone and enabled editors; per-row *copy key*, *Save*, *Delete*; a *Refresh* button; 20-row client-side paging; a *Source* deep link for `panel` rows. |
 | **Expected result** | Columns *Source, Scope, Key, Cron, Timezone, Next run, Last run, Status, Enabled* + actions; errors surface as `Schedules failed` + the backend reason. |
 
 **Positive — Compose:** the tab listed 6 then 5 rows; the `panel` rows showed the panel title and
@@ -410,7 +410,7 @@ keys (`2e827911…`, `f8046f42…`, `7713db25…`), which is the cross-environme
 | --- | --- |
 | **Function** | Refit stored panel snapshots on their cron with no browser open: resolve the row's window, fetch frames from Grafana's own `/api/ds/query`, fit, store. |
 | **Who can use** | **Operator** (it runs by itself once the app is configured). |
-| **How configured** | jsonData `retrainCron` (default `0 3 * * *`; both environments use `*/5 * * * *`) and `grafanaUrl` (default `http://127.0.0.1:3000`); the token comes from `FORECAST_GRAFANA_TOKEN`, the ini section, or `secureJsonData.grafanaToken`. |
+| **How configured** | jsonData `retrainCron` (default `0 3 * * *`; both environments use `*/5 * * * *`) and `grafanaUrl` (default `http://127.0.0.1:3000`); the token comes from `FORECAST_GRAFANA_TOKEN`, the ini section, or `secureJsonData.grafanaToken`. The ticker itself is `FORECAST_RETRAIN_ENABLED` (default `true`, the same precedence chain) with `FORECAST_RETRAIN_TICK` (default `30s`) and `FORECAST_RETRAIN_LEASE` (default `5m`). |
 | **Input params** | Per row: `cron`, `timezone`, `enabled`; per spec: the stored queries and window (`relative` + `lookbackMs` re-resolve at claim time, absolute `from`/`to` replay verbatim). |
 | **Expected result** | `next_run_at` advances, `last_run_at`/`last_status` are written, `forecast.snapshots.updated_at` moves; a failure records `last_status = "error: …"` and never fails a user query. |
 
@@ -478,8 +478,9 @@ fixture had to be removed directly in Postgres, which *is* the boundary being de
 `querySummary` is `Druid SQL: SELECT __time, SUM("value") + 4.0 * SIN(…) …`, so the rewrite carries the SQL form
 too.
 
-**Negative — Compose:** the Prometheus-instant case is the negative this row names, and it was **not**
-reproduced (F13); the OpenSearch and Postgres branches were not exercised in this sandbox. All three literals are
+**Negative — Compose:** the Prometheus-instant case is the negative this row names, and it **was** reproduced
+(F13, and Discrepancy 3 below): an instant query is rejected with a reason, no training query runs and no fit is
+posted. The OpenSearch and Postgres branches were not exercised in this sandbox — those two literals are
 source-verified in `src/forecast-panel/reasons.ts`.
 
 **Kubernetes:** the same Druid rewrite against the K8s Grafana (the `ready` baseline row and the three panel rows
@@ -512,9 +513,10 @@ process env — which is why the alerting datasource can restore snapshots witho
 
 ## timeseries-baselines functions
 
-The worker is one process with an env-only interface and no HTTP surface. `SHARD_ID` defaults to the container
-hostname/IP; `SHARD_MEMBERSHIP=store` makes the peer set the `baselines.workers` heartbeat table (the Compose and
-K8s configurations both use it). "Owned" counts below are from the live tick lines.
+The worker is one process with an env-only interface and no HTTP surface. `SHARD_ID` defaults to the container's
+first non-loopback IP (the hostname only when there is none); `SHARD_MEMBERSHIP=store` makes the peer set the
+`baselines.workers` heartbeat table (the Compose and K8s configurations both use it). "Owned" counts below are
+from the live tick lines.
 
 ### F21. Tick loop
 
@@ -647,14 +649,15 @@ became `error: no data in the last 336h0m0s` with `next_run_at = now + 5m` (the 
 | **Input params** | The hash and the window; the model is fixed (`baseline`/`minute-week`). |
 | **Expected result** | One `baselines.snapshots` row per retrained hash with `model=baseline`, `season=minute-week`, `lookback_ms=1209600000` and a gzip payload. |
 
-**Positive — Compose:** `$PG "SELECT metric_hash, model, season, lookback_ms, trained_at, encode(substring(snapshot from 1 for 2),'hex') FROM baselines.snapshots"`
+**Positive — Compose:** `$PG "SELECT metric_hash, model, season, calendar, lookback_ms, trained_at, length(snapshot), encode(substring(snapshot from 1 for 2),'hex') FROM baselines.snapshots"`
 → `ready|baseline|minute-week||1209600000|2026-09-21 11:05:28.025158+00|17414|1f8b` (gzip magic, ~17 KB).
 
 **Negative — Compose:** a claimed hash whose Druid window holds no data finishes as
 `error: no data in the last 336h0m0s` and writes no snapshot.
 
-**Kubernetes:** `ready|baseline|minute-week|1209600000|2026-09-21 11:11:31.004464+00` — the Deployment trained
-and persisted through the chart-provisioned store.
+**Kubernetes:** `SELECT metric_hash, model, season, lookback_ms, trained_at FROM baselines.snapshots` →
+`ready|baseline|minute-week|1209600000|2026-09-21 11:11:31.004464+00` — the Deployment trained and persisted
+through the chart-provisioned store.
 
 ### F28. Membership heartbeat and peer source
 
@@ -724,7 +727,7 @@ serialise at ~1/s) instead of failing; an unreachable broker produced retries an
 | --- | --- |
 | **Function** | Fail fast and loudly on a bad deployment instead of half-working. |
 | **Who can use** | **Operator**. |
-| **How configured** | Every knob is an env var: `DRUID_BROKER`, `DRUID_DATASOURCE`, `DRUID_MAX_RANGE`, `DRUID_MAX_RPS`, `DRUID_MAX_INFLIGHT`, `DRUID_TIMEOUT`, `DRUID_RETRIES`, `KAFKA_BROKERS`, `KAFKA_TOPIC`, `LOOKBACK`, `SCAN_RANGE`, `AHEAD_MINUTES`, `INTERVAL`, `TRAIN_CONCURRENCY`, `HASH_SCAN_TTL`, `DEFAULT_RETRAIN_CRON`, `RETRAIN_RETRY`, `SHARD_ID`, `SHARD_PEERS`, `SHARD_DNS`, `SHARD_MEMBERSHIP`, `BASELINE_STORE_*`, `LOG_LEVEL`. |
+| **How configured** | Every knob is an env var: `DRUID_BROKER`, `DRUID_DATASOURCE`, `DRUID_MAX_RANGE`, `DRUID_MAX_RPS`, `DRUID_MAX_INFLIGHT`, `DRUID_TIMEOUT`, `DRUID_RETRIES`, `DRUID_AUTH_HEADER`, `DRUID_AUTH_VALUE`, `KAFKA_BROKERS`, `KAFKA_TOPIC`, `LOOKBACK`, `SCAN_RANGE`, `SNAPSHOT_CACHE_TTL`, `AHEAD_MINUTES`, `INTERVAL`, `TRAIN_CONCURRENCY`, `HASH_SCAN_TTL`, `WORKER_TTL`, `CALENDAR`, `DEFAULT_RETRAIN_CRON`, `RETRAIN_RETRY`, `SHARD_ID`, `SHARD_PEERS`, `SHARD_DNS`, `SHARD_MEMBERSHIP`, `BASELINE_STORE_*`, `LOG_LEVEL`. |
 | **Input params** | Env only; no flags and no config file. |
 | **Expected result** | Exit code 1 with one `ERROR config err="…"` line naming the knob. |
 
@@ -827,7 +830,9 @@ helm upgrade --install fx-ha ../timeseries-k8s/charts/timeseries -n timeseries -
   key `grafana.ini`, so `--set grafana.ini.database.type=postgres` builds a nested map the chart never reads: the
   replicas first came up on SQLite, with no `[database]` section in the rendered ini. `GF_DATABASE_*` is what
   Grafana reads — the pods logged `Config overridden from Environment variable var="GF_DATABASE_TYPE=postgres"`
-  and `Connecting to DB dbtype=postgres`, and the fixture dashboard appeared in `grafana_ha`.
+  and `Connecting to DB dbtype=postgres`, and the fixture dashboard appeared in `grafana_ha`. A values file has
+  to use the same literal key (as `helm/timeseries-values.yaml` does); a YAML `grafana.ini:` key and
+  `--set grafana.ini.…` are different maps.
 - **No ingress needed.** The scheduler is internal: the second release's LoadBalancer stayed `<pending>` and its
   replicas only had to reach Grafana and the datasources in-cluster. Each replica's scheduler fetches frames from
   `FORECAST_GRAFANA_URL` — the sandbox's `http://127.0.0.1:3000`, i.e. **its own** Grafana (observed: `…-7svct`
@@ -857,12 +862,11 @@ source and are **not** backed by a live observation in this run:
 
 | Claim | Where it lives | Why it was not observed |
 | --- | --- | --- |
-| The OpenSearch and Postgres train rejections | `src/forecast-panel/reasons.ts`, `trainRewrite.ts` | No OpenSearch or Postgres panel exists in the sandbox dashboards; the Prometheus branch is live (F13). |
+| The OpenSearch and Postgres train rejections, and the Druid/Postgres/OpenSearch rewrite branches beyond the Druid builder and Druid SQL | `src/forecast-panel/reasons.ts`, `src/forecast-panel/trainRewrite.ts` | No OpenSearch or Postgres panel exists in the sandbox dashboards and no non-Druid target either; the Prometheus branch is live (F13). |
 | `Dashboard must be saved before alerts can be added.` | `src/forecast-panel/alertFromPanel.ts:4` | The positive (`/alerting/new` with defaults) was verified; the unsaved-dashboard case needs a brand-new unsaved dashboard with the panel, which was not built. |
 | Scheduler auto-disable after repeated 401/403 | `pkg/plugin/retrain.go` (`errGrafanaUnauthorized`) | Needs three consecutive rejected fetches across cron ticks; the Compose sandbox uses anonymous Admin and the token path was only exercised in its working (empty-token) form. |
-| Druid/Postgres/OpenSearch train-query rewrites beyond Druid | `src/forecast-panel/trainRewrite.ts` | Only the Druid builder and Druid SQL targets exist in the sandbox dashboard. |
 | `Copy source from query A` (Forecast editor) | `src/forecast-datasource/` | Opt-in, manual feature; the Forecast editor was not driven by hand. |
-| `DRUID_MAX_INFLIGHT` saturation | `druid.go`, `limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
+| `DRUID_MAX_INFLIGHT` saturation | `timeseries-baselines/druid.go`, `timeseries-baselines/limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
 | `FORECAST_MAX_INFLIGHT` env/ini precedence | `pkg/plugin/limits.go` | Only the jsonData path was used (the Compose env does not set it). |
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
 | A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |

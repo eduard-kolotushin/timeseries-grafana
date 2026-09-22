@@ -11,7 +11,7 @@ This repo is plugin source only. Local Grafana is [`timeseries-grafana-sandbox`]
 
 CI/CD that already ships Grafana plus plugins: merge [`conf/forecast.ini.template`](conf/forecast.ini.template) into `grafana.ini`. See [`conf/README.md`](conf/README.md).
 
-See [docs/INTENTIONS.md](docs/INTENTIONS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+See [docs/INTENTIONS.md](docs/INTENTIONS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). What each screen, option and cron actually does — and how it was verified on the Compose and Kubernetes sandboxes — is in [docs/FUNCTIONAL_OVERVIEW.md](docs/FUNCTIONAL_OVERVIEW.md).
 
 The Go backend depends on tagged `timeseries` and `timeseries-forecast` modules.
 

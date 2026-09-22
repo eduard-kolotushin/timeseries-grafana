@@ -18,6 +18,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 
 1. [docs/INTENTIONS.md](docs/INTENTIONS.md)
 2. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+3. [docs/FUNCTIONAL_OVERVIEW.md](docs/FUNCTIONAL_OVERVIEW.md) — what each screen and knob does, and how it was verified live
 
 ## Hard constraints
 
