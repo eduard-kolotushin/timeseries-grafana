@@ -628,3 +628,151 @@ func TestPostgresSchedule(t *testing.T) {
 		t.Fatalf("after delete rows=%+v err=%v", after, err)
 	}
 }
+
+// TestPostgresClaimRequiresFetchableQueries pins the claim predicate against a real
+// Postgres. `spec IS NOT NULL` alone claims a row whose queries is null or [] —
+// "null" is four bytes of jsonb, not NULL — and the scheduler then posts it to
+// /api/ds/query, which answers 400 query.noQueries on every cron slot forever. The
+// predicate must require a non-empty JSON array.
+func TestPostgresClaimRequiresFetchableQueries(t *testing.T) {
+	dsn := os.Getenv("FORECAST_TEST_PG")
+	if dsn == "" {
+		t.Skip("FORECAST_TEST_PG not set")
+	}
+	ctx := context.Background()
+	s, err := openPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	prefix := "test-claim-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	const orgID int64 = 987655
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
+	specs := map[string]string{
+		"null":  `{"queries":null,"model":"baseline"}`,
+		"empty": `{"queries":[],"model":"baseline"}`,
+		"ok":    `{"queries":[{"refId":"A"}],"model":"baseline"}`,
+	}
+	for name, spec := range specs {
+		if err := s.Upsert(ctx, orgID, ScheduleRow{
+			Scope: scopePanel, Key: prefix + "-" + name, Cron: "*/5 * * * *", Timezone: "UTC",
+			Enabled: true, Spec: json.RawMessage(spec), NextRunAt: past,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for name := range specs {
+			_ = s.Delete(context.Background(), orgID, scopePanel, prefix+"-"+name)
+		}
+	})
+
+	claimed, err := s.Claim(ctx, orgID, "claim-test-owner", time.Minute, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedKeys := map[string]bool{}
+	for _, row := range claimed {
+		if strings.HasPrefix(row.Key, prefix) {
+			claimedKeys[row.Key] = true
+		}
+	}
+	if !claimedKeys[prefix+"-ok"] {
+		t.Fatalf("the fetchable row was not claimed: %+v", claimed)
+	}
+	if claimedKeys[prefix+"-null"] || claimedKeys[prefix+"-empty"] {
+		t.Fatalf("an unfetchable row was claimed: %+v", claimedKeys)
+	}
+}
+
+// TestPostgresSupersedeRetiresOldKeys pins supersedeSQL against a real Postgres.
+// The panel identity lives inside the jsonb spec, so resolving it is a jsonb ->>
+// read; the statement has to stamp the panel's other rows and clear its current
+// one, and it must leave a row of the same panelId on another dashboard alone.
+func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
+	dsn := os.Getenv("FORECAST_TEST_PG")
+	if dsn == "" {
+		t.Skip("FORECAST_TEST_PG not set")
+	}
+	ctx := context.Background()
+	s, err := openPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	prefix := "test-supersede-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	const orgID int64 = 987656
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
+	keys := []string{prefix + "-a", prefix + "-b", prefix + "-other"}
+	for i, key := range keys {
+		dash, panel := "dash-1", 7
+		if i == 2 {
+			dash = "dash-2"
+		}
+		spec := fmt.Sprintf(`{"queries":[{"refId":"A"}],"model":"baseline","dashboardUid":%q,"panelId":%d}`, dash, panel)
+		if err := s.Upsert(ctx, orgID, ScheduleRow{
+			Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC",
+			Enabled: true, Spec: json.RawMessage(spec), NextRunAt: past,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, key := range keys {
+			_ = s.Delete(context.Background(), orgID, scopePanel, key)
+		}
+	})
+	retired := func(t *testing.T, key string) bool {
+		t.Helper()
+		for _, row := range mustList(t, ctx, s, orgID) {
+			if row.Scope == scopePanel && row.Key == key {
+				return !row.SupersededAt.IsZero()
+			}
+		}
+		t.Fatalf("no row for %s", key)
+		return false
+	}
+
+	if err := s.Supersede(ctx, orgID, "dash-1", 7, keys[1]); err != nil {
+		t.Fatal(err)
+	}
+	if !retired(t, keys[0]) {
+		t.Fatal("the panel's previous key was not retired")
+	}
+	if retired(t, keys[1]) {
+		t.Fatal("the key being kept was retired")
+	}
+	if retired(t, keys[2]) {
+		t.Fatal("another dashboard's panel was superseded")
+	}
+
+	// Re-selecting the old key clears its flag and retires the newer one.
+	if err := s.Supersede(ctx, orgID, "dash-1", 7, keys[0]); err != nil {
+		t.Fatal(err)
+	}
+	if retired(t, keys[0]) {
+		t.Fatal("re-selecting a key did not clear its flag")
+	}
+	if !retired(t, keys[1]) {
+		t.Fatal("the replaced key was not retired")
+	}
+
+	// A retired row is history, not work: the claim must skip it while the current
+	// key stays claimable.
+	claimed, err := s.Claim(ctx, orgID, "supersede-owner", time.Minute, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedKeys := map[string]bool{}
+	for _, row := range claimed {
+		claimedKeys[row.Key] = true
+	}
+	if !claimedKeys[keys[0]] {
+		t.Fatalf("the current key was not claimed: %+v", claimed)
+	}
+	if claimedKeys[keys[1]] {
+		t.Fatal("a superseded row was claimed")
+	}
+}

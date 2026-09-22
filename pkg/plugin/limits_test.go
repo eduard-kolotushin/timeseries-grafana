@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+
+	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 )
 
 func clearLimitEnv(t *testing.T) {
@@ -101,18 +103,6 @@ func TestWorkLimiterCanceled(t *testing.T) {
 	}
 }
 
-func TestCheckTrainLen(t *testing.T) {
-	prev := maxTrainPoints
-	maxTrainPoints = 2
-	t.Cleanup(func() { maxTrainPoints = prev })
-	if err := checkTrainLen(2, 2); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkTrainLen(3, 2); !errors.Is(err, errTrainTooLong) {
-		t.Fatalf("err=%v", err)
-	}
-}
-
 // The SDK's own default receive limit is the body cap's twin, and a body at the cap then
 // fails the transport before the handler can answer 413.
 func TestGRPCSettingsClearsTheBodyCap(t *testing.T) {
@@ -143,7 +133,26 @@ func TestHttpStatusForLoadErrors(t *testing.T) {
 	if httpStatusFor(errTrainTooLong) != http.StatusRequestEntityTooLarge {
 		t.Fatalf("train=%d", httpStatusFor(errTrainTooLong))
 	}
+	// The two caps added for F1/F2 are 413-class on every path: the app POST
+	// answers them directly, and dataStatusFor carries the datasource path's.
+	if httpStatusFor(errTrainBodyTooLarge) != http.StatusRequestEntityTooLarge {
+		t.Fatalf("body points=%d", httpStatusFor(errTrainBodyTooLarge))
+	}
+	if httpStatusFor(errWindowTooManyPoints) != http.StatusRequestEntityTooLarge {
+		t.Fatalf("window=%d", httpStatusFor(errWindowTooManyPoints))
+	}
+	if dataStatusFor(errWindowTooManyPoints) != backend.Status(413) {
+		t.Fatalf("data window=%d", dataStatusFor(errWindowTooManyPoints))
+	}
 	if dataStatusFor(errBusy) != backend.StatusTooManyRequests {
 		t.Fatalf("data busy=%d", dataStatusFor(errBusy))
+	}
+	// The library's own cap error maps to the same 413 on both paths, so a window
+	// that reaches the library before the plugin's check is answered identically.
+	if httpStatusFor(forecast.ErrTooManyPoints) != http.StatusRequestEntityTooLarge {
+		t.Fatalf("library window=%d", httpStatusFor(forecast.ErrTooManyPoints))
+	}
+	if dataStatusFor(forecast.ErrTooManyPoints) != backend.Status(413) {
+		t.Fatalf("library data window=%d", dataStatusFor(forecast.ErrTooManyPoints))
 	}
 }

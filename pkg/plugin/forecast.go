@@ -99,10 +99,15 @@ type ForecastResponse struct {
 type nullableFloat float64
 
 func (f nullableFloat) MarshalJSON() ([]byte, error) {
-	if math.IsNaN(float64(f)) {
+	v := float64(f)
+	// NaN is the library's "undefined", and ±Inf is a fit that overflowed (the mean
+	// of two 1e308 points sums to +Inf). Neither is JSON, and json.Marshal answers
+	// `unsupported value: +Inf` — a 500 for a request whose only sin was a large
+	// value — so both leave as null, exactly like the library's own jsonFloat.
+	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return []byte("null"), nil
 	}
-	return json.Marshal(float64(f))
+	return json.Marshal(v)
 }
 
 func (f *nullableFloat) UnmarshalJSON(b []byte) error {
@@ -116,6 +121,57 @@ func (f *nullableFloat) UnmarshalJSON(b []byte) error {
 	}
 	*f = nullableFloat(v)
 	return nil
+}
+
+// checkForecastWindow rejects a requested [from, to] window that would make the
+// model emit more than maxForecastPoints points. It mirrors the library's own
+// grid arithmetic (k0 = max(1, ceil((from-last)/step)), k1 = (to-last)/step),
+// computed in milliseconds, so it is neither a false rejection nor a leak: the
+// count is exact, and an empty window is left to ForecastRange's ErrEmptyRange
+// (which allocates nothing). Without this guard a single request with a far `to`
+// makes ForecastRange allocate a slice of billions of points and the process
+// dies with no error surfaced. The library exports the same bound
+// (forecast.MaxForecastPoints) and the same error (forecast.ErrTooManyPoints),
+// which httpStatusFor maps to this same 413, so a path that reaches the library
+// first is answered identically.
+func checkForecastWindow(lastMs, stepMs, fromMs, toMs int64) error {
+	if stepMs <= 0 {
+		return nil
+	}
+	k0 := ceilDiv(fromMs-lastMs, stepMs)
+	if k0 < 1 {
+		k0 = 1
+	}
+	k1 := (toMs - lastMs) / stepMs
+	if k1 < k0 {
+		return nil
+	}
+	if k1-k0+1 > int64(maxForecastPoints) {
+		return errWindowTooManyPoints
+	}
+	return nil
+}
+
+// ceilDiv is the library's ceilDuration on a millisecond grid: an exact ceiling
+// for positive operands, and 0 for zero or negative ones (the caller clamps to 1).
+func ceilDiv(num, den int64) int64 {
+	if num <= 0 {
+		return 0
+	}
+	return (num + den - 1) / den
+}
+
+// checkForecastWindowRequest bounds the fit paths: the grid a response is emitted
+// on is the one the training series implies — its last timestamp and the interval
+// before it — so a window that would emit too many points is refused before the
+// fit. A series too short to define a step is left to the fit's own error: its
+// step is 0, so ForecastRange answers ErrNoFrequency without allocating.
+func checkForecastWindowRequest(in ForecastRequest) error {
+	if len(in.Times) < 2 {
+		return nil
+	}
+	last := in.Times[len(in.Times)-1]
+	return checkForecastWindow(last, last-in.Times[len(in.Times)-2], in.From, in.To)
 }
 
 // dispatchForecast routes one POST /forecast. The inflight limiter bounds CPU
@@ -195,6 +251,11 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	if !ok {
 		return ForecastResponse{NeedTrain: true}, nil
 	}
+	// The snapshot carries the fitted grid, so the window is boundable here too —
+	// before Restore and before a compute slot is taken.
+	if err := checkForecastWindow(snap.Last, snap.Step/int64(time.Millisecond), in.From, in.To); err != nil {
+		return ForecastResponse{}, err
+	}
 	return runLimited(ctx, a.computeLimit(), func() (ForecastResponse, error) {
 		fitted, err := forecast.Restore(snap)
 		if err != nil {
@@ -246,8 +307,13 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 		log.DefaultLogger.Error("schedule cron", "cron", cronSpec, "timezone", timezone, "err", err.Error())
 		return
 	}
+	// A spec that stores `"queries":null` is claimable under `spec IS NOT NULL`
+	// alone and then unfetchable, so an absent query list is written as the empty
+	// array both the claim predicate and the scheduler read as "no queries".
+	src := *in.TrainSource
+	src.Queries = queriesOrEmpty(src.Queries)
 	spec, err := json.Marshal(retrainSpec{
-		TrainSource: *in.TrainSource,
+		TrainSource: src,
 		Model:       in.Model,
 		Alpha:       in.Alpha,
 		Beta:        in.Beta,
@@ -258,7 +324,6 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	})
 	if err != nil {
 		log.DefaultLogger.Error("schedule spec", "key", in.CacheKey, "err", err.Error())
-		return
 	}
 	err = a.sched.Upsert(ctx, orgID, ScheduleRow{
 		Scope:     scopePanel,
@@ -271,7 +336,29 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	})
 	if err != nil {
 		log.DefaultLogger.Error("schedule upsert", "key", in.CacheKey, "err", err.Error())
+		return
 	}
+	// A panel whose query changed hashes a new cacheKey, so the row its old key
+	// trained would be refit forever for a series the panel no longer shows. Only a
+	// spec carrying the panel's own identity may retire another row: a cacheKey-only
+	// fit knows no panel and supersedes nothing. A failed supersede never fails the
+	// fit the user is waiting on.
+	if in.TrainSource.DashboardUID != "" && in.TrainSource.PanelID != 0 {
+		if err := a.sched.Supersede(ctx, orgID, in.TrainSource.DashboardUID, in.TrainSource.PanelID, in.CacheKey); err != nil {
+			log.DefaultLogger.Warn("schedule supersede", "key", in.CacheKey, "err", err.Error())
+		}
+	}
+}
+
+// queriesOrEmpty normalises an absent or JSON-null query list to the empty array.
+// The scheduler refuses both as "no queries", and the claim predicate requires a
+// non-empty array, so a stored null would be a row nobody can ever retrain (and
+// whose spec `/api/ds/query` answers 400 query.noQueries for).
+func queriesOrEmpty(raw json.RawMessage) json.RawMessage {
+	if emptyQueries(raw) {
+		return json.RawMessage("[]")
+	}
+	return raw
 }
 
 // lookbackString renders the stored training width for the Retrain schedules
@@ -307,6 +394,11 @@ func fitAndEmit(in ForecastRequest) (ForecastResponse, error) {
 }
 
 func fitRequest(in ForecastRequest) (forecast.Fitted, error) {
+	// Every fit path — the overlay's fit-and-emit, the overlay's train-and-cache,
+	// and the scheduler's spec replay — is bounded here, before any allocation.
+	if err := checkForecastWindowRequest(in); err != nil {
+		return nil, err
+	}
 	if len(in.Times) != len(in.Values) {
 		return nil, timeseries.ErrLengthMismatch
 	}
@@ -426,7 +518,9 @@ func httpStatusFor(err error) int {
 	switch {
 	case errors.Is(err, errBusy):
 		return http.StatusTooManyRequests
-	case errors.Is(err, errTrainTooLong), errors.Is(err, errBodyTooLarge):
+	case errors.Is(err, errTrainTooLong), errors.Is(err, errBodyTooLarge),
+		errors.Is(err, errTrainBodyTooLarge), errors.Is(err, errWindowTooManyPoints),
+		errors.Is(err, forecast.ErrTooManyPoints):
 		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, context.Canceled):
 		return 499

@@ -26,7 +26,6 @@ import (
 const (
 	defaultRetrainEnabled = true
 	defaultRetrainTick    = 30 * time.Second
-	defaultRetrainLease   = 5 * time.Minute
 	defaultRetrainCron    = "0 3 * * *"
 	defaultGrafanaURL     = "http://127.0.0.1:3000"
 
@@ -35,8 +34,16 @@ const (
 	// anyway (a busy slot retries on the next tick).
 	retrainClaimBatch = 4
 	// frameFetchTimeout bounds one /api/ds/query call, so a hung Grafana query
-	// cannot hold a claim for the whole lease.
+	// cannot hold a claim for the whole lease. The /api/org lookup that precedes a
+	// tick runs through the same client, so it shares the bound.
 	frameFetchTimeout = 60 * time.Second
+	// defaultRetrainLease is derived from the work one claim covers, not picked: a
+	// tick retrains up to retrainClaimBatch rows sequentially, each costing at most
+	// frameFetchTimeout for its fetch, plus one frameFetchTimeout for the /api/org
+	// lookup before the claim, plus a minute of margin. A lease shorter than that
+	// lets a second replica steal a row that is still being retrained — both would
+	// then store a snapshot under the same key and publish duplicate work.
+	defaultRetrainLease = retrainClaimBatch*frameFetchTimeout + frameFetchTimeout + time.Minute
 	// maxDSQueryReplyBytes caps one decoder buffer. A bounded train window
 	// (~20k points per series) is far below it; the cap only exists so a
 	// misconfigured datasource cannot exhaust plugin memory.
@@ -54,10 +61,11 @@ const (
 // decide whether unattended retraining can work at all.
 var errGrafanaUnauthorized = errors.New("forecast: grafana refused the scheduler credentials (401/403)")
 
-// retrainConfig is the scheduler's resolved configuration. Every field falls
-// back through storeLookup's FORECAST_* → GF_PLUGIN_* → grafana.ini → jsonData
-// precedence, so the Configuration page, the ini file and the process env are
-// interchangeable.
+// retrainConfig is the scheduler's resolved configuration. Every field but
+// Timezone falls back through storeLookup's FORECAST_* → GF_PLUGIN_* →
+// grafana.ini → jsonData precedence, so the Configuration page, the ini file and
+// the process env are interchangeable. Timezone is jsonData-only: it is the
+// Configuration page's own field and has no env or ini spelling.
 type retrainConfig struct {
 	Enabled    bool
 	Tick       time.Duration
@@ -149,10 +157,34 @@ func parseRetrainSpec(raw []byte) (retrainSpec, error) {
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		return retrainSpec{}, fmt.Errorf("forecast: schedule spec: %w", err)
 	}
-	if len(spec.Queries) == 0 {
+	if !hasQueries(spec.Queries) {
 		return retrainSpec{}, errors.New("forecast: schedule spec has no queries")
 	}
 	return spec, nil
+}
+
+// emptyQueries reports whether a query list is absent or the JSON literal null.
+// json.RawMessage keeps "null" as four bytes, so a length check alone does not see
+// it: a spec holding `"queries":null` passes `len(spec.Queries) == 0` and is then
+// posted to /api/ds/query, which answers 400 query.noQueries on every cron slot.
+func emptyQueries(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+// hasQueries reports whether a query list is a non-empty JSON array, which is the
+// only shape the scheduler can post and the claim predicate accepts. Anything else
+// (null, [], an object, malformed JSON) means "no queries".
+func hasQueries(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return false
+	}
+	var list []json.RawMessage
+	if err := json.Unmarshal(trimmed, &list); err != nil {
+		return false
+	}
+	return len(list) > 0
 }
 
 // framePoster fetches one schedule row's training frames through Grafana. It is

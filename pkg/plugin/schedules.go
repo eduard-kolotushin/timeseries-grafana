@@ -26,15 +26,21 @@ const maxScheduleBodyBytes = 64 << 10
 // absent: it holds datasource query objects the UI has no use for, and echoing
 // it would put query text into every Configuration page load.
 type scheduleDTO struct {
-	Scope      string `json:"scope"`
-	Key        string `json:"key"`
-	Cron       string `json:"cron"`
-	Timezone   string `json:"timezone"`
-	Enabled    bool   `json:"enabled"`
+	Scope    string `json:"scope"`
+	Key      string `json:"key"`
+	Cron     string `json:"cron"`
+	Timezone string `json:"timezone"`
+	// Enabled is a pointer so an absent field on PUT means "leave it alone": a
+	// plain bool would write false for a client that only edits the cron, silently
+	// switching the schedule off.
+	Enabled    *bool  `json:"enabled"`
 	NextRunAt  string `json:"nextRunAt,omitempty"`
 	LastRunAt  string `json:"lastRunAt,omitempty"`
 	LastStatus string `json:"lastStatus,omitempty"`
 	HasSpec    bool   `json:"hasSpec"`
+	// SupersededAt is when this row stopped being the panel's current one, for a
+	// panel that now trains a different cache key. Absent while the row is current.
+	SupersededAt string `json:"supersededAt,omitempty"`
 	// Source is derived from the stored spec; it is absent for a row without one
 	// (a worker baseline row) and never carries the spec's query objects.
 	Source *scheduleSourceDTO `json:"source,omitempty"`
@@ -78,12 +84,13 @@ func scheduleSourceFromSpec(raw []byte) *scheduleSourceDTO {
 }
 
 func toScheduleDTO(row ScheduleRow) scheduleDTO {
+	enabled := row.Enabled
 	out := scheduleDTO{
 		Scope:      row.Scope,
 		Key:        row.Key,
 		Cron:       row.Cron,
 		Timezone:   row.Timezone,
-		Enabled:    row.Enabled,
+		Enabled:    &enabled,
 		LastStatus: row.LastStatus,
 		HasSpec:    len(row.Spec) > 0,
 		Source:     scheduleSourceFromSpec(row.Spec),
@@ -93,6 +100,9 @@ func toScheduleDTO(row ScheduleRow) scheduleDTO {
 	}
 	if !row.LastRunAt.IsZero() {
 		out.LastRunAt = row.LastRunAt.UTC().Format(time.RFC3339)
+	}
+	if !row.SupersededAt.IsZero() {
+		out.SupersededAt = row.SupersededAt.UTC().Format(time.RFC3339)
 	}
 	return out
 }
@@ -195,18 +205,25 @@ func (a *App) putSchedule(w http.ResponseWriter, req *http.Request, orgID int64)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// A baseline row belongs to the worker, which derives it from the metrics it
-	// sees: an admin may retime an existing one, never invent one. A row created
-	// here would be claimed by the fleet forever for a hash with no series, and
-	// nothing on the page could remove it.
-	if body.Scope == scopeBaseline {
-		if _, ok, err := a.sched.Row(req.Context(), orgID, scopeBaseline, body.Key); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		} else if !ok {
-			http.Error(w, errBaselineUnknown.Error(), http.StatusNotFound)
-			return
-		}
+	// One row read answers two questions: whether a baseline row exists (an admin
+	// may retime one, never invent one — a row created here would be claimed by the
+	// fleet forever for a hash with no series, and nothing on the page could remove
+	// it) and what to do with an absent `enabled`. Absent means "leave it alone":
+	// defaulting to false turned a cron edit into a silent switch-off.
+	existing, ok, err := a.sched.Row(req.Context(), orgID, body.Scope, body.Key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if body.Scope == scopeBaseline && !ok {
+		http.Error(w, errBaselineUnknown.Error(), http.StatusNotFound)
+		return
+	}
+	enabled := true
+	if body.Enabled != nil {
+		enabled = *body.Enabled
+	} else if ok {
+		enabled = existing.Enabled
 	}
 	// No spec: an admin edit changes when a panel retrains, never how. Upsert
 	// keeps the stored spec when the incoming one is empty.
@@ -215,7 +232,7 @@ func (a *App) putSchedule(w http.ResponseWriter, req *http.Request, orgID int64)
 		Key:       body.Key,
 		Cron:      body.Cron,
 		Timezone:  timezone,
-		Enabled:   body.Enabled,
+		Enabled:   enabled,
 		NextRunAt: next,
 	})
 	if err != nil {
@@ -238,7 +255,7 @@ func (a *App) putSchedule(w http.ResponseWriter, req *http.Request, orgID int64)
 		Key:       body.Key,
 		Cron:      body.Cron,
 		Timezone:  timezone,
-		Enabled:   body.Enabled,
+		Enabled:   &enabled,
 		NextRunAt: next.UTC().Format(time.RFC3339),
 	})
 }

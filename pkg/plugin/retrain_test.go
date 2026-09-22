@@ -233,6 +233,67 @@ func testSpecRaw(t *testing.T, mutate func(*retrainSpec)) []byte {
 	return raw
 }
 
+// TestParseRetrainSpecQueries pins what "this row has queries" means. A spec that
+// stores `"queries":null` passes a bare length check — "null" is four bytes of
+// json.RawMessage — and is then claimed and posted to /api/ds/query, which answers
+// 400 query.noQueries on every cron slot forever, so both null and [] are refused.
+func TestParseRetrainSpecQueries(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantErr string
+	}{
+		{name: "null queries", raw: `{"queries":null,"model":"baseline"}`, wantErr: "forecast: schedule spec has no queries"},
+		{name: "empty array", raw: `{"queries":[],"model":"baseline"}`, wantErr: "forecast: schedule spec has no queries"},
+		{name: "missing key", raw: `{"model":"baseline"}`, wantErr: "forecast: schedule spec has no queries"},
+		{name: "queries is an object", raw: `{"queries":{"refId":"A"}}`, wantErr: "forecast: schedule spec has no queries"},
+		{name: "queries is a string", raw: `{"queries":"A"}`, wantErr: "forecast: schedule spec has no queries"},
+		{name: "malformed", raw: `{"queries":`, wantErr: "forecast: schedule spec:"},
+		{name: "no spec", raw: ``, wantErr: "forecast: schedule row has no spec"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseRetrainSpec([]byte(tc.raw)); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err=%v want %q", err, tc.wantErr)
+			}
+		})
+	}
+	t.Run("a non-empty array parses", func(t *testing.T) {
+		spec, err := parseRetrainSpec([]byte(`{"queries":[{"refId":"A"}],"model":"baseline"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if spec.Model != "baseline" || len(spec.Queries) == 0 {
+			t.Fatalf("spec=%+v", spec)
+		}
+	})
+	// The writer's half of the same contract: an absent list is stored as [] rather
+	// than null, so the claim predicate can see it.
+	t.Run("an absent list is written as the empty array", func(t *testing.T) {
+		if got := string(queriesOrEmpty(nil)); got != "[]" {
+			t.Fatalf("nil: %s", got)
+		}
+		if got := string(queriesOrEmpty(json.RawMessage(`null`))); got != "[]" {
+			t.Fatalf("null: %s", got)
+		}
+		kept := json.RawMessage(`[{"refId":"A"}]`)
+		if got := string(queriesOrEmpty(kept)); got != string(kept) {
+			t.Fatalf("listed queries were rewritten: %s", got)
+		}
+	})
+}
+
+// A claim must outlive the work it covers. A tick retrains up to retrainClaimBatch
+// rows sequentially and each costs at most frameFetchTimeout for its fetch, plus the
+// /api/org round trip before the claim. A shorter default lease would let a second
+// replica claim a row that is still being retrained, and both processes would store
+// a snapshot for it.
+func TestDefaultLeaseOutlivesAClaimBatch(t *testing.T) {
+	worst := retrainClaimBatch*frameFetchTimeout + frameFetchTimeout
+	if defaultRetrainLease <= worst {
+		t.Fatalf("defaultRetrainLease=%s does not exceed the worst-case batch plus /api/org time %s", defaultRetrainLease, worst)
+	}
+}
+
 func TestFetchFrames(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	reply := dsReply{Results: map[string]*dsReplyResult{
@@ -1131,6 +1192,58 @@ func TestRunSchedulerStopsOnAuthRefusal(t *testing.T) {
 				t.Fatalf("fetch attempts=%d want %d", tc.poster.calls, tc.wantCalls)
 			}
 		})
+	}
+}
+
+// A stored spec is data a browser wrote once and the scheduler replays with nobody
+// watching, so a window that would emit too many points has to be refused before
+// the fit: a corrupted or hand-edited row must not be able to OOM the ticker. The
+// guard runs after the fetch (the grid comes from the fetched series), so the fetch
+// still happens — but no snapshot and no points are produced.
+func TestRetrainWindowCapRefusesTheFit(t *testing.T) {
+	const key = "9999999999999999999999999999999999999999999999999999999999999999"
+	ctx := context.Background()
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	times := []time.Time{t0, t0.Add(time.Minute), t0.Add(2 * time.Minute)}
+	reply, err := json.Marshal(dsReply{Results: map[string]*dsReplyResult{
+		"A": {Status: 200, Frames: data.Frames{data.NewFrame("A",
+			data.NewField("Time", nil, times),
+			data.NewField("series-1", nil, []float64{1, 2, 3}),
+		)}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(reply)
+	}))
+	defer server.Close()
+
+	last := times[len(times)-1].UnixMilli()
+	step := time.Minute.Milliseconds()
+	spec := testSpecRaw(t, func(s *retrainSpec) {
+		s.From = last
+		s.To = last + (maxForecastPoints+1)*step
+	})
+	store, sched := newMemoryStore(), newMemSchedules()
+	app := &App{
+		store: store, sched: sched, poster: &grafanaPoster{url: server.URL, client: server.Client()},
+		retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, Tick: time.Second},
+		limit:   newWorkLimiter(1),
+	}
+	row := ScheduleRow{OrgID: 7, Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Spec: spec}
+
+	if err := app.trainFromSpec(ctx, row); !errors.Is(err, errWindowTooManyPoints) {
+		t.Fatalf("err=%v", err)
+	}
+	app.retrainOne(ctx, retrainOwner(), row)
+	finishes := sched.finished()
+	if len(finishes) != 1 || !strings.Contains(finishes[0].Status, errWindowTooManyPoints.Error()) {
+		t.Fatalf("finishes=%+v", finishes)
+	}
+	if _, ok, err := store.Get(ctx, 7, key); err != nil || ok {
+		t.Fatalf("snapshot published for an over-cap window: ok=%v err=%v", ok, err)
 	}
 }
 

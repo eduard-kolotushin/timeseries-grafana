@@ -292,6 +292,87 @@ func TestQueryData(t *testing.T) {
 	})
 }
 
+// TestQueryDataCaps pins the two answers the alerting datasource owes a caller
+// whose query cannot be served: an absent cacheKey is the miss the overlay also
+// gets (the query editor writes the key asynchronously, so a just-added row arrives
+// without one), and a window past the point cap is a 413-class reason rather than a
+// 500 or a multi-gigabyte allocation.
+func TestQueryDataCaps(t *testing.T) {
+	ctx := context.Background()
+	const orgID int64 = 1
+	key := strings.Repeat("3e", 32)
+	// A 1 ms grid so a window at the cap is arithmetic, not a gigabyte.
+	fit := ForecastRequest{Times: []int64{0, 1}, Values: []nullableFloat{1, 2}, Model: "naive"}
+
+	query := func(t *testing.T, store SnapshotStore, jsonBody []byte, from, to time.Time) backend.DataResponse {
+		t.Helper()
+		ds, err := newDatasource(ctx, backend.DataSourceInstanceSettings{}, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := ds.QueryData(ctx, &backend.QueryDataRequest{
+			PluginContext: backend.PluginContext{OrgID: orgID},
+			Queries: []backend.DataQuery{{
+				RefID:     "B",
+				JSON:      jsonBody,
+				TimeRange: backend.TimeRange{From: from, To: to},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Responses["B"]
+	}
+
+	t.Run("an absent cacheKey is the miss the overlay gets", func(t *testing.T) {
+		store := newMemoryStore()
+		seedSnapshot(t, store, orgID, key, fit)
+		got := query(t, store, queryJSON(t, "forecast", "", 0),
+			time.UnixMilli(2).UTC(), time.UnixMilli(2).UTC())
+		if got.Error == nil || got.Error.Error() != msgNeedTrain {
+			t.Fatalf("error=%v want %q", got.Error, msgNeedTrain)
+		}
+		if len(got.Frames) != 0 {
+			t.Fatalf("frames=%d", len(got.Frames))
+		}
+	})
+
+	t.Run("a malformed cacheKey is still a validation error", func(t *testing.T) {
+		store := newMemoryStore()
+		got := query(t, store, queryJSON(t, "forecast", "not-a-key", 0),
+			time.UnixMilli(2).UTC(), time.UnixMilli(2).UTC())
+		if got.Error == nil || got.Error.Error() != errInvalidCacheKey.Error() {
+			t.Fatalf("error=%v", got.Error)
+		}
+	})
+
+	t.Run("a window over the cap is refused", func(t *testing.T) {
+		store := newMemoryStore()
+		seedSnapshot(t, store, orgID, key, fit)
+		got := query(t, store, queryJSON(t, "forecast", key, 0),
+			time.UnixMilli(2).UTC(), time.UnixMilli(1+maxForecastPoints+1).UTC())
+		if got.Error == nil || got.Error.Error() != errWindowTooManyPoints.Error() {
+			t.Fatalf("error=%v", got.Error)
+		}
+		if got.Status != backend.Status(413) {
+			t.Fatalf("status=%v", got.Status)
+		}
+	})
+
+	t.Run("a window whose last point is at the cap is served", func(t *testing.T) {
+		store := newMemoryStore()
+		seedSnapshot(t, store, orgID, key, fit)
+		at := time.UnixMilli(1 + maxForecastPoints).UTC()
+		got := query(t, store, queryJSON(t, "forecast", key, 0), at, at)
+		if got.Error != nil {
+			t.Fatalf("error=%v", got.Error)
+		}
+		if len(got.Frames) != 1 || got.Frames[0].Fields[1].Len() != 1 {
+			t.Fatalf("frames=%+v", got.Frames)
+		}
+	})
+}
+
 func assertFrameValues(t *testing.T, dr backend.DataResponse, want []nullableFloat) {
 	t.Helper()
 	if dr.Error != nil {

@@ -156,6 +156,14 @@ func TestCallResource(t *testing.T) {
 			expStatus: http.StatusOK,
 		},
 		{
+			// docs/ARCHITECTURE.md documents GET /ping, and nothing in the plugin or
+			// the datasource health path sends it another method.
+			name:      "put ping 405",
+			method:    http.MethodPut,
+			path:      "ping",
+			expStatus: http.StatusMethodNotAllowed,
+		},
+		{
 			name:      "get forecast 405",
 			method:    http.MethodGet,
 			path:      "forecast",
@@ -502,15 +510,14 @@ func TestForecastLoadLimits(t *testing.T) {
 	}
 
 	t.Run("train too long 413", func(t *testing.T) {
-		prev := maxTrainPoints
-		maxTrainPoints = 2
-		t.Cleanup(func() { maxTrainPoints = prev })
+		// One point over the cap, with no package state touched: the request, the
+		// decode and the 413 are the real path.
 		body, _ := json.Marshal(ForecastRequest{
-			Times:  []int64{0, 1000, 2000},
-			Values: []nullableFloat{1, 2, 3},
+			Times:  make([]int64, defaultMaxTrainPoints+1),
+			Values: make([]nullableFloat, defaultMaxTrainPoints+1),
 			Model:  "naive",
-			From:   3000,
-			To:     3000,
+			From:   1,
+			To:     1,
 		})
 		if status := call(body); status != http.StatusRequestEntityTooLarge {
 			t.Fatalf("status=%d", status)
@@ -599,6 +606,376 @@ func TestForecastLoadLimits(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+// TestForecastCapBoundaries pins the two bounds that keep one request from killing
+// the process. The body pre-flight refuses a request no legal training series could
+// describe before it is decoded — decoding expands a byte into an 8-byte slice
+// element plus growth copies — and the window cap refuses a [from, to] whose point
+// count is too large before any fit, since a far `to` otherwise makes
+// ForecastRange allocate billions of points with no error surfaced.
+func TestForecastCapBoundaries(t *testing.T) {
+	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, newMemoryStore(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	call := func(t *testing.T, body []byte) (int, []byte) {
+		t.Helper()
+		var r mockCallResourceResponseSender
+		if err := app.CallResource(context.Background(), &backend.CallResourceRequest{
+			PluginContext: backend.PluginContext{OrgID: 1},
+			Method:        http.MethodPost,
+			Path:          "forecast",
+			Body:          body,
+		}, &r); err != nil {
+			t.Fatal(err)
+		}
+		return r.response.Status, r.response.Body
+	}
+	// padded is a legal request whose body is exactly n bytes: json.Decoder ignores
+	// the unknown key, so only the length exercises the pre-flight.
+	prefix, suffix := `{"model":"naive","times":[0,1],"values":[1,2],"from":2,"to":2,"pad":"`, `"}`
+	padded := func(n int) []byte {
+		body := prefix + strings.Repeat("x", n-len(prefix)-len(suffix)) + suffix
+		if len(body) != n {
+			t.Fatalf("padded body is %d bytes, want %d", len(body), n)
+		}
+		return []byte(body)
+	}
+
+	t.Run("a legal maxTrainPoints series is accepted", func(t *testing.T) {
+		in := ForecastRequest{
+			Times:  make([]int64, defaultMaxTrainPoints),
+			Values: make([]nullableFloat, defaultMaxTrainPoints),
+			Model:  "naive",
+			From:   defaultMaxTrainPoints,
+			To:     defaultMaxTrainPoints,
+		}
+		for i := range in.Times {
+			in.Times[i] = int64(i)
+			in.Values[i] = 1
+		}
+		body, _ := json.Marshal(in)
+		status, raw := call(t, body)
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+
+	t.Run("a series one point over the cap is refused", func(t *testing.T) {
+		body, _ := json.Marshal(ForecastRequest{
+			Times:  make([]int64, defaultMaxTrainPoints+1),
+			Values: make([]nullableFloat, defaultMaxTrainPoints+1),
+			Model:  "naive",
+			From:   defaultMaxTrainPoints,
+			To:     defaultMaxTrainPoints,
+		})
+		status, raw := call(t, body)
+		if status != http.StatusRequestEntityTooLarge || !strings.Contains(string(raw), errTrainTooLong.Error()) {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+
+	t.Run("a body at the per-point budget still decodes", func(t *testing.T) {
+		status, raw := call(t, padded(int(maxTrainBodyBytes())))
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+
+	t.Run("a body one byte over the per-point budget is refused before decode", func(t *testing.T) {
+		status, raw := call(t, padded(int(maxTrainBodyBytes())+1))
+		if status != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		// The pre-flight's own reason: the decoded path answers errTrainTooLong.
+		if !strings.Contains(string(raw), errTrainBodyTooLarge.Error()) {
+			t.Fatalf("body=%s", raw)
+		}
+	})
+
+	// The grid is the training series' own: its last timestamp and the interval
+	// before it. from == to == last + cap*step is the last grid point the cap allows.
+	t.Run("a window whose last point is exactly at the cap is accepted", func(t *testing.T) {
+		at := int64(1 + maxForecastPoints)
+		body, _ := json.Marshal(ForecastRequest{
+			Times: []int64{0, 1}, Values: []nullableFloat{1, 2},
+			Model: "naive", From: at, To: at,
+		})
+		status, raw := call(t, body)
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Values) != 1 || got.Times[0] != at {
+			t.Fatalf("got=%+v", got)
+		}
+	})
+
+	t.Run("a window one point over the cap is refused", func(t *testing.T) {
+		body, _ := json.Marshal(ForecastRequest{
+			Times: []int64{0, 1}, Values: []nullableFloat{1, 2},
+			Model: "naive", From: 2, To: 1 + maxForecastPoints + 1,
+		})
+		status, raw := call(t, body)
+		if status != http.StatusRequestEntityTooLarge || !strings.Contains(string(raw), errWindowTooManyPoints.Error()) {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+}
+
+// A cached load is bounded by the snapshot's own grid, so a far window is refused
+// before Restore even though the overlay sent no training points.
+func TestForecastCachedWindowCap(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	key := strings.Repeat("7f", 32)
+	seedSnapshot(t, store, 1, key, ForecastRequest{
+		Times: []int64{0, 1}, Values: []nullableFloat{1, 2}, Model: "naive",
+	})
+	app, err := newApp(ctx, backend.AppInstanceSettings{}, store, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	probe := func(from, to int64) (int, []byte) {
+		t.Helper()
+		body, _ := json.Marshal(ForecastRequest{Model: "naive", CacheKey: key, From: from, To: to})
+		var r mockCallResourceResponseSender
+		if err := app.CallResource(ctx, &backend.CallResourceRequest{
+			PluginContext: backend.PluginContext{OrgID: 1},
+			Method:        http.MethodPost,
+			Path:          "forecast",
+			Body:          body,
+		}, &r); err != nil {
+			t.Fatal(err)
+		}
+		return r.response.Status, r.response.Body
+	}
+
+	if status, raw := probe(2, 1+maxForecastPoints+1); status != http.StatusRequestEntityTooLarge ||
+		!strings.Contains(string(raw), errWindowTooManyPoints.Error()) {
+		t.Fatalf("over the cap: status=%d body=%s", status, raw)
+	}
+	at := int64(1 + maxForecastPoints)
+	status, raw := probe(at, at)
+	if status != http.StatusOK {
+		t.Fatalf("at the cap: status=%d body=%s", status, raw)
+	}
+	var got ForecastResponse
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Cached || len(got.Values) != 1 {
+		t.Fatalf("got=%+v", got)
+	}
+}
+
+// A fit whose arithmetic overflows to ±Inf is a 200 with nulls, not a 500:
+// json.Marshal refuses a non-finite float, and null is what the library's own
+// snapshot encoder writes for the same value.
+func TestForecastNonFiniteValueIsNull(t *testing.T) {
+	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, newMemoryStore(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+	body, _ := json.Marshal(ForecastRequest{
+		Times: []int64{0, 1000}, Values: []nullableFloat{1e308, 1e308},
+		Model: "mean", From: 2000, To: 2000,
+	})
+	var r mockCallResourceResponseSender
+	if err := app.CallResource(context.Background(), &backend.CallResourceRequest{
+		PluginContext: backend.PluginContext{OrgID: 1},
+		Method:        http.MethodPost,
+		Path:          "forecast",
+		Body:          body,
+	}, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.response.Status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", r.response.Status, r.response.Body)
+	}
+	var got struct {
+		Values []*float64 `json:"values"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(r.response.Body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Values) != 1 {
+		t.Fatalf("values=%v", got.Values)
+	}
+	for i, v := range got.Values {
+		if v != nil {
+			t.Fatalf("values[%d]=%v, want null", i, *v)
+		}
+	}
+}
+
+// TestForecastSupersedesOlderPanelRows pins the schedule rewrite that retires a
+// panel's old cache key: a panel that changes its query hashes a new key, and the
+// row the old key trained would otherwise be claimed and refit forever for a series
+// the panel no longer shows. Only a fit carrying the panel's own identity may
+// retire another row.
+func TestForecastSupersedesOlderPanelRows(t *testing.T) {
+	clearRetrainEnv(t)
+	clearStoreEnv(t)
+	// No unattended ticker: this test writes and reads the queue itself.
+	t.Setenv("FORECAST_RETRAIN_ENABLED", "false")
+	ctx := context.Background()
+	sched := newMemSchedules()
+	app, err := newApp(ctx, backend.AppInstanceSettings{}, newMemoryStore(), sched, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	keyA, keyB, keyC := strings.Repeat("a1", 32), strings.Repeat("b2", 32), strings.Repeat("c3", 32)
+	fit := func(t *testing.T, key string, src *TrainSource) {
+		t.Helper()
+		body, _ := json.Marshal(ForecastRequest{
+			Times:       []int64{0, 1000, 2000, 3000},
+			Values:      []nullableFloat{1, 2, 3, 4},
+			Model:       "naive",
+			From:        4000,
+			To:          5000,
+			CacheKey:    key,
+			TrainSource: src,
+		})
+		if status, raw := callRoute(t, app, adminCtx(1), http.MethodPost, "forecast", body); status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	}
+	src := func(panel int, dash string) *TrainSource {
+		return &TrainSource{
+			DatasourceUID: "ds-uid",
+			Queries:       json.RawMessage(`[{"refId":"A"}]`),
+			From:          1,
+			To:            2,
+			PanelID:       panel,
+			DashboardUID:  dash,
+		}
+	}
+	superseded := func(t *testing.T, key string) bool {
+		t.Helper()
+		row, ok, err := sched.Row(ctx, 1, scopePanel, key)
+		if err != nil || !ok {
+			t.Fatalf("row %s ok=%v err=%v", key, ok, err)
+		}
+		return !row.SupersededAt.IsZero()
+	}
+
+	fit(t, keyA, src(7, "dash-1"))
+	if superseded(t, keyA) {
+		t.Fatal("the first row of a panel is current")
+	}
+	// The panel's query changed: the new key is current and the old row is retired.
+	fit(t, keyB, src(7, "dash-1"))
+	if !superseded(t, keyA) {
+		t.Fatal("the panel's old key was not superseded")
+	}
+	if superseded(t, keyB) {
+		t.Fatal("the panel's new key must be current")
+	}
+	// Another panel on the same dashboard is a different panel: never touched.
+	fit(t, keyC, src(8, "dash-1"))
+	if !superseded(t, keyA) || superseded(t, keyB) {
+		t.Fatal("another panel's fit touched a foreign panel's rows")
+	}
+	// Selecting the old key again makes it current and retires the newer one.
+	fit(t, keyA, src(7, "dash-1"))
+	if superseded(t, keyA) {
+		t.Fatal("re-selecting a key must clear the flag")
+	}
+	if !superseded(t, keyB) {
+		t.Fatal("the replaced key was not retired")
+	}
+	// A fit without the panel's identity knows no panel and supersedes nothing.
+	fit(t, keyC, &TrainSource{DatasourceUID: "ds-uid", Queries: json.RawMessage(`[{"refId":"A"}]`), From: 1, To: 2})
+	if superseded(t, keyA) || !superseded(t, keyB) {
+		t.Fatal("a cacheKey-only fit superseded a row it knows nothing about")
+	}
+
+	// A retired row is history, not work: it is never claimed, while the panel's
+	// current key still is.
+	due := time.Now().Add(-time.Minute)
+	for _, key := range []string{keyA, keyB, keyC} {
+		row, ok, err := sched.Row(ctx, 1, scopePanel, key)
+		if err != nil || !ok {
+			t.Fatalf("row %s ok=%v err=%v", key, ok, err)
+		}
+		row.NextRunAt = due
+		if err := sched.Upsert(ctx, 1, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claimed, err := sched.Claim(ctx, 1, "test-owner", time.Minute, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, row := range claimed {
+		got[row.Key] = true
+	}
+	if !got[keyA] || got[keyB] {
+		t.Fatalf("claimed=%v, want only the current key %s", got, keyA)
+	}
+
+	// The Retrain schedules table reads the flag off the row.
+	status, raw := callRoute(t, app, adminCtx(1), http.MethodGet, "schedules", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", status, raw)
+	}
+	var rows []scheduleDTO
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	byKey := map[string]scheduleDTO{}
+	for _, row := range rows {
+		byKey[row.Key] = row
+	}
+	if byKey[keyA].SupersededAt != "" {
+		t.Fatalf("current row advertises a supersede time: %+v", byKey[keyA])
+	}
+	if byKey[keyB].SupersededAt == "" {
+		t.Fatalf("retired row has no supersededAt: %+v", byKey[keyB])
+	}
+}
+
+// A rejected window must be rejected before any work: no fit, no snapshot, no
+// schedule row. The overlay's train-and-cache path is the one that writes both.
+func TestForecastWindowCapWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	sched := newMemSchedules()
+	app, err := newApp(ctx, backend.AppInstanceSettings{}, store, sched, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	key := strings.Repeat("5a", 32)
+	body, _ := json.Marshal(ForecastRequest{
+		Times: []int64{0, 1}, Values: []nullableFloat{1, 2},
+		Model: "naive", From: 2, To: 1 + maxForecastPoints + 1, CacheKey: key,
+		TrainSource: &TrainSource{DatasourceUID: "ds", Queries: json.RawMessage(`[{"refId":"A"}]`), From: 1, To: 2},
+	})
+	status, raw := callRoute(t, app, adminCtx(1), http.MethodPost, "forecast", body)
+	if status != http.StatusRequestEntityTooLarge || !strings.Contains(string(raw), errWindowTooManyPoints.Error()) {
+		t.Fatalf("status=%d body=%s", status, raw)
+	}
+	if _, ok, err := store.Get(ctx, 1, key); err != nil || ok {
+		t.Fatalf("a rejected window stored a snapshot: ok=%v err=%v", ok, err)
+	}
+	if rows, err := sched.List(ctx, 1); err != nil || len(rows) != 0 {
+		t.Fatalf("a rejected window scheduled a retrain: rows=%+v err=%v", rows, err)
+	}
 }
 
 // TestForecastScheduleDue pins the probe contract: a stored snapshot answers the

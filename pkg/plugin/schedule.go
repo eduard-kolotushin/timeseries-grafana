@@ -41,6 +41,10 @@ type ScheduleRow struct {
 	NextRunAt  time.Time
 	LastRunAt  time.Time
 	LastStatus string
+	// SupersededAt is when this row stopped being the panel's current one: the
+	// panel trained a different cache key, so this row is left in the list for its
+	// history but is never claimed again. Zero means it is still current.
+	SupersededAt time.Time
 }
 
 // ScheduleStore is the forecast.retrain table as the plugin uses it. Claim and
@@ -61,6 +65,12 @@ type ScheduleStore interface {
 	// Identify merges a panel's identity into an existing row's spec. It never
 	// creates a row: only a fit knows the query objects a claimable row needs.
 	Identify(ctx context.Context, orgID int64, key string, prov PanelProvenance) error
+	// Supersede retires the org's other panel rows that carry the same
+	// dashboardUid+panelId provenance, and clears the flag on keepKey. It is how a
+	// panel that changed its query stops the scheduler refitting the series its old
+	// cache key trained. A row without that provenance (a cacheKey-only fit stores
+	// none) is never touched, and neither is another panel's.
+	Supersede(ctx context.Context, orgID int64, dashboardUID string, panelID int, keepKey string) error
 }
 
 // identifySQL merges the identity keys into whatever the spec already holds. Two
@@ -109,17 +119,28 @@ func provenanceJSON(prov PanelProvenance) ([]byte, error) {
 }
 
 // panelClaimSQL is the plugin half of the claim protocol. The predicate is
-// deliberately narrower than the worker's (scope='panel' AND spec IS NOT NULL AND
-// this org): the plugin must never claim a row it cannot fetch training data for,
-// and the worker must never claim a panel row. The org restriction is not
-// cosmetic — Grafana resolves a datasourceUid inside the requesting org, and the
-// scheduler holds one credential, so a row of another org would be fetched as the
-// wrong org's series (or fail) and stored as this org's snapshot. FOR UPDATE SKIP
-// LOCKED makes concurrent Grafana replicas safe without a coordinator.
+// deliberately narrower than the worker's (scope='panel' AND a spec this process
+// can actually fetch AND this org AND not superseded): the plugin must never claim
+// a row it cannot fetch training data for, and the worker must never claim a panel
+// row. `spec IS NOT NULL` alone is not enough — a spec whose queries is null or []
+// is claimed and then posted to /api/ds/query, which answers 400 query.noQueries
+// on every cron slot forever — so the claim requires a non-empty JSON array (spec
+// is jsonb in this schema). The emptiness test is `<> '[]'`, not jsonb_array_length:
+// WHERE clauses are not evaluated left to right, so a scalar `"queries":null` can
+// reach jsonb_array_length and abort the whole claim with SQLSTATE 22023.
+// A superseded row is the panel's old cache key: it is kept for its history but
+// must never be refit. The org restriction is not cosmetic — Grafana resolves a
+// datasourceUid inside the requesting org, and the scheduler holds one credential,
+// so a row of another org would be fetched as the wrong org's series (or fail) and
+// stored as this org's snapshot. FOR UPDATE SKIP LOCKED makes concurrent Grafana
+// replicas safe without a coordinator.
 const panelClaimSQL = `
 WITH due AS (
   SELECT scope, org_id, key FROM forecast.retrain
   WHERE scope = 'panel' AND org_id = $4 AND enabled AND spec IS NOT NULL
+    AND jsonb_typeof(spec->'queries') = 'array'
+    AND spec->'queries' <> '[]'::jsonb
+    AND superseded_at IS NULL
     AND next_run_at IS NOT NULL AND next_run_at <= now()
     AND (claimed_until IS NULL OR claimed_until < now())
   ORDER BY next_run_at
@@ -132,6 +153,32 @@ FROM due
 WHERE r.scope = due.scope AND r.org_id = due.org_id AND r.key = due.key
 RETURNING r.scope, r.key, r.org_id, r.cron, r.timezone, r.spec
 `
+
+// supersedeSQL retires a panel's older rows. The identity is read out of the
+// stored spec with jsonb ->>, so only rows a browser wrote for this exact panel
+// are touched: a cacheKey-only fit stores no provenance and can therefore never
+// supersede a row it knows nothing about, and neither can another panel's fit.
+// keepKey's own flag is cleared (the panel is showing that key again) and the
+// others are stamped once — COALESCE, not now(), so re-running this on every fit
+// does not keep rewriting rows that are already superseded. The CASE is what makes
+// the statement idempotent: it updates only the rows whose value would change.
+const supersedeSQL = `
+UPDATE forecast.retrain
+SET superseded_at = CASE WHEN key = $4 THEN NULL ELSE COALESCE(superseded_at, now()) END,
+    updated_at = now()
+WHERE scope = 'panel' AND org_id = $1
+  AND spec->>'dashboardUid' = $2 AND spec->>'panelId' = $3
+  AND CASE WHEN key = $4 THEN superseded_at IS NOT NULL ELSE superseded_at IS NULL END
+`
+
+// Supersede implements supersedeSQL.
+func (s *postgresStore) Supersede(ctx context.Context, orgID int64, dashboardUID string, panelID int, keepKey string) error {
+	if err := s.ensureSchedules(ctx); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, supersedeSQL, orgID, dashboardUID, strconv.Itoa(panelID), keepKey)
+	return err
+}
 
 // intervalSeconds renders a duration as a Postgres interval literal.
 // time.Duration.String() is not one ("5m0s" is a syntax error), so the lease
@@ -152,7 +199,7 @@ func (s *postgresStore) List(ctx context.Context, orgID int64) ([]ScheduleRow, e
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
-SELECT scope, key, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status
+SELECT scope, key, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status, superseded_at
 FROM forecast.retrain WHERE scope = 'baseline' OR org_id = $1 ORDER BY scope, key
 `, orgID)
 	if err != nil {
@@ -162,9 +209,9 @@ FROM forecast.retrain WHERE scope = 'baseline' OR org_id = $1 ORDER BY scope, ke
 	out := make([]ScheduleRow, 0, 16)
 	for rows.Next() {
 		row := ScheduleRow{OrgID: orgID}
-		var next, last *time.Time
+		var next, last, superseded *time.Time
 		var status *string
-		if err := rows.Scan(&row.Scope, &row.Key, &row.Cron, &row.Timezone, &row.Enabled, &row.Spec, &next, &last, &status); err != nil {
+		if err := rows.Scan(&row.Scope, &row.Key, &row.Cron, &row.Timezone, &row.Enabled, &row.Spec, &next, &last, &status, &superseded); err != nil {
 			return nil, err
 		}
 		if next != nil {
@@ -175,6 +222,9 @@ FROM forecast.retrain WHERE scope = 'baseline' OR org_id = $1 ORDER BY scope, ke
 		}
 		if status != nil {
 			row.LastStatus = *status
+		}
+		if superseded != nil {
+			row.SupersededAt = superseded.UTC()
 		}
 		out = append(out, row)
 	}
@@ -188,6 +238,10 @@ FROM forecast.retrain WHERE scope = 'baseline' OR org_id = $1 ORDER BY scope, ke
 //
 // Only an existing row is updated: org_id is part of the key and is never
 // re-homed, so this cannot move a row between orgs either.
+//
+// superseded_at is never written here: a fresh insert leaves it NULL (the row is
+// the panel's current one) and an update keeps whatever Supersede set, so a
+// browser retrain of a row cannot silently resurrect one the panel retired.
 func (s *postgresStore) Upsert(ctx context.Context, orgID int64, row ScheduleRow) error {
 	if err := s.ensureSchedules(ctx); err != nil {
 		return err
@@ -330,6 +384,10 @@ func (s errScheduleStore) Finish(context.Context, string, int64, string, string,
 }
 
 func (s errScheduleStore) Identify(context.Context, int64, string, PanelProvenance) error {
+	return s.err
+}
+
+func (s errScheduleStore) Supersede(context.Context, int64, string, int, string) error {
 	return s.err
 }
 

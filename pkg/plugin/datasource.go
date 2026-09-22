@@ -172,7 +172,14 @@ func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID in
 	if kind != queryKindForecast && kind != queryKindLower && kind != queryKindUpper {
 		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("%v: %s", errUnknownKind, kind))
 	}
-	if in.CacheKey == "" || !cacheKeyPattern.MatchString(in.CacheKey) {
+	// The query editor writes cacheKey asynchronously, so a just-added row arrives
+	// with no key at all. That is not a validation error: answer it exactly like a
+	// miss, so the panel shows the same "train on the overlay first" reason. A key
+	// that is present but malformed is still a validation error.
+	if in.CacheKey == "" {
+		return backend.ErrDataResponseWithSource(backend.StatusBadRequest, backend.ErrorSourcePlugin, msgNeedTrain)
+	}
+	if !cacheKeyPattern.MatchString(in.CacheKey) {
 		return backend.ErrDataResponse(backend.StatusBadRequest, errInvalidCacheKey.Error())
 	}
 	if store == nil {
@@ -193,6 +200,11 @@ func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID in
 	}
 	from := q.TimeRange.From.UTC()
 	to := q.TimeRange.To.UTC()
+	// The snapshot carries the fitted grid, so a window that would emit too many
+	// points is refused here — as a 413-class reason, not a 500 — before Restore.
+	if err := checkForecastWindow(snap.Last, snap.Step/int64(time.Millisecond), from.UnixMilli(), to.UnixMilli()); err != nil {
+		return backend.ErrDataResponse(dataStatusFor(err), err.Error())
+	}
 	resp, err := runLimited(ctx, d.computeLimit(), func() (backend.DataResponse, error) {
 		fitted, err := forecast.Restore(snap)
 		if err != nil {

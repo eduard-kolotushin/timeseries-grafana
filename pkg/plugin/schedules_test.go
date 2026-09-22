@@ -72,7 +72,8 @@ func (m *memSchedules) List(_ context.Context, orgID int64) ([]ScheduleRow, erro
 // (scope, org_id, key), so another org's row with the same cache key is a different
 // row and never an update of this one. An absent spec and the run history survive,
 // everything else is replaced. Baseline rows are stored at org 0 wherever they are
-// written from, as the store's own forcing does.
+// written from, as the store's own forcing does. superseded_at is never written
+// here either: an update keeps it, so a retrain cannot resurrect a retired row.
 func (m *memSchedules) Upsert(_ context.Context, orgID int64, row ScheduleRow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -85,9 +86,43 @@ func (m *memSchedules) Upsert(_ context.Context, orgID int64, row ScheduleRow) e
 			row.Spec = old.Spec
 		}
 		row.LastRunAt, row.LastStatus = old.LastRunAt, old.LastStatus
+		row.SupersededAt = old.SupersededAt
 	}
 	row.OrgID = orgID
 	m.rows[k] = row
+	return nil
+}
+
+// Supersede mirrors supersedeSQL: the rows a panel's other cache keys trained are
+// retired, keepKey's own flag is cleared, and rows without that provenance (or
+// another panel's) are untouched.
+func (m *memSchedules) Supersede(_ context.Context, orgID int64, dashboardUID string, panelID int, keepKey string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, row := range m.rows {
+		if row.Scope != scopePanel || row.OrgID != orgID {
+			continue
+		}
+		var spec struct {
+			DashboardUID string `json:"dashboardUid"`
+			PanelID      int    `json:"panelId"`
+		}
+		if err := json.Unmarshal(row.Spec, &spec); err != nil {
+			continue
+		}
+		if spec.DashboardUID != dashboardUID || spec.PanelID != panelID {
+			continue
+		}
+		switch {
+		case row.Key == keepKey && !row.SupersededAt.IsZero():
+			row.SupersededAt = time.Time{}
+		case row.Key != keepKey && row.SupersededAt.IsZero():
+			row.SupersededAt = time.Now()
+		default:
+			continue
+		}
+		m.rows[k] = row
+	}
 	return nil
 }
 
@@ -166,15 +201,33 @@ func (m *memSchedules) Due(_ context.Context, orgID int64, key string, now time.
 	return ok && row.Enabled && !row.NextRunAt.IsZero() && !row.NextRunAt.After(now), nil
 }
 
-// Claim mirrors panelClaimSQL: panel rows of this org only, enabled, with a spec,
-// due, and not leased by anyone else.
+// specHasQueries is the in-memory twin of panelClaimSQL's jsonb predicates: a
+// claimable row's spec must carry a non-empty JSON array of queries.
+func specHasQueries(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var spec struct {
+		Queries json.RawMessage `json:"queries"`
+	}
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return false
+	}
+	return hasQueries(spec.Queries)
+}
+
+// Claim mirrors panelClaimSQL: panel rows of this org only, enabled, with a
+// non-empty query array, not superseded, due, and not leased by anyone else.
 func (m *memSchedules) Claim(_ context.Context, orgID int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
 	due := make([]ScheduleRow, 0, limit)
 	for _, row := range m.rows {
-		if row.OrgID != orgID || row.Scope != scopePanel || !row.Enabled || len(row.Spec) == 0 {
+		if row.OrgID != orgID || row.Scope != scopePanel || !row.Enabled || !specHasQueries(row.Spec) {
+			continue
+		}
+		if !row.SupersededAt.IsZero() {
 			continue
 		}
 		if row.NextRunAt.IsZero() || row.NextRunAt.After(now) {
@@ -334,7 +387,7 @@ func TestScheduleUpsertListRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Cron != "*/7 * * * *" || got.Timezone != "Europe/Moscow" || !got.Enabled {
+	if got.Cron != "*/7 * * * *" || got.Timezone != "Europe/Moscow" || got.Enabled == nil || !*got.Enabled {
 		t.Fatalf("put dto=%+v", got)
 	}
 	if got.NextRunAt == "" {
@@ -509,6 +562,65 @@ func TestScheduleUpsertKeepsExistingSpec(t *testing.T) {
 	}
 	if rows[0].Cron != "*/9 * * * *" || rows[0].Enabled {
 		t.Fatalf("cron/enabled not applied: %+v", rows[0])
+	}
+}
+
+// TestSchedulePutEnabledDefaults pins what an absent `enabled` means: the stored
+// value on an update, and true on an insert. A plain bool field wrote false, so a
+// client that only edited the cron silently switched a running schedule off.
+func TestSchedulePutEnabledDefaults(t *testing.T) {
+	ctx := context.Background()
+	sched := newMemSchedules()
+	app := schedulesApp(t, sched)
+	key := strings.Repeat("4d", 32)
+
+	// Insert without `enabled`: a new schedule is on.
+	status, body := callRoute(t, app, adminCtx(1), http.MethodPut, "schedules",
+		[]byte(`{"scope":"panel","key":"`+key+`","cron":"0 3 * * *","timezone":"UTC"}`))
+	if status != http.StatusOK {
+		t.Fatalf("insert status=%d body=%s", status, body)
+	}
+	var dto scheduleDTO
+	if err := json.Unmarshal(body, &dto); err != nil {
+		t.Fatal(err)
+	}
+	if dto.Enabled == nil || !*dto.Enabled {
+		t.Fatalf("insert dto=%+v", dto)
+	}
+	row, ok, err := sched.Row(ctx, 1, scopePanel, key)
+	if err != nil || !ok || !row.Enabled {
+		t.Fatalf("insert row ok=%v err=%v row=%+v", ok, err, row)
+	}
+
+	// A schedule an admin turned off stays off when the next edit leaves the field
+	// out; the cron still changes.
+	if err := sched.Upsert(ctx, 1, ScheduleRow{
+		Scope: scopePanel, Key: key, Cron: "0 3 * * *", Timezone: "UTC",
+		Enabled: false, Spec: json.RawMessage(`{"queries":[{"refId":"A"}]}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body = callRoute(t, app, adminCtx(1), http.MethodPut, "schedules",
+		[]byte(`{"scope":"panel","key":"`+key+`","cron":"*/9 * * * *","timezone":"UTC"}`))
+	if status != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", status, body)
+	}
+	row, _, err = sched.Row(ctx, 1, scopePanel, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Enabled || row.Cron != "*/9 * * * *" {
+		t.Fatalf("an absent enabled rewrote the row: %+v", row)
+	}
+
+	// An explicit value is still honoured.
+	status, body = callRoute(t, app, adminCtx(1), http.MethodPut, "schedules",
+		[]byte(`{"scope":"panel","key":"`+key+`","cron":"*/9 * * * *","timezone":"UTC","enabled":true}`))
+	if status != http.StatusOK {
+		t.Fatalf("explicit status=%d body=%s", status, body)
+	}
+	if row, _, err = sched.Row(ctx, 1, scopePanel, key); err != nil || !row.Enabled {
+		t.Fatalf("explicit enabled was ignored: err=%v row=%+v", err, row)
 	}
 }
 

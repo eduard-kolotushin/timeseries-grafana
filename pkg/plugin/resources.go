@@ -14,7 +14,14 @@ func recoverHTTP(w http.ResponseWriter) {
 	}
 }
 
-func (a *App) handlePing(w http.ResponseWriter, _ *http.Request) {
+// handlePing answers the app resource route's health probe. It is GET-only, as
+// docs/ARCHITECTURE.md documents it; nothing in the plugin or the datasource
+// sends it any other method.
+func (a *App) handlePing(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"message":"ok"}`))
 }
@@ -28,6 +35,14 @@ func (a *App) handleForecast(w http.ResponseWriter, req *http.Request) {
 	limit := a.bodyLimit()
 	if req.ContentLength > limit {
 		http.Error(w, errBodyTooLarge.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
+	// Refuse an impossible body before decoding it. Decoding is the expensive step:
+	// it expands every body byte into an 8-byte slice element plus growth copies, so
+	// a 16 MiB body would become >100 MB of live heap before checkTrainLen could
+	// reject it — multiplied by every concurrent caller.
+	if req.ContentLength > maxTrainBodyBytes() {
+		http.Error(w, errTrainBodyTooLarge.Error(), http.StatusRequestEntityTooLarge)
 		return
 	}
 	req.Body = http.MaxBytesReader(w, req.Body, limit)

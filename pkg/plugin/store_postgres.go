@@ -56,9 +56,13 @@ CREATE TABLE IF NOT EXISTS forecast.retrain (
   last_status TEXT,
   claimed_by TEXT,
   claimed_until TIMESTAMPTZ,
+  superseded_at TIMESTAMPTZ,          -- panel: the row's key is no longer the panel's current one
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (scope, org_id, key)
 );
+-- A table created before supersede existed gets the column here; IF NOT EXISTS
+-- makes it a no-op on the CREATE above and on every later connect.
+ALTER TABLE forecast.retrain ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMPTZ;
 DO $$
 DECLARE pk_name TEXT; pk_cols TEXT;
 BEGIN
@@ -211,12 +215,12 @@ func (s *postgresStore) Row(ctx context.Context, orgID int64, scope, key string)
 		orgID = 0
 	}
 	row := ScheduleRow{}
-	var next, last *time.Time
+	var next, last, superseded *time.Time
 	var status *string
 	err := s.pool.QueryRow(ctx, `
-SELECT scope, key, org_id, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status
+SELECT scope, key, org_id, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status, superseded_at
 FROM forecast.retrain WHERE scope = $1 AND org_id = $2 AND key = $3
-`, scope, orgID, key).Scan(&row.Scope, &row.Key, &row.OrgID, &row.Cron, &row.Timezone, &row.Enabled, &row.Spec, &next, &last, &status)
+`, scope, orgID, key).Scan(&row.Scope, &row.Key, &row.OrgID, &row.Cron, &row.Timezone, &row.Enabled, &row.Spec, &next, &last, &status, &superseded)
 	if err == pgx.ErrNoRows {
 		return ScheduleRow{}, false, nil
 	}
@@ -231,6 +235,9 @@ FROM forecast.retrain WHERE scope = $1 AND org_id = $2 AND key = $3
 	}
 	if status != nil {
 		row.LastStatus = *status
+	}
+	if superseded != nil {
+		row.SupersededAt = superseded.UTC()
 	}
 	return row, true, nil
 }

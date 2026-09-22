@@ -17,6 +17,21 @@ const (
 	defaultMaxForecastBody   = 16 << 20
 	defaultMaxQueryJSONBytes = 64 << 10
 
+	// maxForecastPoints bounds one emitted window. It is the twin of the library's
+	// forecast.MaxForecastPoints (whose error httpStatusFor maps to the same 413),
+	// kept here as the plugin's own constant so the request is refused before the
+	// fit: without it a single request whose `to` is far enough makes ForecastRange
+	// allocate a slice of billions of points and the process dies with no error
+	// surfaced. See checkForecastWindow.
+	maxForecastPoints = 1_000_000
+
+	// maxJSONBytesPerPoint is the per-element body budget the pre-flight in
+	// handleForecast uses to refuse an impossible request before it is decoded: a
+	// body carries two arrays (times, values) of at most maxTrainPoints elements
+	// each, and one JSON float costs ~24 characters at worst (-1.7976931348623157e+308
+	// plus its separator), so 32 bytes per element bounds a legal body with headroom.
+	maxJSONBytesPerPoint = 32
+
 	// Receive headroom over the app's body cap. The SDK's own default receive limit is the
 	// cap's twin, and a body at the cap then fails the transport (500
 	// plugin.requestFailureError) before the handler's MaxBytesReader can answer 413. A
@@ -29,11 +44,29 @@ var (
 	errBusy         = errors.New("forecast: busy")
 	errTrainTooLong = errors.New("forecast: training series exceeds 100000 points")
 	errBodyTooLarge = errors.New("forecast: request body too large")
+	// errTrainBodyTooLarge is the pre-flight refusal: the body is larger than any
+	// legal training request could be, so it is refused before it is decoded.
+	errTrainBodyTooLarge = errors.New("forecast: request body too large for a legal training series")
+	// errWindowTooManyPoints is the emitted-window cap, checked before any
+	// allocation on the fit, restore and datasource paths. Its message matches the
+	// library's forecast.ErrTooManyPoints, and httpStatusFor maps the two to the
+	// same 413, so a caller cannot tell which side refused the window.
+	errWindowTooManyPoints = errors.New("forecast: window has too many points")
 
 	maxTrainPoints       = defaultMaxTrainPoints
 	maxForecastBodyBytes = int64(defaultMaxForecastBody)
 	maxQueryJSONBytes    = defaultMaxQueryJSONBytes
 )
+
+// maxTrainBodyBytes is the largest request body that can describe a training
+// series: two arrays of at most maxTrainPoints elements each, budgeted at
+// maxJSONBytesPerPoint bytes per element. A body above it cannot be legal, and
+// decoding it first would be the expensive mistake — 8 bytes of []int64/[]float64
+// per element plus the decoder's slice growth — so handleForecast refuses it by
+// Content-Length before json.Decoder ever sees it.
+func maxTrainBodyBytes() int64 {
+	return 2 * int64(maxTrainPoints) * maxJSONBytesPerPoint
+}
 
 // GRPCSettings is the gRPC server configuration both plugin processes serve with: the body
 // cap plus headroom, so an oversize body reaches the handler's MaxBytesReader and is
