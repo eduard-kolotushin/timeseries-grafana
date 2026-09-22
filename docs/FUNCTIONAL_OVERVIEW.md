@@ -1074,7 +1074,10 @@ for the replay payload is built from `maxTrainSourceBytes` instead of spelling t
 cannot drift from the one it enforces; the boundary subtest pins that literal as the documented contract; the
 Forecast datasource's `ConfigEditor` grew the table-driven key-list cases it lacked; and `TestPostgresStore`
 deletes its synthetic `cccc…` snapshot, so a suite run against a shared store leaves no row behind. No request, no
-response and no rendered page changed.
+response and no rendered page changed. Both stacks were then refreshed onto those commits: Compose mounts the
+dist built at `84ad9b6` (`gpx_forecast_linux_amd64` sha256 `e9926f53…`, identical inside the container) with the
+worker's `bin/baselines` `f4faf759…`, and the Kubernetes release runs `…-grafana:84ad9b61b1b5` and
+`…-baselines:a82e0f30c79d`.
 
 What the plugin pages render now: `?page=configuration` has exactly two fields (*Cron*, *Timezone*) and prints no
 store key, no store field and no explanation of the store's absence; a save posts only
