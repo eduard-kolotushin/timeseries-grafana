@@ -83,7 +83,7 @@ provisioned dashboard`), so the panel checks in the discrepancy fixes ran agains
 | **Function** | One request shape for three jobs, chosen by the body: **fit** (`times`+`values`), **fit and persist** (fit + `cacheKey`), **restore** (`cacheKey`, no points). |
 | **Who can use** | Any user — no Admin gate (unlike `/schedules`). Live: the overlay panel (anonymous Admin) and an unauthenticated `curl` both got 200. |
 | **How configured** | Nothing beyond the plugin being enabled; the store DSN decides whether a `cacheKey` persists (F20). |
-| **Input params** | `times` (int64 ms, ascending, unique), `values` (number or `null`), `model` (`naive`\|`mean`\|`drift`\|`seasonal`\|`baseline`\|`ses`\|`holt`), `from`/`to` (int64 ms, the forecast window), `alpha`, `beta`, `period`, `season` (`hour`\|`day`\|`week`\|`minute-week`), `calendar` (`""`\|`ru`), `level` (0..1; 0 omits bands), `cacheKey` (64 lowercase hex), `retrain` (bool), `trainSource`, `provenance`. Limits: ≤100000 training points, body ≤16 MiB (413 beyond it), 4 concurrent Fit/ForecastRange calls. |
+| **Input params** | `times` (int64 ms, ascending, unique), `values` (number or `null`), `model` (`naive`\|`mean`\|`drift`\|`seasonal`\|`baseline`\|`ses`\|`holt`), `from`/`to` (int64 ms, the forecast window), `alpha`, `beta`, `period`, `season` (`hour`\|`day`\|`week`\|`minute-week`), `calendar` (`""`\|`ru`), `level` (0..1; 0 omits bands), `cacheKey` (64 lowercase hex), `retrain` (bool), `trainSource`, `provenance`. Limits: ≤100000 training points, body ≤16 MiB (413 beyond it), a body too large for a legal training series refused with 413 **before** it is decoded, one emitted window capped at 1000000 points (413 beyond it, checked before the fit), 4 concurrent Fit/ForecastRange calls. |
 | **Expected result** | 200 with `times`/`values` (and `lower`/`upper` when `level≠0`); points start at `last_time + step` and are clipped to `[from,to]`. An empty fit → 400 `forecast: series is empty`. With `cacheKey`+points the snapshot is stored and the panel's schedule row is written. |
 
 **Positive — Compose:** 300 points ending now, `model:"holt"`, `from=now`, `to=now+2h` →
@@ -143,7 +143,7 @@ reason for that refresh.
 | **Who can use** | **Admin only.** Live: anonymous Admin → 200; a Grafana **Viewer** service-account token → 403 `forecast: admin required` (Compose and Kubernetes). |
 | **How configured** | Needs a snapshot store (F20); returns 503 without one. Scheduling itself is driven by `retrainCron` (F16). |
 | **Input params** | None. Rows are org-scoped: `panel` rows of the caller's org only (a foreign org's row is invisible), `baseline` rows are fleet-wide (`org_id = 0`). |
-| **Expected result** | 200, JSON array of `{scope,key,cron,timezone,enabled,nextRunAt,lastRunAt,lastStatus,hasSpec,source}`. |
+| **Expected result** | 200, JSON array of `{scope,key,cron,timezone,enabled,nextRunAt,lastRunAt,lastStatus,hasSpec,supersededAt,source}`. |
 
 **Positive — Compose:** `curl -s $B/schedules` → 200 with 6 rows; the `panel` row's derived source was
 `{"dashboardUid":"forecast-minute-week","panelId":1,"panelTitle":"Seasonal baseline (minute of week)","datasourceUid":"druid","seriesName":"value","querySummary":"Druid: minuteweek · minute","lookback":"21d"}`.
@@ -163,7 +163,7 @@ links.
 | **Function** | Change when a model retrains. It never changes *how*: the stored `spec` (queries, window, identity) is kept. |
 | **Who can use** | **Admin only** (403 as Viewer). |
 | **How configured** | Store required; the row's cron/timezone are what the scheduler reads. |
-| **Input params** | Body `{scope, key, cron, timezone, enabled}`. `cron` is 5-field or `@hourly`/`@daily`; `timezone` is IANA. A `panel` key may be created this way; a `baseline` key must already exist. |
+| **Input params** | Body `{scope, key, cron, timezone, enabled}`. `cron` is 5-field or `@hourly`/`@daily`; `timezone` is IANA. `enabled` is optional: omitting it keeps the stored value, so a retime never switches a row off. A `panel` key may be created this way; a `baseline` key must already exist. |
 | **Expected result** | 200 with the stored row. 400 for a bad scope/cron/timezone/missing key; **404** for an unknown `baseline` key. |
 
 **Positive — Compose:** `PUT` `{"scope":"baseline","key":"ready","cron":"*/2 * * * *","timezone":"UTC","enabled":true}`
@@ -324,7 +324,7 @@ ConfigMap (`apps.yaml` → `jsonData.storeHost: overlay-postgres.overlay-postgre
 | **Who can use** | **Admin** (peer tab of Overview and Configuration on the plugin configuration page). |
 | **How configured** | Store required (F20). Rows come from the overlay's fits (F2) and from the worker (F25). |
 | **Input params** | Filters *Search* / *Scope* (All, panel, baseline) / *Enabled* (All, Enabled, Disabled) / *Status* (All, ok, error, never run); per-row cron, timezone and enabled editors; per-row *copy key*, *Save*, *Delete*; a *Refresh* button; 20-row client-side paging; a *Source* deep link for `panel` rows. |
-| **Expected result** | Columns *Source, Scope, Key, Cron, Timezone, Next run, Last run, Status, Enabled* + actions; errors surface as `Schedules failed` + the backend reason. |
+| **Expected result** | Columns *Source, Scope, Key, Cron, Timezone, Next run, Last run, Status, Enabled* + actions; a row a newer key superseded shows a *Superseded* marker beside its status and is never retrained again; errors surface as `Schedules failed` + the backend reason. |
 
 **Positive — Compose:** the tab listed 6 then 5 rows; the `panel` rows showed the panel title and
 `value 21d Druid: minuteweek · minute` as their source with `/d/forecast-minute-week?viewPanel=N` links, and the
@@ -410,8 +410,8 @@ keys (`2e827911…`, `f8046f42…`, `7713db25…`), which is the cross-environme
 | --- | --- |
 | **Function** | Refit stored panel snapshots on their cron with no browser open: resolve the row's window, fetch frames from Grafana's own `/api/ds/query`, fit, store. |
 | **Who can use** | **Operator** (it runs by itself once the app is configured). |
-| **How configured** | jsonData `retrainCron` (default `0 3 * * *`; both environments use `*/5 * * * *`) and `grafanaUrl` (default `http://127.0.0.1:3000`); the token comes from `FORECAST_GRAFANA_TOKEN`, the ini section, or `secureJsonData.grafanaToken`. The ticker itself is `FORECAST_RETRAIN_ENABLED` (default `true`, the same precedence chain) with `FORECAST_RETRAIN_TICK` (default `30s`) and `FORECAST_RETRAIN_LEASE` (default `5m`). |
-| **Input params** | Per row: `cron`, `timezone`, `enabled`; per spec: the stored queries and window (`relative` + `lookbackMs` re-resolve at claim time, absolute `from`/`to` replay verbatim). |
+| **How configured** | jsonData `retrainCron` (default `0 3 * * *`; both environments use `*/5 * * * *`) and `grafanaUrl` (default `http://127.0.0.1:3000`); the token comes from `FORECAST_GRAFANA_TOKEN`, the ini section, or `secureJsonData.grafanaToken`. The ticker itself is `FORECAST_RETRAIN_ENABLED` (default `true`, the same precedence chain) with `FORECAST_RETRAIN_TICK` (default `30s`) and `FORECAST_RETRAIN_LEASE` (derived from the claim batch and the fetch timeout — 6m today). |
+| **Input params** | Per row: `cron`, `timezone`, `enabled`; per spec: the stored queries and window. A window the picker expressed relatively — Auto, a legacy duration, or a Quick range such as `now-7d`/`now` — is stored as `relative: true` with `lookbackMs` and re-resolved at claim time, so a cron retrain follows the clock; a calendar/absolute pick, a window that does not end at `now`, and a rounded bound stay absolute and replay verbatim. |
 | **Expected result** | `next_run_at` advances, `last_run_at`/`last_status` are written, `forecast.snapshots.updated_at` moves; a failure records `last_status = "error: …"` and never fails a user query. |
 
 **Positive — Compose:** `$PG "SELECT scope,key,last_run_at,last_status,next_run_at FROM forecast.retrain ORDER BY next_run_at"`
@@ -973,3 +973,47 @@ The untouched dashboard still renders after the fix: three panels with history, 
   `envoyproxy/envoy:v1.36.7` (`kindccm-…`, `0.0.0.0:80->80/tcp`) in front of it. The overview run reached Grafana
   through `kubectl port-forward svc/timeseries-grafana 30001:80` instead — the same pod, and the 413 sweep plus
   the two panel reasons were re-checked over `http://localhost:80`.
+
+## Remediation pass (2026-09-22)
+
+Every finding in `audit/AUDIT.md` was addressed, and each behavior change was re-verified on a rebuild. The
+commits:
+
+| Repo | Commits |
+| --- | --- |
+| `timeseries` | `e74ecaa` (tag **`v0.1.1`**) |
+| `timeseries-forecast` | `029c690` (tag **`v0.5.0`** — `MaxForecastPoints`, `ErrTooManyPoints`, Welford buckets) |
+| `timeseries-baselines` | `0c296fe`, `7ec489f` (depends on the two tags) |
+| `timeseries-grafana` | `adf4e05`, `869dfdd`, `8feecaf` (backend, frontend, specs; depends on both tags) |
+| `timeseries-k8s` | `2406007` (`PLUGIN_REF=8feecafc14ba…`, `BASELINES_REF=7ec489faafeb…`) |
+| `timeseries-grafana-sandbox` | `2bb6528` (local only) |
+
+The Compose plugin was rebuilt for this run (`gpx_forecast_linux_amd64` sha256
+`87e5f1e3c6c890b8942484c0a352cb7715f064c1fae1b0414c93e78115d66463`, `forecast-panel/module.js`
+`0b3b25d0b56727ff7081524686ff108f792bc0efccbb18fc850ec1fcc4fb4226`), and the Kubernetes release runs the images
+tagged with the pins (`…-grafana:8feecafc14ba`, `…-baselines:7ec489faafeb`).
+
+| Finding | Fix | Live re-verification |
+| --- | --- | --- |
+| **F1** one request killed the process | `windowK` rejects a window above `MaxForecastPoints` (1e6) with `ErrTooManyPoints`; the plugin pre-checks the same bound on the fit, restore and datasource paths and maps the library error to 413 | Compose: the original probe answers **413 `forecast: window has too many points`** and the process stays up (`restarts=0 oom=false`); a 365-day 1-minute window is still 200 (7,173,234 B) and 730 days is 413 — the cap is exactly at 1e6 points. Kubernetes: the same 413 on the new image, `restarts=0` (was `OOMKilled`, exit 137) |
+| **F2** decode before the point cap | a body larger than a legal training series (two arrays of `MAX_TRAIN_POINTS` at 32 bytes each) is refused with 413 **before** the decoder | a 16,600,066-byte body → `413 forecast: request body too large for a legal training series`; peak RSS +118 MiB (was +305 MiB) |
+| **F3** a `null` query list was claimed forever | `null`/`[]` counts as "no queries" on read, writers store `[]`, and the claim requires a non-empty `queries` array | a fit without queries writes `"queries":[]`; forcing that row due leaves it `still_due=true status=-` through four tick slots (was `400 query.noQueries` on every slot) |
+| **F4** `PUT` without `enabled` switched rows off | `Enabled *bool`: absent keeps the stored value | PUT with `enabled:true` then a PUT without it → the row stays `enabled:true` |
+| **F5** `±Inf` fit output was a 500 | non-finite values are nulled like `NaN` | `{"values":[1e308,1e308]}` mean → 200 with `values:[null,null]` |
+| **F7** `/ping` ignored the method | GET-only, as ARCHITECTURE documents | `GET` 200, `PUT` 405, `DELETE` 405 |
+| **F9/F10** history lost datasource config; a superseded load kept drawing | history frames carry the source `field.config`/`meta`; the drawn frames are keyed to the panel's current query | both dashboards still draw history + forecast + bands, and the jest regression test pins the superseded-load case |
+| **F11** a relative Quick range was stored absolute | `resolveTrainWindow` marks a relative picker pair (`now-7d` → `now`) as `relative` with `lookbackMs` = its width | choosing **Last 7 days** posts `trainSource{relative:true, lookbackMs:604800000}` and the row reads `relative=true lookbackMs=604800000` (was `relative` absent and a frozen week) |
+| **F20** an empty `cacheKey` was a 400 | `QueryData` answers the miss `needTrain` error | `{"kind":"forecast","cacheKey":""}` → `needTrain: train on the Forecast overlay panel first` (was `400 forecast: cacheKey must be 64 lowercase hex chars`) |
+| **F23** interval width collapsed on large offsets | Welford buckets and a two-pass mean replace the raw moments | the offset-1e9 band is `2.1170029640197754` wide against `2.1170030603370598` for offset 0 (was `0`) |
+| **F24** an unvalidated `DRUID_MAX_RANGE` OOMed the worker | `Validate` requires ≥ 1m (or 0) and `windows()` refuses more than `1<<20` windows before allocating | `DRUID_MAX_RANGE=1ms` → exit 1 with `ERROR config err="DRUID_MAX_RANGE must be at least 1m (or 0 for one request per window)"` (was exit 137 under a 512 MiB cap) |
+| **F25/F26/F27/F28** | the store test creates the queue table so the SQL runs; an old `(scope, key)` table is named once; ownership is computed once per span; the publish comment credits the Kafka key | `TestPostgresRetrainQueue` and `TestPostgresScheduleStaleKey` pass against the sandbox store (no skip) |
+| **F29/F30/F31** | `JoinLeft`'s sharing is documented and pinned (the accessors copy); `FromPoints` allocates twice instead of three times; the unreachable resample branch is gone | library suites green; the allocation test reports three allocations against the old code |
+| **F32-F44, F47** | the chart exposes the nine worker knobs, `postgres.sslMode`, default Grafana resources (2Gi limit) and a DSN-aware `postgres.url`; the store password moved to a Secret; the pod rolls on `retrainCron`/`pluginToken` through a checksum env plus the documented `grafana.configRevision` lever; plugin versions are pinned; the sandbox tags images by pin, imports them into the kind node and no longer shares one dashboards ConfigMap | rendered proofs for each value; `make check-pins` reports both pins at the sibling heads; the cluster shows the Secret, `FORECAST_CONFIG_CHECKSUM=e80beffb…`, `limits.memory=2Gi`; every Compose datasource still reports OK after the pinned preinstall |
+| **F46** a panel's old key kept retraining forever | `superseded_at`: a fit stamps the same dashboard panel's other keys and clears its own | switching panel 1 to Last 7 days stamped `2e827911` (`superseded=12:20:43`), switching back to Auto cleared it and stamped the 7-day key; a superseded row is never claimed |
+| **D1-D10** | the ten documentation corrections listed under *Discrepancies found* above | each was re-checked against the code before the edit |
+
+Still not live-verified after this pass: the `postgres.*`-only rollout lever (documented in the chart's NOTES, not
+exercised), and the frontend rows that only a unit test covers (F12 datasource resolution, F13 the legacy lookback
+option, F14 expression rows, F15 update composition, F21 Coverage bounds) — the sandbox panels declare their
+datasource and have no expression rows to drive.
+
