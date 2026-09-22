@@ -39,6 +39,8 @@ github.com/eduard-kolotushin/timeseries v0.1.1 h1:42mu2m3AwogTE2+J4LsqSLKHNXIWil
 github.com/eduard-kolotushin/timeseries v0.1.1/go.mod h1:5rkS0OXN++bnaK6D/NtSMlT9scIEOj0eTMmVX7i2XiI=
 github.com/eduard-kolotushin/timeseries-forecast v0.5.0 h1:ZyLOo2lD13UXSj7mZ1adcfq3a2y3lbvhYI/BAXFkAQY=
 github.com/eduard-kolotushin/timeseries-forecast v0.5.0/go.mod h1:NmYvTZlHX3Ouv3F6ez6/Ckc4sYfVzSr93fYmrRj9nms=
+github.com/eduard-kolotushin/timeseries-forecast v0.5.1 h1:z+qbv4JWzGdoPDFEF7DJlVHr8TzDW+ghgKl6hanzN2k=
+github.com/eduard-kolotushin/timeseries-forecast v0.5.1/go.mod h1:5ciqNNh/jfOzCfjno4a2IqWVY4SybCH67h6r+pcKjn8=
 github.com/elazarl/goproxy v1.8.4 h1:tIHKhYHXf8gQracfoHl8Zy7PG/jhvmIMUR5j8OlPUIM=
 github.com/elazarl/goproxy v1.8.4/go.mod h1:b5xm6W48AUHNpRTCvlnd0YVh+JafCCtsLsJZvvNTz+E=
 github.com/envoyproxy/go-control-plane v0.9.0/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
