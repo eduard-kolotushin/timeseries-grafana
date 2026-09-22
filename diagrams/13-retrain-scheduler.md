@@ -4,8 +4,8 @@
 
 Что делает один тик:
 
-1. `Claim` — `UPDATE … WHERE scope='panel' AND org_id = <своя org> AND next_run_at <= now` с `FOR UPDATE SKIP LOCKED`, до 4 строк за тик, аренда 5 минут, владелец `host:pid`.
-2. `fetchFrames` — `POST /api/ds/query` в Grafana с сохранёнными объектами запросов из спеки (тот же `refId`), таймаут 60 с, тело ответа не больше 64 MiB, тело запроса не больше 64 KiB. **Вне** семафора вычислений: медленный источник не занимает слот Fit.
+1. `Claim` — `UPDATE … WHERE scope='panel' AND org_id = <своя org> AND next_run_at <= now` с `FOR UPDATE SKIP LOCKED`, до 4 строк за тик, аренда 6 минут, владелец `host:pid`.
+2. `fetchFrames` — `POST /api/ds/query` в Grafana с сохранёнными объектами запросов из спеки (тот же `refId`), таймаут 60 с, тело ответа не больше 64 MiB; своего лимита на тело запроса нет — его размер задаёт сохранённая спека, а `trainSource` ограничен 1 MiB при fit. **Вне** семафора вычислений: медленный источник не занимает слот Fit.
 3. `seriesFromFrames` + `fitRequest` — под `workLimiter` (та же очередь, что у запросов панели).
 4. `SnapshotOf` → `Put` в `forecast.snapshots` → `Finish(owner, org, scope, key, next, status)`.
 
@@ -25,7 +25,7 @@
 | `FORECAST_RETRAIN_ENABLED` | `true` | Планировщик запускается в процессе app |
 | `FORECAST_RETRAIN_CRON` | `0 3 * * *` | Cron новых строк, если панель не передала свой |
 | `FORECAST_RETRAIN_TICK` | `30s` | Как часто процесс ищет строки с наступившим сроком |
-| `FORECAST_RETRAIN_LEASE` | `5m` | Срок аренды claim и откат при ошибке |
+| `FORECAST_RETRAIN_LEASE` | `6m` | Срок аренды claim и откат при ошибке |
 | `FORECAST_GRAFANA_URL` / `FORECAST_GRAFANA_TOKEN` | — | Куда и с какими учётами обращаться к `/api/ds/query` |
 
 Отказ авторизации: три тика подряд с 401/403 (`/api/ds/query` или `/api/org`) отключают планировщик до перезапуска — с одной записью Error в логе. Отказы должны идти подряд, поэтому редкий сбой не глушит рабочий планировщик. Проверка стоит только на пути планировщика — на запросы панели она не влияет.

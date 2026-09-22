@@ -1,6 +1,6 @@
 # 11. Страницы app-плагина
 
-Страницы три: лендинг (только текст), Configuration (DSN снимков) и Retrain schedules (таблица `forecast.retrain`, права Admin). Оверлей `/forecast` с них не вызывается. `GET /ping` существует (`{"message":"ok"}`), но панель его не использует.
+Страницы три: лендинг (только текст), Configuration (только retrain-расписание) и Retrain schedules (таблица `forecast.retrain`, права Admin). Оверлей `/forecast` с них не вызывается. `GET /ping` существует (`{"message":"ok"}`), но панель его не использует.
 
 Configuration сохраняет только default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`) через `POST /api/plugins/.../settings`; DSN снимков задаётся деплоем (env `FORECAST_STORE_*` / `GF_PLUGIN_*` / ini / provisioned jsonData) — полей стора на странице нет.
 

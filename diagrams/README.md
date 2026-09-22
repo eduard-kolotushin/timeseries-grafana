@@ -16,7 +16,7 @@
 | [08-request-response.md](08-request-response.md) | JSON: `cacheKey` `needTrain` `trainSource` `provenance` `retrain` `cached` |
 | [09-plot-composition.md](09-plot-composition.md) | Фреймы истории и прогноза, Retrain, граница `to` |
 | [10-failure-reasons.md](10-failure-reasons.md) | Пути ошибок оверлея, включая 413 / 429 и недоступный store |
-| [11-app-pages.md](11-app-pages.md) | Лендинг, Configuration (DSN снимков) и Retrain schedules (таблица `forecast.retrain`) |
+| [11-app-pages.md](11-app-pages.md) | Лендинг, Configuration (только retrain-расписание) и Retrain schedules (таблица `forecast.retrain`) |
 | [12-snapshot-cache.md](12-snapshot-cache.md) | Отпечаток `cacheKey` и что в него не входит; кэш снимков с TTL в каждом процессе; ленивое подключение к Postgres |
 | [13-retrain-scheduler.md](13-retrain-scheduler.md) | Автономный пересчёт по cron: claim, `/api/ds/query`, fit, Finish, организация в ключе, отключение по 401/403 |
 

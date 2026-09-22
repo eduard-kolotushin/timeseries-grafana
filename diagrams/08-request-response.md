@@ -20,7 +20,7 @@ flowchart TB
     S --> L["level 0 если showInterval выключен иначе interval по умолчанию 0.95"]
     L --> K["cacheKey SHA-256 hex 64"]
     K --> TS["trainSource: datasourceUid queries from to seriesName relative lookbackMs"]
-    TS --> PR["провенанс: panelId panelTitle dashboardUid querySummary только при fit"]
+    TS --> PR["провенанс: panelId panelTitle dashboardUid querySummary на каждом запросе оверлея, включая пробный"]
     PR --> R["retrain опционально"]
   end
 
