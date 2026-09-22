@@ -11,7 +11,12 @@ export class ForecastDataSource extends DataSourceWithBackend<ForecastDataQuery,
     return { ...defaultForecastQuery };
   }
 
+  /**
+   * Every visible row is sent. The editor computes `cacheKey` asynchronously, so a row
+   * that has none yet is still a real query: the backend answers it with the
+   * `needTrain` reason instead of the panel showing `No data`.
+   */
   filterQuery(query: ForecastDataQuery): boolean {
-    return Boolean(query.cacheKey) && !query.hide;
+    return !query.hide;
   }
 }

@@ -33,6 +33,12 @@ export type ScheduleRow = {
   lastStatus?: string;
   hasSpec?: boolean;
   source?: ScheduleSource;
+  /**
+   * RFC3339 timestamp of when the row stopped being the current row for its panel
+   * (its training window or query changed); absent while the row is current. A
+   * superseded row is never claimed again and stays listed until it is deleted.
+   */
+  supersededAt?: string;
 };
 
 export function listSchedules(): Promise<ScheduleRow[]> {

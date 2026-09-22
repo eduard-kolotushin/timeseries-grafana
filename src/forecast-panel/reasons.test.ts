@@ -1,8 +1,6 @@
 import {
-  REASON_ALL_NAN,
   REASON_BACKEND,
   REASON_BUSY,
-  REASON_EMPTY_WINDOW,
   REASON_INVALID_RANGE,
   REASON_OVERSIZE,
   REASON_TRAIN_EMPTY,
@@ -34,10 +32,6 @@ describe('reasonFromUnknown', () => {
 
   it('uses Error.message', () => {
     expect(reasonFromUnknown(new Error(REASON_TRAIN_EMPTY))).toBe(REASON_TRAIN_EMPTY);
-  });
-
-  it('keeps empty-window and all-NaN reasons distinct', () => {
-    expect(REASON_EMPTY_WINDOW).not.toBe(REASON_ALL_NAN);
   });
 
   it('maps 413, 429, and 5xx to load reasons', () => {

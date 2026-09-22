@@ -1,5 +1,5 @@
 import { PanelPlugin } from '@grafana/data';
-import { ForecastOptions } from './types';
+import { COVERAGE_SETTINGS, ForecastOptions } from './types';
 import { ForecastPanel } from './ForecastPanel';
 import { TrainRangeEditor } from './TrainRangeEditor';
 import { RetrainEditor } from './RetrainEditor';
@@ -95,7 +95,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       name: 'Interval coverage',
       description: 'Coverage in (0, 1). 0 hides the band.',
       defaultValue: 0.95,
-      settings: { min: 0, max: 0.99, step: 0.05 },
+      settings: { ...COVERAGE_SETTINGS },
       showIf: (opts) => opts.showInterval !== false,
     })
     .addCustomEditor({
@@ -106,6 +106,13 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       defaultValue: { from: '', to: '' },
       editor: TrainRangeEditor,
       settings: { kind: 'train' },
+    })
+    .addTextInput({
+      path: 'lookback',
+      name: 'Legacy lookback',
+      description:
+        'Duration lookback (e.g. 21d, or a bare day count) from before the Training period picker. Only a panel that never saved a training period trains from it, and the cacheKey always includes it, so keep a legacy panel’s stored value to reproduce the key its alert query carries. Empty is Auto: the model window.',
+      defaultValue: '',
     })
     .addNumberInput({
       path: 'maxInflightLoads',

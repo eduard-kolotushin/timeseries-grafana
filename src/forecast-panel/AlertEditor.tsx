@@ -1,20 +1,19 @@
 import React, { useState } from 'react';
 import { rangeUtil, StandardEditorProps } from '@grafana/data';
-import { getDataSourceSrv, locationService } from '@grafana/runtime';
+import { locationService } from '@grafana/runtime';
 import { Alert, Button } from '@grafana/ui';
 import {
   alertingNewPath,
+  alertingUidsFor,
   asSaveModel,
   DashboardSaveModel,
   dashboardTimeFromScene,
   dashboardUidFromPath,
   DEFAULT_RELATIVE_TIME_RANGE,
-  datasourceUid,
   findPanel,
   findQueryRunnerState,
   LivePanel,
   pickLivePanel,
-  PanelTarget,
   REASON_DASHBOARD_NOT_SAVED,
   RelativeTimeRange,
   ruleFormDefaultsFromPanel,
@@ -67,22 +66,6 @@ function relativeFromDashboardTime(time?: { from: string; to: string }): Relativ
   } catch {
     return DEFAULT_RELATIVE_TIME_RANGE;
   }
-}
-
-function alertingUidsFor(targets: PanelTarget[], panelDs: LivePanel['datasource']): Set<string> {
-  const uids = new Set<string>();
-  const srv = getDataSourceSrv();
-  for (const target of targets) {
-    const uid = datasourceUid(target.datasource, panelDs);
-    if (!uid || uids.has(uid)) {
-      continue;
-    }
-    const settings = srv.getInstanceSettings(uid);
-    if (settings?.meta.alerting) {
-      uids.add(uid);
-    }
-  }
-  return uids;
 }
 
 export const AlertEditor: React.FC<StandardEditorProps> = () => {

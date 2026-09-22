@@ -1,3 +1,5 @@
+import { getDataSourceSrv } from '@grafana/runtime';
+
 export const EXPRESSION_DATASOURCE_UID = '__expr__';
 export const EXPRESSION_DATASOURCE_TYPE = '__expr__';
 
@@ -62,6 +64,27 @@ export function datasourceUid(ref: DatasourceRef, fallback?: DatasourceRef): str
     return picked;
   }
   return picked.uid ?? '';
+}
+
+/**
+ * The datasources a rule built from this panel may draw on: the ones whose plugin reports
+ * `meta.alerting`, plus the panel's own `__expr__` rows. An expression is alerting-capable
+ * by definition and has no instance settings to ask about, and keeping it is what lets the
+ * rule form reuse a panel's existing reduce/threshold chain instead of a default pair.
+ */
+export function alertingUidsFor(targets: PanelTarget[], panelDs: DatasourceRef): Set<string> {
+  const uids = new Set<string>();
+  const srv = getDataSourceSrv();
+  for (const target of targets) {
+    const uid = datasourceUid(target.datasource, panelDs);
+    if (!uid || uids.has(uid)) {
+      continue;
+    }
+    if (uid === EXPRESSION_DATASOURCE_UID || srv.getInstanceSettings(uid)?.meta.alerting) {
+      uids.add(uid);
+    }
+  }
+  return uids;
 }
 
 export function dashboardUidFromPath(pathname: string): string | undefined {

@@ -216,7 +216,12 @@ describe('cacheKey', () => {
       },
       trainSeriesName: 'value train',
     };
-    expect(fingerprintPayload(withTrainSource)).toEqual(fingerprintPayload(base));
+    // The replay payload rides along on the fit POST (overlayLoad's own test) but is not
+    // part of the model identity: the key is byte-identical with and without it, because
+    // the payload the key hashes never carries the replay fields at all.
+    const payload = JSON.stringify(fingerprintPayload(withTrainSource));
+    expect(payload).not.toContain('trainSource');
+    expect(payload).not.toContain('panelId');
     expect(await cacheKey(withTrainSource)).toBe(await cacheKey(base));
   });
 

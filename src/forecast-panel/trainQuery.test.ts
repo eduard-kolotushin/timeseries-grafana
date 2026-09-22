@@ -1,6 +1,6 @@
 import { DataFrame, DataQueryRequest, FieldType, MutableDataFrame, dateTime } from '@grafana/data';
 import { of } from 'rxjs';
-import { REASON_UNSUPPORTED_PROM_INSTANT } from './reasons';
+import { REASON_TRAIN_EMPTY, REASON_UNSUPPORTED_PROM_INSTANT } from './reasons';
 import { queryTrainingFrames, trainRejectReason } from './trainQuery';
 
 const mockGet = jest.fn();
@@ -211,5 +211,53 @@ describe('queryTrainingFrames', () => {
 
     expect(result.frames).toBeNull();
     expect(result.source).toBeUndefined();
+  });
+});
+
+describe('a target with no datasource of its own', () => {
+  const rewriteWindow = { fromMs, toMs, intervalMs: 60_000 };
+  const req = (targets: unknown[]): DataQueryRequest =>
+    ({ targets, intervalMs: 60_000 } as unknown as DataQueryRequest);
+  const panelDs = { uid: 'panel-ds', type: 'prometheus' };
+  const bare = { refId: 'A', expr: 'up' };
+  const own = { refId: 'A', datasource: { uid: 'prom', type: 'prometheus' }, expr: 'up' };
+
+  beforeEach(() => mockGet.mockReset());
+
+  // `getDataSourceSrv().get('')` is the org default, which is not where the panel's
+  // series comes from: a target that names no datasource trains from the panel's own.
+  const cases: Array<[string, unknown[], typeof panelDs | undefined, string | undefined]> = [
+    ['keeps a target that names its own datasource', [own], undefined, 'prom'],
+    ["trains from the panel's datasource when the target names none", [bare], panelDs, 'panel-ds'],
+    ['has nothing to train from when neither names one', [bare], undefined, undefined],
+  ];
+
+  it.each(cases)('%s → %s', async (_name, targets, panel, wantUid) => {
+    const prom = datasource([frame('up')]);
+    mockGet.mockResolvedValue(prom.ds);
+
+    const result = await queryTrainingFrames(req(targets), { ...rewriteWindow, panelDatasource: panel });
+
+    if (!wantUid) {
+      expect(mockGet).not.toHaveBeenCalled();
+      expect(result.frames).toBeNull();
+      expect(result.source).toBeUndefined();
+      expect(trainRejectReason(req(targets), { ...rewriteWindow, panelDatasource: panel })).toBe(REASON_TRAIN_EMPTY);
+      return;
+    }
+    expect(mockGet.mock.calls[0][0]).toEqual(wantUid === 'prom' ? own.datasource : panelDs);
+    expect(result.source?.datasourceUid).toBe(wantUid);
+    expect(trainRejectReason(req(targets), { ...rewriteWindow, panelDatasource: panel })).toBeUndefined();
+  });
+
+  it('still trains the groups that do name a datasource', async () => {
+    const prom = datasource([frame('up')]);
+    mockGet.mockResolvedValue(prom.ds);
+
+    const result = await queryTrainingFrames(req([bare, own]), rewriteWindow);
+
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(result.source?.datasourceUid).toBe('prom');
+    expect(trainRejectReason(req([bare, own]), rewriteWindow)).toBeUndefined();
   });
 });

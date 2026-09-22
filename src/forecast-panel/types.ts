@@ -27,6 +27,12 @@ export interface ForecastOptions {
   maxInflightLoads?: number;
 }
 
+/**
+ * Prediction-interval coverage bounds. The overlay's Interval coverage option and the
+ * Forecast datasource's Coverage input are the same knob, so they share one rule.
+ */
+export const COVERAGE_SETTINGS = { min: 0, max: 0.99, step: 0.05 } as const;
+
 export interface ForecastResponse {
   times?: number[];
   values?: Array<number | null>;

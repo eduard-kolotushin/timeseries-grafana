@@ -1,9 +1,13 @@
-import { DataFrame, FieldType, getFieldDisplayName } from '@grafana/data';
+import { DataFrame, FieldConfig, FieldType, getFieldDisplayName, QueryResultMeta } from '@grafana/data';
 
 export type SeriesPoints = {
   name: string;
   times: number[];
   values: Array<number | null>;
+  /** The source field's own config (unit, decimals, min/max, links), so a rebuild of the frame keeps it. */
+  config?: FieldConfig;
+  /** The source frame's meta, likewise carried over by a rebuild. */
+  meta?: QueryResultMeta;
 };
 
 /** Every numeric field on a timeseries frame. Skips logs/trace frames. */
@@ -40,13 +44,43 @@ export function extractSeries(frame: DataFrame, allFrames?: DataFrame[]): Series
     if (times.length === 0) {
       continue;
     }
+    // The datasource's own config (unit, decimals, min/max, links) and the frame meta ride
+    // along, so a panel rebuilding this series into a frame does not lose them. Left off
+    // when the source set nothing.
+    const config = valueField.config && Object.keys(valueField.config).length > 0 ? valueField.config : undefined;
     out.push({
       name: getFieldDisplayName(valueField, frame, frames),
       times,
       values,
+      config,
+      meta: frame.meta,
     });
   }
   return out;
+}
+
+/**
+ * A frame for one series, rebuilt from the points a panel has to plot. The datasource's
+ * own field config and the frame's meta ride along: the overlay panel rebuilds history to
+ * hang the forecast off it, and flattening a series to name/times/values drops the unit,
+ * decimals, min/max, links and the frame meta the datasource supplied.
+ */
+export function historyFrame(points: SeriesPoints): DataFrame {
+  return {
+    name: points.name,
+    refId: points.name,
+    meta: points.meta,
+    length: points.times.length,
+    fields: [
+      { name: 'Time', type: FieldType.time, values: points.times, config: {} },
+      {
+        name: points.name,
+        type: FieldType.number,
+        values: points.values,
+        config: { ...points.config, displayName: points.name },
+      },
+    ],
+  };
 }
 
 function isNonTimeseriesFrame(frame: DataFrame): boolean {

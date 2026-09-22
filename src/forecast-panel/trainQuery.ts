@@ -10,8 +10,10 @@ import {
 import { getDataSourceSrv } from '@grafana/runtime';
 import { from } from 'rxjs';
 import { abortableLastValue, abortError } from './abortable';
+import { datasourceUid } from './alertFromPanel';
 import { trainMaxDataPoints, trainStepInterval } from './lookback';
 import { metricTargets } from './mixed';
+import { REASON_TRAIN_EMPTY } from './reasons';
 import { rewriteTrainTargets, summarizeTrainTargets, TrainRewriteWindow } from './trainRewrite';
 
 /**
@@ -58,6 +60,15 @@ export type TrainQueryResult = {
 };
 
 /**
+ * The training window plus what the request itself cannot carry: the panel's own
+ * datasource (for a target whose own ref is missing) and the schedule-row identity.
+ */
+export type TrainQueryWindow = TrainRewriteWindow & {
+  provenance?: TrainProvenance;
+  panelDatasource?: DataSourceRef;
+};
+
+/**
  * Keeps only the provenance a panel actually resolved: a partially filled object
  * must not put empty identity into the stored spec or the request body.
  */
@@ -84,10 +95,10 @@ export function cleanProvenance(provenance: TrainProvenance | undefined): TrainP
  */
 export async function queryTrainingFrames(
   request: DataQueryRequest | undefined,
-  window: TrainRewriteWindow & { provenance?: TrainProvenance },
+  window: TrainQueryWindow,
   signal?: AbortSignal
 ): Promise<TrainQueryResult> {
-  const { fromMs, toMs, intervalMs, provenance } = window;
+  const { fromMs, toMs, intervalMs, provenance, panelDatasource } = window;
   const targets = metricTargets(request?.targets ?? []);
   if (!request || targets.length === 0 || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
     return { frames: null };
@@ -119,7 +130,7 @@ export async function queryTrainingFrames(
     __to: { text: String(toMs), value: String(toMs) },
   };
 
-  const groups = groupByDatasource(targets);
+  const groups = groupByDatasource(targets, panelDatasource);
 
   const frames: DataFrame[] = [];
   let source: TrainQuerySource | undefined;
@@ -128,8 +139,15 @@ export async function queryTrainingFrames(
     if (signal?.aborted) {
       throw abortError();
     }
-    const ds = await getDataSourceSrv().get(group[0].datasource, scopedVars);
-    const rewritten = rewriteTrainTargets(ds.type || refType(group[0].datasource), group, rewriteWindow);
+    if (!group.key || group.ref == null) {
+      // Neither the target nor the panel names a datasource. Resolving `''` would run
+      // the training query against the org default, which is not where this panel's
+      // series comes from, so the group is dropped instead of fitted from somewhere else.
+      skipReason = skipReason ?? REASON_TRAIN_EMPTY;
+      continue;
+    }
+    const ds = await getDataSourceSrv().get(group.ref, scopedVars);
+    const rewritten = rewriteTrainTargets(ds.type || refType(group.ref), group.targets, rewriteWindow);
     if (rewritten.reason && rewritten.targets.length === 0) {
       skipReason = skipReason ?? rewritten.reason;
       continue;
@@ -158,7 +176,7 @@ export async function queryTrainingFrames(
       // The backend replays these exact objects and re-extracts the training series by
       // name, so they stay untouched here (`rewritten.targets` is already a clone).
       source = source ?? {
-        datasourceUid: refKey(group[0].datasource),
+        datasourceUid: group.key,
         queries: rewritten.targets,
         from: fromMs,
         to: toMs,
@@ -168,7 +186,7 @@ export async function queryTrainingFrames(
         // Summarised from the panel's own targets, not the rewritten ones: the rewrite
         // substitutes the train window into SQL text, and a label reads better (and stays
         // stable between a probe and a fit) with the panel's macros in it.
-        querySummary: summarizeTrainTargets(ds.type || refType(group[0].datasource), group) || undefined,
+        querySummary: summarizeTrainTargets(ds.type || refType(group.ref), group.targets) || undefined,
       };
       frames.push(...resp.data);
     }
@@ -179,16 +197,33 @@ export async function queryTrainingFrames(
   return { frames: null, reason: skipReason };
 }
 
-/** Targets grouped by the datasource that answers for them, in first-seen order. */
-function groupByDatasource<T extends { datasource?: DataQuery['datasource'] }>(targets: T[]): Map<string, T[]> {
-  const groups = new Map<string, T[]>();
+/** One datasource's share of the panel's metric targets. */
+type DatasourceGroup<T> = {
+  key: string;
+  ref: DataSourceRef | string | null | undefined;
+  targets: T[];
+};
+
+/**
+ * Targets grouped by the datasource that answers for them, in first-seen order. A target
+ * with no ref of its own belongs to the panel's own datasource; it must never fall back to
+ * the org default, which is what `getDataSourceSrv().get('')` would resolve to. An empty
+ * key is what marks a group as untrainable.
+ */
+function groupByDatasource<T extends { datasource?: DataQuery['datasource'] }>(
+  targets: T[],
+  panelDatasource?: DataSourceRef
+): Map<string, DatasourceGroup<T>> {
+  const groups = new Map<string, DatasourceGroup<T>>();
   for (const target of targets) {
-    const key = refKey(target.datasource);
+    // The uid the target's own ref names (or its legacy string ref), else the panel's.
+    // `refKey` keeps a type-only ref working instead of collapsing it onto the panel.
+    const key = datasourceUid(target.datasource, panelDatasource) || refKey(target.datasource);
     const group = groups.get(key);
     if (group) {
-      group.push(target);
+      group.targets.push(target);
     } else {
-      groups.set(key, [target]);
+      groups.set(key, { key, ref: target.datasource ?? panelDatasource, targets: [target] });
     }
   }
   return groups;
@@ -204,11 +239,17 @@ function groupByDatasource<T extends { datasource?: DataQuery['datasource'] }>(t
  */
 export function trainRejectReason(
   request: DataQueryRequest | undefined,
-  window: TrainRewriteWindow
+  window: TrainQueryWindow
 ): string | undefined {
   let reason: string | undefined;
-  for (const group of groupByDatasource(metricTargets(request?.targets ?? [])).values()) {
-    const rewritten = rewriteTrainTargets(refType(group[0].datasource), group, window);
+  for (const group of groupByDatasource(metricTargets(request?.targets ?? []), window.panelDatasource).values()) {
+    if (!group.key || group.ref == null) {
+      // No datasource to run against, so the group can never return frames: the fit path
+      // reports the empty training result rather than querying the org default.
+      reason = reason ?? REASON_TRAIN_EMPTY;
+      continue;
+    }
+    const rewritten = rewriteTrainTargets(refType(group.ref), group.targets, window);
     if (rewritten.targets.length > 0) {
       // One group the rewrite keeps is enough: `queryTrainingFrames` trains it and reports
       // no reason, so naming one here would refuse a fit the fit path performs.

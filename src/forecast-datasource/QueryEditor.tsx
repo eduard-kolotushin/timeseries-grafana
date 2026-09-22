@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { DataQuery, DataSourceApi, QueryEditorProps, SelectableValue } from '@grafana/data';
 import { DataSourcePicker, getDataSourceSrv } from '@grafana/runtime';
 import { Button, Field, InlineField, InlineFieldRow, Input, Select } from '@grafana/ui';
 import { ForecastDataSource } from './datasource';
+import { COVERAGE_SETTINGS } from '../forecast-panel/types';
 import {
   copySourceFromSibling,
   innerSourceQuery,
@@ -80,6 +81,15 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
 
   const sourceDs = dsUid && resolvedDs?.uid === dsUid ? resolvedDs.ds : null;
 
+  // The query the editor last produced, so `update` composes instead of spreading a
+  // render-time prop (see below), and the serial number that makes only the newest
+  // in-flight `withCacheKey` flush.
+  const latest = useRef(query);
+  useEffect(() => {
+    latest.current = query;
+  }, [query]);
+  const updateSeq = useRef(0);
+
   const fingerprint = [
     query.seriesName,
     query.model,
@@ -106,8 +116,23 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
     };
   }, [fingerprint, query, onChange]);
 
-  const update = (patch: Partial<ForecastDataQuery>) => {
-    void withCacheKey({ ...query, ...patch }).then((next) => {
+  /** A whole-query or partial change, or a function of the query the editor holds now. */
+  const update = (
+    patch: Partial<ForecastDataQuery> | ((query: ForecastDataQuery) => Partial<ForecastDataQuery>)
+  ) => {
+    // Compose on top of the last query this editor produced. Spreading the render-time
+    // prop instead would drop an earlier edit made in the same tick, because both flushes
+    // would start from the same object and the later one would land without the earlier patch.
+    const base = latest.current;
+    const composed = { ...base, ...(typeof patch === 'function' ? patch(base) : patch) };
+    latest.current = composed;
+    const seq = ++updateSeq.current;
+    void withCacheKey(composed).then((next) => {
+      if (seq !== updateSeq.current) {
+        // A newer edit already composed this one and pushes its own key.
+        return;
+      }
+      latest.current = next;
       onChange(next);
       onRunQuery();
     });
@@ -205,6 +230,9 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
             <Input
               type="number"
               width={8}
+              min={COVERAGE_SETTINGS.min}
+              max={COVERAGE_SETTINGS.max}
+              step={COVERAGE_SETTINGS.step}
               value={query.level ?? 0.95}
               onChange={(e) => update({ level: Number(e.currentTarget.value) })}
             />
@@ -221,7 +249,7 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
             value={query.trainRange?.from ?? ''}
             placeholder="Auto"
             onChange={(e) =>
-              update({ trainRange: { from: e.currentTarget.value, to: query.trainRange?.to ?? '' } })
+              update((q) => ({ trainRange: { ...q.trainRange, from: e.currentTarget.value } }))
             }
           />
         </InlineField>
@@ -230,9 +258,18 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
             width={16}
             value={query.trainRange?.to ?? ''}
             placeholder="Auto"
-            onChange={(e) =>
-              update({ trainRange: { from: query.trainRange?.from ?? '', to: e.currentTarget.value } })
-            }
+            onChange={(e) => update((q) => ({ trainRange: { ...q.trainRange, to: e.currentTarget.value } }))}
+          />
+        </InlineField>
+        <InlineField
+          label="Legacy lookback"
+          tooltip="Duration lookback (e.g. 21d, or a bare day count) from before the training-period picker. Must match the overlay panel’s Legacy lookback to share its cacheKey. Empty is Auto."
+        >
+          <Input
+            width={16}
+            value={query.lookback ?? ''}
+            placeholder="Auto"
+            onChange={(e) => update({ lookback: e.currentTarget.value })}
           />
         </InlineField>
       </InlineFieldRow>
@@ -247,7 +284,7 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
                 variant="secondary"
                 size="sm"
                 type="button"
-                onClick={() => update(copySourceFromSibling(query, sourceSibling))}
+                onClick={() => update((q) => copySourceFromSibling(q, sourceSibling))}
               >
                 Copy source from query {sourceSibling.refId || 'A'}
               </Button>
@@ -257,15 +294,15 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
             noDefault
             current={dsRef?.uid}
             filter={(ds) => ds.type !== FORECAST_DATASOURCE_TYPE}
-            onChange={(ds) => {
-              const innerQ = innerSourceQuery(query);
-              update(
-                withSourceTarget(query, { uid: ds.uid, type: ds.type }, {
+            onChange={(ds) =>
+              update((q) => {
+                const innerQ = innerSourceQuery(q);
+                return withSourceTarget(q, { uid: ds.uid, type: ds.type }, {
                   ...(innerQ as unknown as Record<string, unknown>),
                   refId: innerQ.refId || 'A',
-                })
-              );
-            }}
+                });
+              })
+            }
           />
         </>
       </Field>
@@ -274,15 +311,15 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
           datasource={sourceDs}
           query={inner}
           onRunQuery={onRunQuery}
-          onChange={(q) => {
-            update(
+          onChange={(q) =>
+            update((current) =>
               withSourceTarget(
-                query,
+                current,
                 { uid: sourceDs.uid, type: sourceDs.type },
                 q as unknown as Record<string, unknown>
               )
-            );
-          }}
+            )
+          }
         />
       )}
     </div>

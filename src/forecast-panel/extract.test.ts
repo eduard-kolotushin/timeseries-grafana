@@ -1,5 +1,5 @@
 import { FieldType, getFieldDisplayName, toDataFrame } from '@grafana/data';
-import { extractSeries, pickTrainingPoints, trainingForFit } from './extract';
+import { extractSeries, historyFrame, pickTrainingPoints, trainingForFit } from './extract';
 
 describe('extractSeries', () => {
   it('reads the time field and every numeric field', () => {
@@ -87,6 +87,64 @@ describe('extractSeries', () => {
     });
     expect(extractSeries(logs)).toEqual([]);
     expect(extractSeries(traces)).toEqual([]);
+  });
+});
+
+describe('historyFrame', () => {
+  const source = toDataFrame({
+    refId: 'A',
+    fields: [
+      { name: 'time', type: FieldType.time, values: [0, 1000] },
+      {
+        name: 'bytes',
+        type: FieldType.number,
+        values: [1, 2],
+        config: {
+          unit: 'bytes',
+          decimals: 2,
+          min: 0,
+          max: 10,
+          links: [{ title: 'docs', url: 'https://example.com' }],
+        },
+      },
+    ],
+  });
+  source.meta = { preferredVisualisationType: 'graph', executedQueryString: 'SELECT 1' };
+
+  function rebuilt() {
+    const [points] = extractSeries(source);
+    return historyFrame(points);
+  }
+
+  it.each([
+    ['unit', 'bytes'],
+    ['decimals', 2],
+    ['min', 0],
+    ['max', 10],
+  ] as const)('keeps the datasource %s on the rebuilt field', (key, want) => {
+    expect(rebuilt().fields[1].config[key]).toBe(want);
+  });
+
+  it('keeps the datasource links and the frame meta', () => {
+    const frame = rebuilt();
+    expect(frame.fields[1].config.links).toEqual([{ title: 'docs', url: 'https://example.com' }]);
+    expect(frame.meta).toEqual({ preferredVisualisationType: 'graph', executedQueryString: 'SELECT 1' });
+  });
+
+  it('keeps the points under the series name', () => {
+    const frame = rebuilt();
+    expect(frame.fields[0].values).toEqual([0, 1000]);
+    expect(frame.fields[1].values).toEqual([1, 2]);
+    expect(frame.fields[1].name).toBe('bytes');
+    expect(frame.fields[1].config.displayName).toBe('bytes');
+    expect(frame.refId).toBe('bytes');
+  });
+
+  it('rebuilds a bare series without config or meta', () => {
+    const frame = historyFrame({ name: 'v', times: [0], values: [1] });
+    expect(frame.fields.map((field) => field.name)).toEqual(['Time', 'v']);
+    expect(frame.fields[1].config.displayName).toBe('v');
+    expect(frame.meta).toBeUndefined();
   });
 });
 

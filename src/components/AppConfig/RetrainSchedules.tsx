@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { css } from '@emotion/css';
 import {
   Alert,
+  Badge,
   Button,
   ClipboardButton,
   Field,
@@ -313,7 +314,22 @@ export const RetrainSchedules = () => {
         header: 'Last run',
         cell: ({ row }) => <span className={styles.nowrap}>{row.original.lastRunAt || '—'}</span>,
       },
-      { id: 'lastStatus', header: 'Status', cell: ({ row }) => row.original.lastStatus ?? '—' },
+      {
+        id: 'lastStatus',
+        header: 'Status',
+        cell: ({ row }) => (
+          <Stack direction="row" gap={1} alignItems="center">
+            <span>{row.original.lastStatus ?? '—'}</span>
+            {row.original.supersededAt && (
+              <Badge
+                text="Superseded"
+                color="orange"
+                tooltip={`No panel trains this key any more (since ${row.original.supersededAt}), so it is never retrained again. Delete the row to remove it.`}
+              />
+            )}
+          </Stack>
+        ),
+      },
       {
         id: 'enabled',
         header: 'Enabled',
@@ -366,6 +382,11 @@ export const RetrainSchedules = () => {
           shared by all of them) and are created by that worker, so only an existing one can be edited here. Deleting
           a <code>baseline</code> row removes it for every org: the worker re-creates it on its next tick while the
           metric still reports, which is how a retired hash&apos;s row stops being retrained.
+        </p>
+        <p>
+          A <code>panel</code> row whose panel no longer trains its key — the training window or the query changed —
+          is marked <em>Superseded</em>. The panel keeps writing the row that matches what it trains now; this one is
+          kept for its history and is never claimed again, so delete it to remove it.
         </p>
         <p>
           A <code>baseline</code> row&apos;s key is the upstream <code>metric_hash</code> — the only identity this

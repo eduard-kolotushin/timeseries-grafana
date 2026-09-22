@@ -57,6 +57,19 @@ describe('cacheKeyInputFromQuery', () => {
     expect(a).toEqual(b);
   });
 
+  it('includes the legacy lookback, so an older panel’s key can be reproduced', () => {
+    const withLookback = fingerprintPayload(cacheKeyInputFromQuery(query({ lookback: '21d' })));
+    expect(withLookback).not.toEqual(fingerprintPayload(cacheKeyInputFromQuery(query())));
+    // The overlay's own fingerprint is the contract this key has to meet.
+    expect(withLookback).toEqual(
+      fingerprintPayload({
+        targets: [target],
+        options: { ...overlayOptions, lookback: '21d' },
+        seriesName: 'up',
+      })
+    );
+  });
+
   it('changes when the source expr or train-range strings change', () => {
     const base = fingerprintPayload(cacheKeyInputFromQuery(query()));
     expect(

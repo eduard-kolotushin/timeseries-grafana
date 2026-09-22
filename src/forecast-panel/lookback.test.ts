@@ -1,6 +1,19 @@
+import { getTimeZone } from '@grafana/data';
 import { absoluteDayBound, applyLookbackRange, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, forecastLevel, isoUtc, isInvalidForecastWindow, isInvalidTrainWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, timeZoneFromScene, trainMaxDataPoints, trainStepInterval, trainStepMs, type ResolvedTrainWindow, type TrainWindow } from './lookback';
 
 const day = 24 * 60 * 60 * 1000;
+
+/** A fixed instant, so two `now` reads in one range parse to the same millisecond (F48). */
+const NOW = Date.UTC(2026, 7, 19, 12, 0, 0);
+
+function atNow<T>(body: () => T): T {
+  jest.useFakeTimers({ now: NOW });
+  try {
+    return body();
+  } finally {
+    jest.useRealTimers();
+  }
+}
 
 /** A resolved window with the invalid marker ruled out, so a case can read its bounds. */
 function resolved(w: TrainWindow): ResolvedTrainWindow {
@@ -95,13 +108,35 @@ describe('resolveTrainWindow', () => {
     });
   });
 
-  it('parses a relative Grafana range', () => {
-    const { fromMs, toMs, relative, lookbackMs } = resolved(
-      resolveTrainWindow({ model: 'holt', trainRange: { from: 'now-7d', to: 'now' } }, panelTo, 'utc')
-    );
-    expect(Math.abs(toMs - fromMs - 7 * day)).toBeLessThan(2);
-    expect(relative).toBe(false);
-    expect(lookbackMs).toBe(0);
+  it.each([
+    ['now-7d', 7 * day],
+    ['now-24h', day],
+    ['now-30d', 30 * day],
+    ['now-5m', 5 * 60 * 1000],
+    ['now-1y', 365 * day],
+  ] as const)('keeps the picked %s → now window relative so a retrain re-resolves it', (from, width) => {
+    expect(
+      atNow(() => resolveTrainWindow({ model: 'holt', trainRange: { from, to: 'now' } }, panelTo, 'utc'))
+    ).toEqual({
+      fromMs: NOW - width,
+      toMs: NOW,
+      relative: true,
+      lookbackMs: width,
+    });
+  });
+
+  it.each([
+    ['now-24h', 'now-1h', NOW - day, NOW - 60 * 60 * 1000, 'a window that does not end at now'],
+    ['now-1d/d', 'now', Date.UTC(2026, 7, 18), NOW, 'a rounded bound'],
+    ['now-7d', '2026-08-25T00:00:00.000Z', NOW - 7 * day, Date.parse('2026-08-25T00:00:00.000Z'), 'an absolute end'],
+    ['2026-08-12T00:00:00.000Z', 'now', Date.parse('2026-08-12T00:00:00.000Z'), NOW, 'an absolute start'],
+  ] as const)('stores %s → %s as the absolute window it is (%s)', (from, to, fromMs, toMs, _why) => {
+    expect(atNow(() => resolveTrainWindow({ model: 'holt', trainRange: { from, to } }, panelTo, 'utc'))).toEqual({
+      fromMs,
+      toMs,
+      relative: false,
+      lookbackMs: 0,
+    });
   });
 
   it('reports an invalid window instead of Auto when from is not before to', () => {
@@ -206,6 +241,22 @@ describe('applyLookbackRange', () => {
     expect(got.builder.intervals.intervals).toEqual([`${isoUtc(trainFrom)}/${isoUtc(trainTo)}`]);
   });
 
+  it('rewrites string leaves but never keys or unrelated numbers', () => {
+    const target: Record<string, unknown> = {
+      digits: `x${visFrom}y`,
+      epoch: visFrom,
+      longerEpoch: Number(`1${visFrom}`),
+      nested: [{ query: `SELECT ${visTo}` }],
+    };
+    target[String(visFrom)] = 'kept';
+    const [got] = applyLookbackRange([target], trainFrom, trainTo, visFrom, visTo);
+    expect(Object.keys(got)).toContain(String(visFrom));
+    expect(got.digits).toBe(`x${trainFrom}y`);
+    expect(got.epoch).toBe(trainFrom);
+    expect(got.longerEpoch).toBe(Number(`1${visFrom}`));
+    expect(got.nested).toEqual([{ query: `SELECT ${trainTo}` }]);
+  });
+
   it('rewrites SQL millis placeholders', () => {
     const [got] = applyLookbackRange(
       [
@@ -307,11 +358,14 @@ describe('timeZoneFromScene / dashboardTimeZone', () => {
     expect(timeZoneFromScene(null)).toBeUndefined();
   });
 
-  it('falls back to browser when no scene is mounted', () => {
+  it('prefers the mounted scene and otherwise asks Grafana for the zone', () => {
     const prev = (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext;
     try {
       delete (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext;
-      expect(dashboardTimeZone()).toBe('browser');
+      // No scene to read: Grafana's own resolver answers with the user's configured zone, which
+      // is what a dashboard left on Default gives the panel. Nothing else is reachable from a
+      // `StandardEditorProps` context, so the picker cannot do better than this.
+      expect(dashboardTimeZone()).toBe(getTimeZone());
       (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext = {
         state: { $timeRange: { state: { timeZone: 'utc' } } },
       };

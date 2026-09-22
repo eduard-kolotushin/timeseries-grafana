@@ -1,4 +1,4 @@
-import { dateTime, dateTimeFormat, dateTimeParse, rangeUtil } from '@grafana/data';
+import { dateTime, dateTimeFormat, dateTimeParse, getTimeZone, rangeUtil } from '@grafana/data';
 import { BaselineSeason, ForecastModel, TrainTimeRange } from './types';
 
 export const MAX_TRAIN_POINTS = 100_000;
@@ -106,13 +106,21 @@ export function timeZoneFromScene(root: unknown, depth = 0): string | undefined 
   return timeZoneFromScene(obj.parent, depth + 1);
 }
 
-/** Same timezone the overlay panel uses. Falls back to browser when no dashboard scene is mounted. */
+/**
+ * Same timezone the overlay panel uses. The mounted dashboard scene is the panel's own
+ * source for `PanelProps.timeZone`, so it wins; with no scene mounted, Grafana's own
+ * resolver answers with the user's configured zone — what a dashboard left on Default
+ * resolves to for the panel — and only then Grafana's `browser` default. The options
+ * editor receives no `PanelProps`, so this chain is as close to the panel as the API
+ * allows (a `StandardEditorProps` context carries frames, options and an event bus, no
+ * timezone).
+ */
 export function dashboardTimeZone(): string {
-  if (typeof window === 'undefined') {
-    return 'browser';
-  }
-  const scene = (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext;
-  return timeZoneFromScene(scene) ?? 'browser';
+  const scene =
+    typeof window === 'undefined'
+      ? undefined
+      : timeZoneFromScene((window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext);
+  return getTimeZone({ timeZone: scene ?? '' });
 }
 
 export type CivilDate = { year: number; month: number; day: number };
@@ -192,6 +200,15 @@ export function isExplicitAutoTrainRange(range?: TrainTimeRange): boolean {
   return !from || !to || (from.toLowerCase() === 'auto' && to.toLowerCase() === 'auto');
 }
 
+/**
+ * A Grafana relative bound, the shape the picker's Quick ranges write (`now`, `now-7d`,
+ * `now+6h`). Only `[now - lookbackMs, now]` is expressible as a relative window, so a
+ * bound pair counts as one only when `to` is anchored at `now`; a window that does not
+ * end there, a rounded bound (`now/d`, whose width the stored lookback cannot replay),
+ * or a calendar or hand-typed absolute bound stays absolute, which is faithful for it.
+ */
+const RELATIVE_BOUND = /^now(?:[+-]\d+(?:\.\d+)?(?:ms|s|m|h|d|w|M|y))*$/;
+
 function parseTimeRange(
   range: TrainTimeRange,
   timeZone?: string,
@@ -244,6 +261,12 @@ export function resolveTrainWindow(
   if (options.trainRange != null && !isExplicitAutoTrainRange(options.trainRange)) {
     const parsed = parseTimeRange(options.trainRange, timeZone);
     if (parsed) {
+      const rawFrom = options.trainRange.from?.trim() ?? '';
+      if (RELATIVE_BOUND.test(rawFrom) && (options.trainRange.to?.trim() ?? '') === 'now') {
+        // The Quick ranges are relative strings ("Last 7 days" is `now-7d` from `now`): a
+        // cron retrain must re-resolve that lookback, or one frozen week is replayed forever.
+        return { ...parsed, relative: true, lookbackMs: parsed.toMs - parsed.fromMs };
+      }
       // An absolute picker means those dates, not "the last N hours": replaying
       // them verbatim is the only faithful retrain.
       return { ...parsed, relative: false, lookbackMs: 0 };
@@ -318,27 +341,89 @@ export function applyLookbackRange<T>(
 ): T[] {
   const fromIso = isoUtc(fromMs);
   const toIso = isoUtc(toMs);
-  let json = JSON.stringify(targets);
-  json = replaceAll(json, '${__from:date:iso}', fromIso);
-  json = replaceAll(json, '${__to:date:iso}', toIso);
-  json = replaceAll(json, '${__from}', String(fromMs));
-  json = replaceAll(json, '${__to}', String(toMs));
-  if (visibleFromMs != null && visibleToMs != null && visibleFromMs !== fromMs) {
-    json = replaceAll(json, isoUtc(visibleFromMs), fromIso);
-    json = replaceAll(json, String(visibleFromMs), String(fromMs));
+  const rewrite = (text: string): string => {
+    let out = replaceAll(text, '${__from:date:iso}', fromIso);
+    out = replaceAll(out, '${__to:date:iso}', toIso);
+    out = replaceAll(out, '${__from}', String(fromMs));
+    out = replaceAll(out, '${__to}', String(toMs));
+    if (visibleFromMs != null && visibleToMs != null && visibleFromMs !== fromMs) {
+      out = replaceAll(out, isoUtc(visibleFromMs), fromIso);
+      out = replaceAll(out, String(visibleFromMs), String(fromMs));
+    }
+    if (visibleFromMs != null && visibleToMs != null && visibleToMs !== toMs) {
+      out = replaceAll(out, isoUtc(visibleToMs), toIso);
+      out = replaceAll(out, String(visibleToMs), String(toMs));
+    }
+    return out;
+  };
+  // Literals are replaced in the target's string leaves, not in its serialized JSON text:
+  // a text replace also hit object keys and the digits of unrelated strings.
+  const pinned = new Map<number, number>();
+  if (visibleFromMs != null && visibleFromMs !== fromMs) {
+    pinned.set(visibleFromMs, fromMs);
   }
-  if (visibleFromMs != null && visibleToMs != null && visibleToMs !== toMs) {
-    json = replaceAll(json, isoUtc(visibleToMs), toIso);
-    json = replaceAll(json, String(visibleToMs), String(toMs));
+  if (visibleToMs != null && visibleToMs !== toMs) {
+    pinned.set(visibleToMs, toMs);
   }
-  const cloned = JSON.parse(json) as T[];
+  const cloned = JSON.parse(JSON.stringify(targets)) as T[];
   for (const target of cloned) {
-    const builder = (target as { builder?: { intervals?: { intervals?: string[] } } }).builder;
-    if (Array.isArray(builder?.intervals?.intervals)) {
-      builder.intervals.intervals = builder.intervals.intervals.map(() => `${fromIso}/${toIso}`);
+    rewriteLeaves(target, rewrite, pinned);
+  }
+  for (const target of cloned) {
+    if (isDruidIntervalsTarget(target)) {
+      target.builder.intervals.intervals = target.builder.intervals.intervals.map(() => `${fromIso}/${toIso}`);
     }
   }
   return cloned;
+}
+
+type DruidIntervalsTarget = { builder: { intervals: { intervals: string[] } } };
+
+/** A Druid builder target whose interval list this module pins to the training window. */
+function isDruidIntervalsTarget(target: unknown): target is DruidIntervalsTarget {
+  if (target === null || typeof target !== 'object' || !('builder' in target)) {
+    return false;
+  }
+  const { builder } = target;
+  if (builder === null || typeof builder !== 'object' || !('intervals' in builder)) {
+    return false;
+  }
+  const { intervals } = builder;
+  return (
+    intervals !== null &&
+    typeof intervals === 'object' &&
+    'intervals' in intervals &&
+    Array.isArray(intervals.intervals)
+  );
+}
+
+/** Rewrite every string leaf under `node` and every number leaf pinning a visible bound. */
+function rewriteLeaves(node: unknown, rewrite: (text: string) => string, pinned: Map<number, number>): void {
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) {
+      node[i] = rewriteLeaf(node[i], rewrite, pinned);
+    }
+    return;
+  }
+  if (node === null || typeof node !== 'object') {
+    return;
+  }
+  // The clone came out of `JSON.parse`, so it holds plain objects: string-keyed indexing is all this needs.
+  const record = node as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    record[key] = rewriteLeaf(record[key], rewrite, pinned);
+  }
+}
+
+function rewriteLeaf(value: unknown, rewrite: (text: string) => string, pinned: Map<number, number>): unknown {
+  if (typeof value === 'string') {
+    return rewrite(value);
+  }
+  if (typeof value === 'number') {
+    return pinned.get(value) ?? value;
+  }
+  rewriteLeaves(value, rewrite, pinned);
+  return value;
 }
 
 function replaceAll(haystack: string, needle: string, replacement: string): string {

@@ -1,7 +1,7 @@
-import { FieldType, toDataFrame } from '@grafana/data';
+import { dateTime, FieldType, toDataFrame } from '@grafana/data';
 import { FORECAST_DATASOURCE_TYPE } from '../forecast-datasource/types';
 import { fingerprintPayload } from './cacheKey';
-import { isForecastTarget, metricTargets, splitPanelFrames } from './mixed';
+import { drawableFrames, framesQueryKey, isForecastTarget, LoadedFrames, metricTargets, splitPanelFrames } from './mixed';
 import { ForecastOptions } from './types';
 
 const metric = {
@@ -69,6 +69,66 @@ describe('splitPanelFrames', () => {
     const got = splitPanelFrames([dsFrame], [forecast]);
     expect(got.datasource).toHaveLength(1);
     expect(got.history).toHaveLength(0);
+  });
+});
+
+describe('framesQueryKey', () => {
+  const base = {
+    range: { from: dateTime(1_000), to: dateTime(2_000) },
+    targets: [{ refId: 'A' }, { refId: 'B' }],
+    intervalMs: 60_000,
+  };
+
+  it.each([
+    ['the same query in a fresh request object', base, true],
+    ['a moved range', { ...base, range: { from: dateTime(1_000), to: dateTime(3_000) } }, false],
+    ['a dropped refId', { ...base, targets: [{ refId: 'A' }] }, false],
+    ['a changed resolution', { ...base, intervalMs: 15_000 }, false],
+  ])('%s → same key as the base query: %s', (_name, request, same) => {
+    expect(framesQueryKey(request) === framesQueryKey(base)).toBe(same);
+  });
+
+  it('is empty without a request', () => {
+    expect(framesQueryKey(undefined)).toBe('');
+  });
+});
+
+describe('drawableFrames', () => {
+  const history = [
+    toDataFrame({
+      refId: 'A',
+      fields: [
+        { name: 'Time', type: FieldType.time, values: [2_000, 3_000] },
+        { name: 'value', type: FieldType.number, values: [10, 20] },
+      ],
+    }),
+  ];
+  const plotted = [
+    ...history,
+    toDataFrame({
+      refId: 'value',
+      fields: [
+        { name: 'Time', type: FieldType.time, values: [4_000, 5_000] },
+        { name: 'value', type: FieldType.number, values: [30, 40] },
+      ],
+    }),
+  ];
+  const currentKey = framesQueryKey({
+    range: { from: dateTime(2_000), to: dateTime(4_000) },
+    targets: [{ refId: 'A' }],
+  });
+  const previousKey = framesQueryKey({
+    range: { from: dateTime(1_000), to: dateTime(2_000) },
+    targets: [{ refId: 'A' }],
+  });
+
+  it.each<[string, LoadedFrames | undefined, string]>([
+    ['the load that answers the current query', { key: currentKey, frames: plotted }, 'load'],
+    ['a load left over from the previous range', { key: previousKey, frames: plotted }, 'history'],
+    ['a load that never finished', undefined, 'history'],
+    ['a load that drew nothing', { key: currentKey, frames: [] }, 'history'],
+  ])('%s → drawn from the %s', (_name, load, source) => {
+    expect(drawableFrames(load, currentKey, history)).toBe(source === 'load' ? plotted : history);
   });
 });
 

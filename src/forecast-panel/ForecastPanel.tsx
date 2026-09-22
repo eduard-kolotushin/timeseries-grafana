@@ -14,7 +14,7 @@ import { FORECAST_RESOURCE } from '../constants';
 import { postResource } from './abortable';
 import { dashboardUidFromPath } from './alertFromPanel';
 import { cacheKey, fitOptions } from './cacheKey';
-import { extractSeries } from './extract';
+import { extractSeries, historyFrame } from './extract';
 import {
   dashboardNowMs,
   forecastLevel,
@@ -26,9 +26,9 @@ import {
 } from './lookback';
 import { OverlayLoadGate } from './overlayInflight';
 import { loadOverlayForecasts } from './overlayLoad';
-import { metricTargets, splitPanelFrames } from './mixed';
+import { drawableFrames, framesQueryKey, LoadedFrames, metricTargets, splitPanelFrames } from './mixed';
 import { REASON_INVALID_RANGE, REASON_INVALID_TRAIN_RANGE } from './reasons';
-import { queueRetrain, takeRetrain } from './retrain';
+import { clearRetrain, queueRetrain, retrainKey, takeRetrain } from './retrain';
 import { refType, queryTrainingFrames, trainRejectReason } from './trainQuery';
 import { summarizeTrainTargets } from './trainRewrite';
 import { ForecastOptions, ForecastResponse } from './types';
@@ -61,14 +61,31 @@ export const ForecastPanel: React.FC<Props> = ({
     () => historyFrames.filter((frame) => extractSeries(frame, historyFrames).length > 0),
     [historyFrames]
   );
-  const [frames, setFrames] = useState<DataFrame[]>(graphableFrames);
+  const [load, setLoad] = useState<LoadedFrames>();
   const [error, setError] = useState<string | null>(null);
   const [forecastToMs, setForecastToMs] = useState<number | undefined>();
   const [usedSaved, setUsedSaved] = useState(false);
   const [retrainNonce, setRetrainNonce] = useState(0);
   const loadGate = useRef(new OverlayLoadGate());
+  const mounted = useRef(true);
+  // The panel's own retrain slot: this dashboard's panel, not any panel with this id.
+  const dashboardUid = data.request?.dashboardUID || dashboardUidFromPath(locationService.getLocation().pathname);
+  const key = retrainKey(dashboardUid, id);
+  const queryKey = framesQueryKey(data.request);
 
-  useEffect(() => () => loadGate.current.abortAll(), []);
+  useEffect(() => {
+    mounted.current = true;
+    const gate = loadGate.current;
+    return () => {
+      // On unmount nothing will take a queued retrain, and a stranded flag would fire on a
+      // later remount of the same panel. This effect is declared before the load effect, so
+      // on unmount it also blocks that effect's cleanup from re-queueing (and clears the
+      // re-queue if it already ran).
+      mounted.current = false;
+      clearRetrain(key);
+      gate.abortAll();
+    };
+  }, [key]);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,7 +101,7 @@ export const ForecastPanel: React.FC<Props> = ({
 
       const visible = graphableFrames.flatMap((series) => extractSeries(series, graphableFrames));
       for (const points of visible) {
-        history.push(toFrame(points.name, points.times, points.values));
+        history.push(historyFrame(points));
       }
 
       if (isInvalidForecastWindow(window)) {
@@ -92,7 +109,7 @@ export const ForecastPanel: React.FC<Props> = ({
           setError(REASON_INVALID_RANGE);
           setForecastToMs(undefined);
           setUsedSaved(false);
-          setFrames(history);
+          setLoad({ key: queryKey, frames: history });
           finished = true;
         }
         return;
@@ -106,7 +123,7 @@ export const ForecastPanel: React.FC<Props> = ({
           setError(REASON_INVALID_TRAIN_RANGE);
           setForecastToMs(undefined);
           setUsedSaved(false);
-          setFrames(history);
+          setLoad({ key: queryKey, frames: history });
           finished = true;
         }
         return;
@@ -128,7 +145,7 @@ export const ForecastPanel: React.FC<Props> = ({
           setError(trainReject);
           setForecastToMs(undefined);
           setUsedSaved(false);
-          setFrames(history);
+          setLoad({ key: queryKey, frames: history });
           finished = true;
         }
         return;
@@ -137,14 +154,14 @@ export const ForecastPanel: React.FC<Props> = ({
         setForecastToMs(window.toMs);
       }
 
-      retrain = takeRetrain(id);
+      retrain = takeRetrain(key);
       // Built once and shared: the probe needs it as much as the fit does. The summary
       // comes from the panel's own targets, so a probe can identify a row that has not
       // been retrained by a browser since the plugin started recording identity.
       const provenance = {
         panelId: id,
         panelTitle: title,
-        dashboardUid: data.request?.dashboardUID || dashboardUidFromPath(locationService.getLocation().pathname),
+        dashboardUid,
         querySummary: summarizeTrainTargets(refType(targets[0]?.datasource), targets) || undefined,
       };
       const result = await loadOverlayForecasts({
@@ -183,36 +200,43 @@ export const ForecastPanel: React.FC<Props> = ({
       finished = true;
       setError(result.error);
       setUsedSaved(result.usedSaved);
-      setFrames([
-        ...history,
-        ...result.forecasts.map((fc) =>
-          toForecastFrame(fc.name, fc.times, fc.values, fc.lower, fc.upper, theme.colors.warning.main)
-        ),
-      ]);
+      setLoad({
+        key: queryKey,
+        frames: [
+          ...history,
+          ...result.forecasts.map((fc) =>
+            toForecastFrame(fc.name, fc.times, fc.values, fc.lower, fc.upper, theme.colors.warning.main)
+          ),
+        ],
+      });
     }
 
     load().finally(() => loadGate.current.finish(ac));
     return () => {
       cancelled = true;
-      if (retrain && !finished) {
-        queueRetrain(id);
+      // The click was not honored yet. A superseded load hands its retrain to the load
+      // replacing it (this cleanup runs before that load's prologue, which takes the flag,
+      // so the retrain happens exactly once); on unmount there is no successor and the
+      // unmount effect above clears what this queues.
+      if (retrain && !finished && mounted.current) {
+        queueRetrain(key);
       }
     };
     // `options` is a new object whenever any panel option changes, so it covers every field the load reads.
-  }, [id, title, retrainNonce, data.request, graphableFrames, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main]);
+  }, [id, key, queryKey, title, retrainNonce, data.request, graphableFrames, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main, dashboardUid]);
 
-  // `frames` (state) carries the history plus the forecast once the load finished; before
-  // that the drawable history is what there is to show.
+  // The load's frames once they answer the panel's current query, the current history
+  // before that: a superseded load never leaves the previous range's frames on screen.
   const plotFrames = useMemo(
     () =>
       applyFieldOverrides({
-        data: frames.length > 0 ? frames : graphableFrames,
+        data: drawableFrames(load, queryKey, graphableFrames),
         fieldConfig,
         replaceVariables,
         theme,
         timeZone,
       }),
-    [frames, graphableFrames, fieldConfig, replaceVariables, theme, timeZone]
+    [load, queryKey, graphableFrames, fieldConfig, replaceVariables, theme, timeZone]
   );
 
   // Nothing to draw: Grafana's own empty state, with the reason the panel resolved above it.
@@ -266,7 +290,7 @@ export const ForecastPanel: React.FC<Props> = ({
           fill="outline"
           type="button"
           onClick={() => {
-            queueRetrain(id);
+            queueRetrain(key);
             setRetrainNonce((n) => n + 1);
           }}
         >

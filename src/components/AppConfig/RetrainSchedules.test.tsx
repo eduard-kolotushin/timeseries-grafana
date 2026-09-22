@@ -44,6 +44,9 @@ const errorRow: ScheduleRow = {
 
 const neverRow: ScheduleRow = { ...panelRow, key: 'neverhash', lastStatus: undefined };
 
+/** A row whose panel moved to another training window, so nothing writes this key any more. */
+const supersededRow: ScheduleRow = { ...panelRow, key: 'supersededhash', supersededAt: '2026-09-21T04:00:00Z' };
+
 /** A row trained by a panel that recorded where it lives and what it queried. */
 const sourcedRow: ScheduleRow = {
   ...panelRow,
@@ -151,6 +154,23 @@ describe('RetrainSchedules', () => {
     pickRadio('Status', 'never run');
     expect(screen.getByLabelText('panel/neverhash cron')).toBeInTheDocument();
     expect(screen.queryByLabelText('panel/errorhash cron')).toBeNull();
+  });
+
+  it.each<[string, ScheduleRow, number]>([
+    ['marks a superseded row so it can be found and deleted', supersededRow, 1],
+    ['leaves a row its panel still trains unmarked', panelRow, 0],
+  ])('%s', async (_name, row, badges) => {
+    renderSchedules([row]);
+    await screen.findByLabelText(`panel/${row.key} cron`);
+    expect(within(rowOf(`panel/${row.key} cron`)).queryAllByText('Superseded')).toHaveLength(badges);
+  });
+
+  it('deletes a superseded row off its cron', async () => {
+    renderSchedules([supersededRow, panelRow]);
+    await screen.findByLabelText('panel/supersededhash cron');
+    fireEvent.click(screen.getByLabelText('panel/supersededhash delete'));
+    await waitFor(() => expect(mockDelete).toHaveBeenCalledTimes(1));
+    expect(mockDelete.mock.calls[0][0]).toContain('scope=panel&key=supersededhash');
   });
 
   it('saves an edited cron', async () => {

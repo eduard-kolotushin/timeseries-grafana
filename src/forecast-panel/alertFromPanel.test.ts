@@ -1,17 +1,30 @@
 import { FORECAST_DATASOURCE_TYPE } from '../forecast-datasource/types';
 import {
   alertingNewPath,
+  alertingUidsFor,
   asSaveModel,
   dashboardTimeFromScene,
   dashboardUidFromPath,
+  EXPRESSION_DATASOURCE_TYPE,
   EXPRESSION_DATASOURCE_UID,
   findPanel,
   findQueryRunnerState,
+  PanelTarget,
   pickLivePanel,
   REASON_DASHBOARD_NOT_SAVED,
   REASON_NO_ALERTING_QUERY,
   ruleFormDefaultsFromPanel,
 } from './alertFromPanel';
+
+jest.mock('@grafana/runtime', () => ({
+  getDataSourceSrv: () => ({
+    getInstanceSettings: (uid: string) =>
+      ({ testdata: { meta: { alerting: true } }, loki: { meta: { alerting: false } } } as Record<
+        string,
+        { meta: { alerting: boolean } } | undefined
+      >)[uid],
+  }),
+}));
 
 const metric = {
   refId: 'A',
@@ -43,8 +56,30 @@ describe('asSaveModel / findPanel', () => {
   });
 });
 
+describe('alertingUidsFor', () => {
+  const expr = { refId: 'B', datasource: { uid: EXPRESSION_DATASOURCE_UID, type: EXPRESSION_DATASOURCE_TYPE } };
+
+  const cases: Array<[string, PanelTarget[], { uid: string } | undefined, string[]]> = [
+    ['a row on a datasource that can alert', [metric], undefined, ['testdata']],
+    ['a row that inherits the panel datasource', [{ refId: 'A' }], { uid: 'testdata' }, ['testdata']],
+    ['a panel expression row', [expr], undefined, [EXPRESSION_DATASOURCE_UID]],
+    ['a row on a datasource that cannot alert', [{ refId: 'C', datasource: { uid: 'loki' } }], undefined, []],
+    ['a row with no datasource anywhere', [{ refId: 'A' }], undefined, []],
+  ];
+
+  it.each(cases)('%s → %s', (_name, targets, panelDs, want) => {
+    expect([...alertingUidsFor(targets, panelDs)]).toEqual(want);
+  });
+});
+
 describe('ruleFormDefaultsFromPanel', () => {
   const alertingUids = new Set(['fc', 'prom']);
+  const exprRow = {
+    refId: 'B',
+    datasource: { uid: EXPRESSION_DATASOURCE_UID, type: EXPRESSION_DATASOURCE_TYPE },
+    type: 'reduce',
+    expression: 'A',
+  };
 
   it('keeps Mixed Forecast targets and drops hidden and non-alerting rows', () => {
     const got = ruleFormDefaultsFromPanel({
@@ -89,6 +124,36 @@ describe('ruleFormDefaultsFromPanel', () => {
         panelId: 1,
         panel: { id: 1, targets: [metric] },
         alertingUids,
+      })
+    ).toEqual({ ok: false, reason: REASON_NO_ALERTING_QUERY });
+  });
+
+  it('keeps the panel’s own expression rows instead of adding the default pair', () => {
+    const got = ruleFormDefaultsFromPanel({
+      dashboardUid: 'dash',
+      panelId: 1,
+      panel: { id: 1, title: 'Reduce first', targets: [metric, exprRow] },
+      alertingUids: new Set(['testdata', EXPRESSION_DATASOURCE_UID]),
+    });
+    expect(got.ok).toBe(true);
+    if (!got.ok) {
+      return;
+    }
+    expect(got.defaults.queries.map((q) => q.refId)).toEqual(['A', 'B']);
+    expect(got.defaults.queries[1]).toMatchObject({ datasourceUid: EXPRESSION_DATASOURCE_UID, queryType: '' });
+    expect(got.defaults.queries[1].model.type).toBe('reduce');
+    // The panel already carries the chain, so nothing is appended and it stays the condition.
+    expect(got.defaults.queries.some((q) => q.model.type === 'threshold')).toBe(false);
+    expect(got.defaults.condition).toBe('B');
+  });
+
+  it('reasons when the panel’s only rows are expressions', () => {
+    expect(
+      ruleFormDefaultsFromPanel({
+        dashboardUid: 'dash',
+        panelId: 1,
+        panel: { id: 1, targets: [exprRow] },
+        alertingUids: new Set([EXPRESSION_DATASOURCE_UID]),
       })
     ).toEqual({ ok: false, reason: REASON_NO_ALERTING_QUERY });
   });
