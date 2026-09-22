@@ -36,27 +36,37 @@ LoadBalancer's host port, published by Docker Desktop's kind cloud provider (see
 
 ## Environment under test
 
-Both environments were exercised on 2026-09-21 (13:07–14:2x MSK) from the same source revisions, and both were
-left running afterwards. A third pass the same day (14:16–14:31 UTC) added a **temporary second release** of the
-same chart with two Grafana replicas over one Postgres, to observe the HA claim [Scaling and HA](#scaling-and-ha);
-it was removed again at the end of the run.
+Both environments were first exercised on 2026-09-21 (13:07–14:2x MSK) from the same source revisions, and both
+were left running afterwards. A third pass the same day (14:16–14:31 UTC) added a **temporary second release** of
+the same chart with two Grafana replicas over one Postgres, to observe the HA claim
+[Scaling and HA](#scaling-and-ha); it was removed again at the end of the run.
+
+The **rows below carry the remediated state**, re-measured on 2026-09-22 (12:39–13:00 UTC) on that same
+still-running pair of stacks; a transcript that quotes a build hash quotes the build *its own* run used, so the
+2026-09-21 numbers in the discrepancy sections stay as observations of that day.
 
 | | Compose sandbox | Kubernetes (Helm) |
 | --- | --- | --- |
 | Grafana | 13.1.0 (`commit b309c9bb3b81a748c3a75289236a27309ed2566a`), `http://localhost:3000`, anonymous Admin, org 1 | 13.1.0, `svc/timeseries-grafana` — LoadBalancer `EXTERNAL-IP 172.18.0.5:80` (a cluster-internal address); the host reaches it at `http://localhost:80` through Docker Desktop's kind cloud provider (`kindccm-…`, `envoyproxy/envoy:v1.36.7`, `0.0.0.0:80->80/tcp`), and `kubectl -n timeseries port-forward svc/timeseries-grafana 30001:80` (what `make helm-grafana` runs) serves the same — anonymous Admin, org 1 |
-| Plugin build | `dist/` mounted from the workspace: `gpx_forecast_linux_amd64` sha256 `34bf53244166948b6a0bbfc9fb79f942da2a4dbd229b54a5b1cba91ae98b43d6`, `module.js` sha256 `42564adfe17e496b3463f344d49fd7c0db3477c978f0e0e5fb3c7e8e13977f15` — both byte-identical inside the Grafana container. The discrepancy fixes were verified on a rebuild of the same tree: `gpx_forecast_linux_amd64` `a034c1ca02c028f065f0bc8eb206e8fec12b950a04d4f22126c9fbfae7c1d4df`, `forecast-panel/module.js` `429a2f99d4257049fdc13c4b7132df4c5a92600b3c0b8d586d6194808e6b4c80` | images built from the same pinned refs: `ghcr.io/eduard-kolotushin/timeseries-grafana:0.1.0` (`b466f49309cf`, built 13:59:36) and `…-baselines:0.1.0` (`11adb8b064c9`, built 13:59:58), imported into the node's containerd with `docker save … \| docker exec -i desktop-control-plane ctr -n k8s.io images import -`; the fix run rebuilt and re-imported the Grafana image from `PLUGIN_REF=8f2a9ff…` (`477c42ed65ff`, manifest `b542555444440409b2ad9e03925141a2c98e58aefd50d66590a1df0ec6665fb8`) and rolled the Deployment |
-| Source revisions | `timeseries-grafana` `d6399e5a3451c4cacf433736d28c80a966235502`, `timeseries-baselines` `179a1551e4dd1064b93cbdd42d12fb684a20dfcd` | same two commits, baked into the images by `timeseries-k8s` `PLUGIN_REF` / `BASELINES_REF`. The discrepancy fixes add `10a23cc` and `8f2a9ff` to `timeseries-grafana` (the worker is unchanged) and move the K8s pin to `8f2a9ff` |
+| Plugin build | **2026-09-22 (head `74b12e4`)**: `dist/` mounted from the workspace — `gpx_forecast_linux_amd64` sha256 `33b9ede91619f7c3caf22f0ffcc2edb595b936710b6d78e0da7232185522c885`, `forecast-panel/module.js` sha256 `0b3b25d0b56727ff7081524686ff108f792bc0efccbb18fc850ec1fcc4fb4226` — both byte-identical inside the Grafana container. The binary embeds `vcs.revision=74b12e46dc28`, so its hash moved with the docs-only commit while the panel bundle is the fix rebuild's. For reference: pass 1 measured `34bf53244166948b6a0bbfc9fb79f942da2a4dbd229b54a5b1cba91ae98b43d6` / `42564adfe17e496b3463f344d49fd7c0db3477c978f0e0e5fb3c7e8e13977f15`, the discrepancy rebuild `a034c1ca02c028f065f0bc8eb206e8fec12b950a04d4f22126c9fbfae7c1d4df` / `429a2f99d4257049fdc13c4b7132df4c5a92600b3c0b8d586d6194808e6b4c80` | images built from the pinned refs and tagged by the **pin's short sha**: `ghcr.io/eduard-kolotushin/timeseries-grafana:8feecafc14ba` and `…-baselines:7ec489faafeb`, imported into the node's containerd by the sandbox's `make helm-import` (`docker save … \| docker exec -i desktop-control-plane ctr -n k8s.io images import -`); the pass-3 `--set grafana.configRevision=…` run rolled the Deployment to `timeseries-grafana-7f89fd5cb-nr9zw` |
+| Source revisions | **2026-09-22**: `timeseries-grafana` `74b12e46dc282a4663addb7ee9d323149a07dbca`, `timeseries-baselines` `7ec489faafeb85971dd5f5c247aaf0bc37c63913`; the plugin depends on the tags `timeseries v0.1.1` (`e74ecaa`) and `timeseries-forecast v0.5.0` (`029c690`). Pass 1 measured `d6399e5a…` / `179a155…`; the discrepancy fixes added `10a23cc` and `8f2a9ff` | the same two commits, baked into the images by `timeseries-k8s` `2406007`'s `PLUGIN_REF=8feecafc14ba…` / `BASELINES_REF=7ec489faafeb…` (the chart pins an *ancestor* of this repo's head when the trailing commits are docs-only, which `make check-pins` accepts and reports) |
 | Data plane | Druid 37.0.0 (`http://localhost:8888`, datasource `druid`, tables `minuteweek`/`metrics`/`baselines`), Kafka 3.9.1 (`metrics`, `baselines`), OpenSearch 2.18.0, Prometheus 2.55.1, overlay Postgres 17.6 (schema `forecast`) | Helm releases `kafka`, `druid`, `prometheus`, `opensearch`, `overlay-postgres`, `timeseries` — all `deployed` on one kind node (`desktop-control-plane`, v1.36.1, containerd 2.3.1) |
-| Worker | `alpine:3.21` + `/usr/local/bin/baselines` (sha256 `c725417cbd3a84cbb97258b8d40e5368bd9e2434f18373f938c26d748a072c7a`), env from `docker-compose.yaml` | Deployment `timeseries-baselines` (`SHARD_DNS=timeseries-baselines-headless`, `SHARD_MEMBERSHIP=store`), env from ConfigMap `timeseries-baselines-env` |
+| Worker | `alpine:3.21` + `/usr/local/bin/baselines` (2026-09-22 build sha256 `759a9be5280e986e56a179c28befe5cc38f405b1b9de1efb9080fada4ff01e46`; pass 1 measured `c725417cbd3a84cbb97258b8d40e5368bd9e2434f18373f938c26d748a072c7a`), env from `docker-compose.yaml` | Deployment `timeseries-baselines` (`SHARD_DNS=timeseries-baselines-headless`, `SHARD_MEMBERSHIP=store`), env from ConfigMap `timeseries-baselines-env` |
 | Configuration source | provisioning `provisioning/plugins/apps.yaml` + `docker-compose.yaml` env | ConfigMaps `timeseries-forecast-app` (app `apps.yaml`), `timeseries-forecast-datasource`, `timeseries-forecast-store`, `timeseries-baselines-env` |
-| Notable | 18 containers, ~4.2 GiB resident | 15.6 GiB allocatable; the two stacks ran **concurrently** without an OOM (≈4 GiB used); no metrics-server |
+| Notable | 17 containers (pass 1 counted 18), ~4 GiB resident | 15.6 GiB allocatable; the two stacks ran **concurrently** without an OOM (≈4 GiB used); no metrics-server |
 
-The Kubernetes plugin image cannot be pulled from GHCR (`timeseries-k8s` carries no `v*` tag, so the two
-`:0.1.0` tags are unpublished): both pods first came up `ErrImagePull` / `ImagePullBackOff`, and only the
-`ctr -n k8s.io images import` step above made them `1/1 Running`. The Compose sandbox needed no such step
-(it mounts the workspace `dist/`). The Kubernetes dashboards are provisioned **read-only** (`Cannot save
-provisioned dashboard`), so the panel checks in the discrepancy fixes ran against a throwaway copy of
-`forecast-minute-week`, which was deleted afterwards.
+The Kubernetes plugin image is still not *pulled* from GHCR (`timeseries-k8s` carries no `v*` tag, so the two
+`:0.1.0` tags are unpublished), but the sandbox no longer asks it to be: `make helm-images` builds both images
+from the Dockerfiles' pinned sibling refs, tags them by the pin's short sha (`…-grafana:8feecafc14ba`,
+`…-baselines:7ec489faafeb` — an immutable tag, which `pullPolicy: IfNotPresent` cannot mask behind a cached
+one), and `make helm-import` loads them into the node's containerd; `make helm-up`/`helm-refresh` run the import
+before the upgrade, so the pods come up `1/1 Running` without a manual `ctr` step. The Compose sandbox needs
+none of that (it mounts the workspace `dist/`: the in-container `gpx_forecast_linux_amd64`,
+`forecast-datasource/gpx_forecast_linux_amd64` and `forecast-panel/module.js` are byte-identical to the host
+files, sha256 `33b9ede9…`, `33b9ede9…` and `0b3b25d0…` on 2026-09-22). The Kubernetes dashboards are
+provisioned **read-only** (`Cannot save provisioned dashboard`), so panel checks that need an edit run against a
+throwaway copy of `forecast-minute-week`, which is deleted afterwards; Compose dashboards are writable and are
+restored from `provisioning/dashboards/minute-week.json` after such a check.
 
 ## timeseries-grafana functions
 
@@ -83,7 +93,7 @@ provisioned dashboard`), so the panel checks in the discrepancy fixes ran agains
 | **Function** | One request shape for three jobs, chosen by the body: **fit** (`times`+`values`), **fit and persist** (fit + `cacheKey`), **restore** (`cacheKey`, no points). |
 | **Who can use** | Any user — no Admin gate (unlike `/schedules`). Live: the overlay panel (anonymous Admin) and an unauthenticated `curl` both got 200. |
 | **How configured** | Nothing beyond the plugin being enabled; the store DSN decides whether a `cacheKey` persists (F20). |
-| **Input params** | `times` (int64 ms, ascending, unique), `values` (number or `null`), `model` (`naive`\|`mean`\|`drift`\|`seasonal`\|`baseline`\|`ses`\|`holt`), `from`/`to` (int64 ms, the forecast window), `alpha`, `beta`, `period`, `season` (`hour`\|`day`\|`week`\|`minute-week`), `calendar` (`""`\|`ru`), `level` (0..1; 0 omits bands), `cacheKey` (64 lowercase hex), `retrain` (bool), `trainSource`, `provenance`. Limits: ≤100000 training points, body ≤16 MiB (413 beyond it), a body too large for a legal training series refused with 413 **before** it is decoded, one emitted window capped at 1000000 points (413 beyond it, checked before the fit), 4 concurrent Fit/ForecastRange calls. |
+| **Input params** | `times` (int64 ms, ascending, unique), `values` (number or `null`), `model` (`naive`\|`mean`\|`drift`\|`seasonal`\|`baseline`\|`ses`\|`holt`), `from`/`to` (int64 ms, the forecast window), `alpha`, `beta`, `period`, `season` (`hour`\|`day`\|`week`\|`minute-week`), `calendar` (`""`\|`ru`), `level` (0..1; 0 omits bands), `cacheKey` (64 lowercase hex), `retrain` (bool), `trainSource`, `provenance`. Limits: ≤100000 training points (`413 forecast: training series exceeds 100000 points`), one emitted window capped at 1000000 points (413, checked before the fit), 4 concurrent Fit/ForecastRange calls (`429 forecast: busy`). Bodies are capped twice: a declared `Content-Length` above `2 × 100000 × 32 B = 6400000` is refused **before** decoding with `413 forecast: request body too large for a legal training series`, and one above the 16 MiB body cap with `413 forecast: request body too large`; a body past the 32 MiB transport ceiling never reaches the handler (Grafana answers its own 500 `grpc: received message larger than max`). The pre-flight reads `Content-Length` only, so a chunked body is bounded by the decoder's `MaxBytesReader` instead — this is not reachable through Grafana's proxy, which buffers the body and re-sends it with a known length (verified 2026-09-22: the same 14.23 MB body sent `Transfer-Encoding: chunked` still answered the pre-flight's 413). |
 | **Expected result** | 200 with `times`/`values` (and `lower`/`upper` when `level≠0`); points start at `last_time + step` and are clipped to `[from,to]`. An empty fit → 400 `forecast: series is empty`. With `cacheKey`+points the snapshot is stored and the panel's schedule row is written. |
 
 **Positive — Compose:** 300 points ending now, `model:"holt"`, `from=now`, `to=now+2h` →
@@ -277,7 +287,7 @@ history, forecast and bands, and no reason text.
 | --- | --- |
 | **Function** | Choose the model, the two windows, the band and the panel's load cap. |
 | **Who can use** | **Panel** (any user who can edit the dashboard). |
-| **How configured** | Panel options, stored in the dashboard JSON. Live labels: *Model*, *Forecast range*, *Alpha*, *Beta*, *Seasonal period*, *Seasonality*, *Calendar*, *Show prediction interval*, *Interval coverage*, *Training period*, *Max in-flight loads*, *Saved model*, *Retrain*, and the *Alerting* group (*New alert rule*). Keys: `model`, `forecastRange`, `alpha`, `beta`, `period`, `season`, `calendar`, `showInterval`, `interval`, `trainRange`, `maxInflightLoads` (source: `src/forecast-panel/module.ts`). |
+| **How configured** | Panel options, stored in the dashboard JSON. Live labels: *Model*, *Forecast range*, *Alpha*, *Beta*, *Seasonal period*, *Seasonality*, *Calendar*, *Show prediction interval*, *Interval coverage*, *Training period*, *Legacy lookback*, *Max in-flight loads*, *Saved model*, *Retrain*, and the *Alerting* group (*New alert rule*). Keys: `model`, `forecastRange`, `alpha`, `beta`, `period`, `season`, `calendar`, `showInterval`, `interval`, `trainRange`, `lookback`, `maxInflightLoads` (source: `src/forecast-panel/module.ts`). |
 | **Input params** | `forecastRange`/`trainRange` are `{from,to}` raw strings — empty means **Auto** (`now` → `now` + model duration; the last model window ending at the panel's `to`). `interval` 0 hides the band; `maxInflightLoads` minimum 1 (default 1). |
 | **Expected result** | The panel redraws with the new option. |
 
@@ -499,8 +509,9 @@ all retrained to `ok`).
 **Positive — Compose:** the Configuration page values (`overlay-postgres`/`5432`/`overlay`/`overlay`/`disable`)
 come from `provisioning/plugins/apps.yaml`; a fit with `cacheKey 0f…0f` produced a row
 (`org_id 1`, `pg_column_size(snapshot)=236`) and the panel row `<org 1> 0f0f…` with a `spec` holding
-`{"to":…,"from":…,"model":"holt","season":"","panelId":1,"queries":null,"calendar":"","lookback":"21d","relative":true,"lookbackMs":1814400000,…}`;
-the K8s store behaved identically through the chart ConfigMaps.
+`{"to":…,"from":…,"model":"holt","season":"","panelId":1,"queries":[],"calendar":"","lookback":"21d","relative":true,"lookbackMs":1814400000,…}`
+— the writer stores an absent or `null` query list as `[]` (F3), so a row the scheduler can read is always a row
+it can fetch; the 2026-09-21 transcript's `"queries":null` is the pre-fix writer.
 
 **Negative — Compose (throwaway Grafana without a DSN, as in F8):** `GET :3001/…/resources/schedules` → **503**
 `forecast: snapshot store not configured`; the datasource health → 400
@@ -772,10 +783,12 @@ The two processes meet at exactly two places, both in the overlay Postgres:
   `cacheKey` the panel computes. Observed live: `pg_column_size(snapshot)` `236` (a two-point API fit) up to
   `447908` (a panel's minute-of-week fit); the column is `jsonb`, and the panel's `trainSource`/`provenance`
   fields are **not** part of the fingerprint — a Mixed panel held the same key as the metric-only run.
-- **`forecast.retrain (scope, org_id, key, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status, claimed_by, claimed_until, updated_at)`**,
+- **`forecast.retrain (scope, org_id, key, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status, claimed_by, claimed_until, superseded_at, updated_at)`**,
   primary key `(scope, org_id, key)` — the queue. `panel` rows are written by the plugin (with `spec` holding the
   queries, window and identity), `baseline` rows by the worker (with no `spec`), and each side claims only what it
   owns: the plugin its own org's `panel` rows, the worker the fleet-wide (`org_id = 0`) `baseline` rows.
+  `superseded_at` is the plugin's retire marker (see [Scaling and HA](#scaling-and-ha) and F46): the worker reads
+  it in its own claim predicate, so a superseded row is claimed by neither side.
 - The worker also owns `baselines.snapshots` (gzip `forecast.Snapshot` + `trained_at`) and
   `baselines.workers` (heartbeat). The worker creates only schema `baselines`; `forecast.retrain` is created and
   owned by the plugin, which is why the K8s worker logged `relation "forecast.retrain" does not exist` until the
@@ -799,8 +812,8 @@ every 30 s against the one overlay Postgres, all inheriting `FORECAST_STORE_*` a
 
 | Mechanism | Where | Observation |
 | --- | --- | --- |
-| **Claim** — `scope='panel' AND org_id=$org AND enabled AND spec IS NOT NULL AND next_run_at <= now() AND (claimed_until IS NULL OR claimed_until < now())`, then `LIMIT <batch> FOR UPDATE SKIP LOCKED` | `pkg/plugin/schedule.go` (`panelClaimSQL`) | Three rows were due at 14:20:00, 14:25:00 and 14:30:00 and still untouched at 14:20:12, 14:20:27 and 14:25:15; each slot produced **exactly three retrains**, all from one replica (`fx-ha-grafana-687dcc9476-7svct`): 14:20:28.499/.691/.960, 14:25:28.480/.700/.951, 14:30:28.408/.594/.846. Per-pod `status=ok` counts over 14:19–14:31: `7svct` **10**, `9hrmh` 0, `timeseries` 0 (nine slot retrains plus the lease one below) — a double claim would read 6 per slot, a stalled claim 0 |
-| **Lease** — `claimed_by=$owner, claimed_until=now()+$lease` (default `FORECAST_RETRAIN_LEASE`, 5 m), and a held lease is excluded from every later claim | same statement | A row forced to `claimed_by='ghost-holder', claimed_until=now()+100s, next_run_at=now()` (due from 14:26:05, lease until 14:27:45) stayed untouched across the nine ticks of the three processes in that window (30 s apart, 14:26:28–14:27:28) and was retrained **exactly once**, 13 s after the lease expired: 14:27:58.409, `dur=235ms` |
+| **Claim** — `scope='panel' AND org_id=$org AND enabled AND spec IS NOT NULL AND jsonb_typeof(spec->'queries')='array' AND spec->'queries' <> '[]'::jsonb AND superseded_at IS NULL AND next_run_at <= now() AND (claimed_until IS NULL OR claimed_until < now())`, then `LIMIT <batch> FOR UPDATE SKIP LOCKED` | `pkg/plugin/schedule.go` (`panelClaimSQL`) | Three rows were due at 14:20:00, 14:25:00 and 14:30:00 and still untouched at 14:20:12, 14:20:27 and 14:25:15; each slot produced **exactly three retrains**, all from one replica (`fx-ha-grafana-687dcc9476-7svct`): 14:20:28.499/.691/.960, 14:25:28.480/.700/.951, 14:30:28.408/.594/.846. Per-pod `status=ok` counts over 14:19–14:31: `7svct` **10**, `9hrmh` 0, `timeseries` 0 (nine slot retrains plus the lease one below) — a double claim would read 6 per slot, a stalled claim 0. The `queries` and `superseded_at` predicates were added by the remediation (F3, F46) and were re-verified on Compose in pass 3: a row with `queries:[]` and a row with `spec IS NULL` both stayed overdue and unclaimed across the scheduler's 12:49:49 slot while a sibling row was claimed and refit, and a re-enabled but superseded row was left alone too |
+| **Lease** — `claimed_by=$owner, claimed_until=now()+$lease` (default `FORECAST_RETRAIN_LEASE`: 5 m when this run was taken; **derived** since the remediation as `retrainClaimBatch × frameFetchTimeout + frameFetchTimeout + 1 min` = 6 m, `pkg/plugin/retrain.go`), and a held lease is excluded from every later claim | same statement | A row forced to `claimed_by='ghost-holder', claimed_until=now()+100s, next_run_at=now()` (due from 14:26:05, lease until 14:27:45) stayed untouched across the nine ticks of the three processes in that window (30 s apart, 14:26:28–14:27:28) and was retrained **exactly once**, 13 s after the lease expired: 14:27:58.409, `dur=235ms` |
 | **Owner-guarded finish** — `… WHERE … AND claimed_by=$owner`, then `next_run_at = nextRun(cron, timezone, now)` | `pkg/plugin/schedule.go` (`Finish`) | Every retrain cleared the claim (`claimed_by`/`claimed_until` back to `NULL`), left `last_status=ok` and pushed `next_run_at` to the next cron slot (14:20:28 → 14:25:00, 14:25:28 → 14:30:00, 14:30:28 → 14:35:00); `forecast.snapshots.updated_at` moved with each one (14:20:28.47/.69/.93, 14:25:28.45/.69/.92, 14:30:28.39/.59/.82) |
 | **Snapshot upsert** — `ON CONFLICT (org_id, cache_key) DO UPDATE` | `pkg/plugin/store_postgres.go` | Two replicas may fit the same key without error; each retrain stored exactly one snapshot per row |
 | **Org-bound claim** — the credential's own org once per process (`GET /api/org`), `org_id = $org` in the predicate | `pkg/plugin/schedule.go`, `pkg/plugin/retrain.go` | All three processes were anonymous-Admin org 1 and competed for the same rows (the other-org case is F18) |
@@ -896,9 +909,10 @@ for mb in 15 16 16.5 17 20; do … curl --data-binary @body-$mb.json … ; done
 
 | Body | Before | After |
 | --- | --- | --- |
-| 15 MiB | 400 `forecast: series is empty` | 400 `forecast: series is empty` |
-| 16 MiB, 16.5 MiB, 17 MiB, 20 MiB | 500 `{"statusCode":500,"messageId":"plugin.requestFailureError",…}` | **413** `forecast: request body too large` |
-| 33 MiB | 500 | 500 — above the transport ceiling, refused by the SDK and not by the plugin |
+| 15 MiB | 400 `forecast: series is empty` | **413** `forecast: request body too large for a legal training series` — pass 3 re-measured a 14.23 MB body, which is above the 6,400,000-byte pre-flight budget |
+| 16 MiB | 500 `{"statusCode":500,"messageId":"plugin.requestFailureError",…}` | **413** (the pre-flight message: the body cap is `>` 16 MiB, so 16 MiB itself reaches the decoder's guard) |
+| 16.5 MiB, 17 MiB, 20 MiB | 500 | **413** `forecast: request body too large` (pass 3 re-measured 17.31 MB) |
+| 33 MiB and above | 500 | 500 — above the 32 MiB transport ceiling, refused by the SDK and not by the plugin; the reason is explicit: `grpc: received message larger than max (37151257 vs. 33554432)` (pass 3, a 37.15 MB body — the process stayed up, `restarts=0 oom=false`) |
 
 The same sweep on the Kubernetes release over `http://localhost:80` answers 413 for 16, 16.5, 17 and 20 MiB.
 
@@ -1012,8 +1026,20 @@ tagged with the pins (`…-grafana:8feecafc14ba`, `…-baselines:7ec489faafeb`).
 | **F46** a panel's old key kept retraining forever | `superseded_at`: a fit stamps the same dashboard panel's other keys and clears its own | switching panel 1 to Last 7 days stamped `2e827911` (`superseded=12:20:43`), switching back to Auto cleared it and stamped the 7-day key; a superseded row is never claimed |
 | **D1-D10** | the ten documentation corrections listed under *Discrepancies found* above | each was re-checked against the code before the edit |
 
-Still not live-verified after this pass: the `postgres.*`-only rollout lever (documented in the chart's NOTES, not
-exercised), and the frontend rows that only a unit test covers (F12 datasource resolution, F13 the legacy lookback
-option, F14 expression rows, F15 update composition, F21 Coverage bounds) — the sandbox panels declare their
-datasource and have no expression rows to drive.
+Every row the pass-2 record left unit-tested only — and the rollout lever it recorded as not exercised — was
+driven live in pass 3 (2026-09-22) on the Compose stack and the Kubernetes release:
+
+| Row | Live observation |
+| --- | --- |
+| F12 a target with no `datasource` field | a throwaway dashboard whose query A omits `datasource` trained from the panel's own datasource and drew history + forecast (`POST …/forecast` 200, "Using saved model"); the copy was deleted afterwards |
+| F13 *Legacy lookback* | the option exists as a panel option (empty = Auto) **and** as a field in the Forecast query editor (`Explore`, datasource `forecast`: *Train from*, *Train to*, *Legacy lookback*); it is part of the `cacheKey` fingerprint (`src/forecast-panel/cacheKey.ts`), which is why the editor's tooltip tells you to keep it equal to the panel's |
+| F14 a Mixed panel with a reduce row | **New alert rule** navigated to `/alerting/new` with a `defaults` payload carrying both rows: the Druid metric (query A) and the reduce expression (`refId B`, `datasourceUid __expr__`, `queryType expression`, `model.reducer mean`, `model.expression A`) |
+| F15 two option edits in one editing session | *Show prediction interval* off plus *Max in-flight loads* 2 applied without an intermediate save; the save dialog's diff listed `"maxInflightLoads": 2`, `"showInterval": false` and the clamped `"interval": 0.99`, the saved dashboard (version 41) carries all three, and the band left the drawn panel at the same time |
+| F21 *Interval coverage* bounds | typing `5` into the field clamps to `0.99` (`COVERAGE_SETTINGS.max`) |
+| the `postgres.*`-only rollout lever | `helm upgrade --install timeseries … --set grafana.configRevision=$(date +%s)` created a new ReplicaSet and rolled the Grafana pod (`timeseries-grafana-7f89fd5cb-nr9zw`, 12:55:59) with a new `FORECAST_CONFIG_CHECKSUM=9d2aced3…` (was `e80beffb…`) |
+
+Still not live-verified: the pass-1 rows in the *Verified live, not verified live* table above (the OpenSearch and
+Postgres train rejections, the unsaved-dashboard reason, the credential auto-disable, *Copy source from query A*,
+`DRUID_MAX_INFLIGHT` saturation, the `FORECAST_MAX_INFLIGHT` env precedence), and the 30 s cache-staleness window
+that the HA table already names.
 
