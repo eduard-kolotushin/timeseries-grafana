@@ -36,7 +36,7 @@ Grafana Compose, TestData, Kafka, and demo dashboards live in sibling `timeserie
 ## Overlay data flow
 
 1. Grafana queries the **visible** panel time range. The nested panel draws **metric** frames as history (time + every numeric field per frame). Mixed Forecast datasource frames are not history, are not fitted, and are not plotted.
-2. Per visible metric series it POSTs `{ cacheKey, from, to, model, ... }` without training points. `cacheKey` is SHA-256 of **metric** datasource uid, canonical query (SQL / PromQL `expr` / redacted native body), model options, raw train-range strings, and series name. Forecast datasource queries are omitted from the fingerprint so adding query B does not invalidate the overlay snapshot. Grafana time macros and interpolated visible timestamps are `__TIME__`. Volatile query-row fields (`key`, interval, maxDataPoints) are omitted. Dashboard range and forecast window are not in the key.
+2. Per visible metric series it POSTs `{ cacheKey, from, to, model, ... }` without training points. `cacheKey` is SHA-256 of **metric** datasource uid, canonical query (SQL / PromQL `expr` / redacted native body), model options, the raw `trainFrom`/`trainTo` picker strings plus the legacy `lookback` duration, and series name. Forecast datasource queries are omitted from the fingerprint so adding query B does not invalidate the overlay snapshot. Grafana time macros and interpolated visible timestamps are `__TIME__`. Volatile query-row fields (`key`, interval, maxDataPoints) are omitted. Dashboard range and forecast window are not in the key.
 3. On a hit the backend `Restore`s the snapshot and `ForecastRange`s. The panel skips the training datasource query.
 4. On `needTrain` or Retrain, the panel issues one training query (rewritten for the train window and a model-aware step), then POSTs `{ times, values, cacheKey, trainSource, ... }`. The backend fits, upserts JSONB, upserts the `panel` row in `forecast.retrain`, and returns the window. `trainSource` is `{datasourceUid, queries, from, to, seriesName, relative, lookbackMs, panelId, panelTitle, dashboardUid, querySummary}` where `queries` are the exact objects the panel sent to the datasource after the type-keyed train rewrite (that rewrite sets its own step: `intervalMs` / `maxDataPoints`, or the Prometheus `interval` string), so the scheduler can replay the request later without any datasource knowledge in `pkg/`. `relative`/`lookbackMs` say whether that window was a lookback the scheduler must re-resolve at claim time (see **Training window resolution**). `trainSource` is **not** in the fingerprint, so adding or editing a schedule never invalidates a stored snapshot.
 5. Auto/relative train strings do not re-query until Retrain; the saved model can lag `now`.
@@ -66,7 +66,7 @@ DSN resolution (first non-empty wins per field; URL short-circuits the rest):
 
 1. Process env `FORECAST_STORE_URL` / `FORECAST_STORE_*` (only if Grafana forwards host env; Grafana 12.4+ does not by default)
 2. Grafana ini-to-env `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` or `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`, and `GrafanaCfg` keys (`store_host`, `store_port`, …) from `[plugin.eduardkolotushin-forecast-app]` or `[plugin.eduardkolotushin-forecast-datasource]`
-3. jsonData / secureJsonData (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`): app Configuration page for the overlay process; Forecast datasource jsonData for alerting `QueryData`. If datasource jsonData has no host/URL, `QueryData` also tries parent `AppInstanceSettings` when Grafana sends them
+3. jsonData / secureJsonData (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`; or a `store_url` URL, which short-circuits the fields above — the camel `storeUrl` spelling is not read): app Configuration page for the overlay process; Forecast datasource jsonData for alerting `QueryData`. If datasource jsonData has no host, `QueryData` also tries parent `AppInstanceSettings` when Grafana sends them
 
 CI/CD merges [`conf/forecast.ini.template`](../conf/forecast.ini.template) into `grafana.ini` (Grafana expands `${FORECAST_STORE_*}`). `org_id` comes from plugin context. No DSN: persist off.
 
@@ -140,7 +140,7 @@ The `panel` predicate requires `spec IS NOT NULL`, a `queries` that is a non-emp
 
 1. `fetchFrames` — resolves the training window, then `POST <FORECAST_GRAFANA_URL>/api/ds/query` with `{queries: spec.queries, from, to}` and an optional `Authorization: Bearer` header. The resolved window and its kind are logged at Debug, so an operator can watch a cron retrain move. Extract (time field, numeric field matching `spec.seriesName` by field name or Grafana display name) into `timeseries.Series[float64]`, dropping NaN, and reject more than `MAX_TRAIN_POINTS` points **before** allocating the slices. The body is the frontend's own request, so **no datasource-specific field is interpreted here**
 2. fit through the same `fitRequest` model switch as `POST /forecast`, inside `runLimited` (`workLimiter`), so a scheduled fit competes for the same inflight slots and backs off (`errBusy` → skip, retry next tick) instead of piling up
-3. `SnapshotOf` → `store.Put` → `Finish(owner, next = nextRun(cron, timezone, now), "ok")`; any error → `Finish(owner, now + FORECAST_RETRAIN_LEASE, "error: …")`
+3. `SnapshotOf` → `store.Put` → `Finish(owner, next = nextRun(cron, timezone, now), "ok")`; any error → `Finish(owner, now + FORECAST_RETRAIN_LEASE, "error: …")`, except a busy compute slot (`errBusy`), which only costs one tick (`now + FORECAST_RETRAIN_TICK`)
 
 Every branch logs `retrain scope=… key=… status=… dur=…`. A scheduler error is logged, never propagated: `/forecast` and `QueryData` behave exactly as before when the scheduler is off, when `/api/ds/query` is unreachable, or when Postgres is down. `needTrain` remains the fallback retrain path — including for a `Finish` that lost its claim, where the row simply stays with its new owner.
 
@@ -222,7 +222,7 @@ Every overlay request — the `needTrain` probe included — carries a top-level
 Grafana unified alerting evaluates backend datasource queries, not overlay panel JavaScript. Typical alert:
 
 1. Query A: live metric (Prometheus / OS / PG / Druid).
-2. Query B: this forecast datasource, `kind: forecast`, same `cacheKey` fingerprint as the overlay (datasource uid, canonical SQL/expr, model options, **raw** train-range strings, series name). Overlay Auto is empty from/to strings, not `now-21d`.
+2. Query B: this forecast datasource, `kind: forecast`, same `cacheKey` fingerprint as the overlay (datasource uid, canonical SQL/expr, model options, **raw** train-range strings plus the legacy `lookback`, series name). Overlay Auto is empty from/to strings, not `now-21d`.
 3. Query C (optional): `kind: upper` or `lower` at coverage `level` (default 0.95).
 4. Expression: A vs B, or A vs C.
 
