@@ -42,6 +42,11 @@ func clearStoreEnv(t *testing.T) {
 func TestStoreDSN(t *testing.T) {
 	jsonHost, _ := json.Marshal(map[string]any{"storeHost": "from-json"})
 	jsonHostPort, _ := json.Marshal(map[string]any{"storeHost": "from-json", "storePort": 5555})
+	jsonURL, _ := json.Marshal(map[string]any{"storeUrl": "postgres://u:p@json-url:2222/db?sslmode=require"})
+	jsonURLAndHost, _ := json.Marshal(map[string]any{
+		"storeUrl":  "postgres://u:p@json-url:2222/db?sslmode=require",
+		"storeHost": "ignored-json-host",
+	})
 	tests := []struct {
 		name     string
 		env      map[string]string
@@ -96,6 +101,16 @@ func TestStoreDSN(t *testing.T) {
 			wantHost: "from-json:5555",
 		},
 		{
+			name:     "jsonData storeUrl",
+			settings: backend.AppInstanceSettings{JSONData: jsonURL},
+			want:     "postgres://u:p@json-url:2222/db?sslmode=require",
+		},
+		{
+			name:     "jsonData storeUrl short-circuits a jsonData host",
+			settings: backend.AppInstanceSettings{JSONData: jsonURLAndHost},
+			want:     "postgres://u:p@json-url:2222/db?sslmode=require",
+		},
+		{
 			name: "secureJsonData password",
 			env:  map[string]string{"FORECAST_STORE_HOST": "pg"},
 			settings: backend.AppInstanceSettings{
@@ -144,6 +159,7 @@ func TestStoreDSN(t *testing.T) {
 
 func TestStoreJSONFromContext(t *testing.T) {
 	dsHost, _ := json.Marshal(map[string]any{"storeHost": "from-ds"})
+	dsURL, _ := json.Marshal(map[string]any{"storeUrl": "postgres://u:p@ds-url:3333/db?sslmode=require"})
 	appHost, _ := json.Marshal(map[string]any{"storeHost": "from-app"})
 	emptyObj, _ := json.Marshal(map[string]any{})
 	tests := []struct {
@@ -170,6 +186,14 @@ func TestStoreJSONFromContext(t *testing.T) {
 			dsJSON:   dsHost,
 			app:      &backend.AppInstanceSettings{JSONData: appHost},
 			wantHost: "from-ds:5432",
+		},
+		{
+			// A datasource that declares only a URL must beat the parent app's host: jsonHasStore
+			// counts the URL, and since the DSN builder reads the same key the pair is resolvable.
+			name:     "ds jsonData storeUrl wins over app and resolves",
+			dsJSON:   dsURL,
+			app:      &backend.AppInstanceSettings{JSONData: appHost},
+			wantHost: "ds-url:3333",
 		},
 	}
 	for _, tt := range tests {

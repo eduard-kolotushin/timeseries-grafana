@@ -229,7 +229,7 @@ row immediately (no confirmation dialog) as observed on Compose.
 | --- | --- |
 | **Function** | Turn a stored snapshot back into a frame so Grafana alerting can query the forecast and its interval by `refId`. This is the **only** way to read a snapshot from another datum. |
 | **Who can use** | **Alert rule** (Grafana alerting) or any datasource query. No Admin gate; the datasource's own jsonData carries the store (F20). |
-| **How configured** | Datasource jsonData `storeHost`/`storePort`/… (field-wise; a URL is env/ini only) (alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`), or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
+| **How configured** | Datasource provisioned jsonData — `storeUrl` as one DSN, or field-wise `storeHost`/`storePort`/… (the datasource's config editor renders no store fields; F20) — or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
 | **Input params** | Query `{kind: "forecast"\|"lower"\|"upper", cacheKey, level?}` inside a normal `/api/ds/query` body with `from`/`to`. Each query's JSON is capped at 64 KiB (`maxQueryJSONBytes`); a larger one is rejected rather than decoded. |
 | **Expected result** | 200 with one frame per query and real values; a miss is an error: `needTrain: train on the Forecast overlay panel first`; unknown `kind` → 400. |
 
@@ -305,26 +305,29 @@ train 30006 points; see [Discrepancies](#discrepancies-found)).
 **Kubernetes:** the same dashboard and option set (the panels come from the ConfigMap); the K8s store shows the
 resulting `panel` rows with `cron */5 * * * *`.
 
-### F11. Configuration page — store DSN and default retrain schedule
+### F11. Configuration page — store deployment note and default retrain schedule
 
 | | |
 | --- | --- |
-| **Function** | Set the snapshot-store DSN and the org's default cron in jsonData, and validate them before saving. |
+| **Function** | Show where the snapshot store is configured (deployment only) and set the org's default cron in jsonData, validating it before saving. |
 | **Who can use** | **Admin** (Grafana's plugin configuration page, `role: Admin` in `plugin.json`). |
-| **How configured** | Fields: *Snapshot store* — Host, Port, Database, User, SSL mode, Password, Reset; *Default retrain schedule* — Cron, Timezone. Saved into `jsonData` (+ `secureJsonData.storePassword`). Env/ini override these at runtime (F20). |
-| **Input params** | `storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `secureJsonData.storePassword`, `retrainCron`, `retrainTimezone`. |
+| **How configured** | Fields: *Snapshot store* — a read-only note naming the deployment keys; *Default retrain schedule* — Cron, Timezone. A save posts only `retrainCron`/`retrainTimezone` merged over the existing jsonData, and sends no `secureJsonData`, so neither a provisioned store value nor the store password can be overwritten from the page. |
+| **Input params** | `retrainCron`, `retrainTimezone`. |
 | **Expected result** | 200 and the alert `Settings not saved` + the reason when the cron does **not** parse; nothing is persisted in that case. |
 
-**Positive — Compose:** `?page=configuration` renders every field with the provisioned values
-(`overlay-postgres`, `5432`, `overlay`, `overlay`, `disable`, password `configured`, cron `*/5 * * * *`) and a
-`Save` that persists (`jsonData.retrainTimezone: "UTC"` appeared after saving the valid cron).
+**Positive — Compose:** `?page=configuration` renders the *Snapshot store* note (the env / `GF_PLUGIN_*` / ini /
+jsonData key list) and the *Default retrain schedule* fields with the provisioned cron `*/5 * * * *`; no
+Host/Port/Database/User/SSL mode/Password input exists anywhere on the page, and a `Save` persists only the retrain
+keys (`jsonData.retrainTimezone: "UTC"` appeared after saving the valid cron while the provisioned store keys stayed
+untouched).
 
 **Negative — Compose:** typing `nope` into *Cron* and pressing Save → alert `Settings not saved` /
 `forecast: invalid cron`, and the stored jsonData was **unchanged** (`retrainCron` still `*/5 * * * *`).
 
-**Kubernetes:** the same page; the chart provisions the identical keys through the `timeseries-forecast-app`
-ConfigMap (`apps.yaml` → `jsonData.storeHost: overlay-postgres.overlay-postgres.svc`, `retrainCron: "*/5 * * * *"`,
-`secureJsonData.storePassword`).
+**Kubernetes:** the same page; the chart provisions the store through the `timeseries-forecast-app` ConfigMap and
+the `timeseries-store-credentials` Secret (`apps.yaml` → `jsonData.storeHost: overlay-postgres.overlay-postgres.svc`,
+`retrainCron: "*/5 * * * *"`, `secureJsonData.storePassword`) — the page lists those keys and writes only the retrain
+schedule.
 
 ### F12. Retrain schedules tab — inspect, edit, delete
 
@@ -501,13 +504,15 @@ all retrained to `ok`).
 | | |
 | --- | --- |
 | **Function** | Decide where fitted snapshots live; with no DSN the plugin still fits and forecasts, it just cannot remember. |
-| **Who can use** | **Operator** (deployment config), plus **Admin** through the Configuration page (F11). |
-| **How configured** | In order: process env `FORECAST_STORE_URL`/`FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `…_DATASOURCE_*` / `GrafanaCfg` (`[plugin.eduardkolotushin-forecast-app]`, `[plugin.eduardkolotushin-forecast-datasource]`), then jsonData / `secureJsonData`. |
-| **Input params** | `storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword` — field-wise only: a URL comes from `FORECAST_STORE_URL`/the ini, never from jsonData, and a jsonData `storeUrl` (camel) is not read at all. |
+| **Who can use** | **Operator** (deployment configuration; the store has no UI fields — F11). |
+| **How configured** | In order: process env `FORECAST_STORE_URL`/`FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `…_DATASOURCE_*` / `GrafanaCfg` (`[plugin.eduardkolotushin-forecast-app]`, `[plugin.eduardkolotushin-forecast-datasource]`), then provisioned jsonData / `secureJsonData`. |
+| **Input params** | `storeUrl` (one DSN, jsonData camel; env/ini spell it `FORECAST_STORE_URL` / `store_url`), or field-wise `storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`. A URL short-circuits the fields at the same level. |
 | **Expected result** | With a store: snapshots in `forecast.snapshots (org_id, cache_key, snapshot jsonb, updated_at)` and schedules usable. Without: `/schedules` is 503 and every probe answers `needTrain`. |
 
-**Positive — Compose:** the Configuration page values (`overlay-postgres`/`5432`/`overlay`/`overlay`/`disable`)
-come from `provisioning/plugins/apps.yaml`; a fit with `cacheKey 0f…0f` produced a row
+**Positive — Compose:** the store comes from provisioning, not from a page: `provisioning/plugins/apps.yaml`
+(app) and `provisioning/datasources/datasources.yml` (Forecast datasource) carry `storeHost: overlay-postgres`,
+`storePort: 5432`, `storeDatabase: overlay`, `storeUser: overlay`, `storeSslMode: disable` and
+`secureJsonData.storePassword`; a fit with `cacheKey 0f…0f` produced a row
 (`org_id 1`, `pg_column_size(snapshot)=236`) and the panel row `<org 1> 0f0f…` with a `spec` holding
 `{"to":…,"from":…,"model":"holt","season":"","panelId":1,"queries":[],"calendar":"","lookback":"21d","relative":true,"lookbackMs":1814400000,…}`
 — the writer stores an absent or `null` query list as `[]` (F3), so a row the scheduler can read is always a row
@@ -899,8 +904,10 @@ before the handler's `MaxBytesReader` could run.
 
 The fix serves both plugin processes with `GRPCSettings{MaxReceiveMsgSize: cap + cap}` (`pkg/plugin/limits.go`,
 `pkg/main.go`), so the plugin's own cap is the limit a caller meets: an oversize body now reaches the handler and
-only a message above the 32 MiB transport ceiling is refused by the SDK. The cap itself stays 16 MiB, and
-`TestGRPCSettingsClearsTheBodyCap` fails if the two limits are ever equalised again.
+only a message above the 32 MiB transport ceiling is refused by the SDK. The cap itself stays 16 MiB, and the
+sweep below is what pins the boundary: `TestForecastCapBoundaries` covers the handler side (a body at the
+pre-flight budget decodes, one byte over it is refused with the pre-flight's own reason) and the 33 MiB row the
+transport's.
 
 ```bash
 # body = JSON with a junk field of N MiB, times/values empty

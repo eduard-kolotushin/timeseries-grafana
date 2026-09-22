@@ -2,7 +2,7 @@
 
 Страницы три: лендинг (только текст), Configuration (DSN снимков) и Retrain schedules (таблица `forecast.retrain`, права Admin). Оверлей `/forecast` с них не вызывается. `GET /ping` существует (`{"message":"ok"}`), но панель его не использует.
 
-Configuration сохраняет `storeHost` / port / database / user / ssl / password через `POST /api/plugins/.../settings`; переменные окружения `FORECAST_STORE_*` в процессе Grafana перекрывают сохранённые значения.
+Configuration сохраняет только default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`) через `POST /api/plugins/.../settings`; DSN снимков задаётся деплоем (env `FORECAST_STORE_*` / `GF_PLUGIN_*` / ini / provisioned jsonData) — полей стора на странице нет.
 
 Retrain schedules (`?page=schedules`) читает `GET /schedules` и правит строки через `PUT` / `DELETE /schedules` и `POST /schedules/default`. Всё это требует прав Admin. Таблица показывает `scope` (`panel` или `baseline`), Source, ключ с возможностью копирования, cron, timezone, enabled, следующий и последний запуски, `last_status`. Поиск идёт по ключу, заголовку панели, имени ряда и сводке запроса.
 
@@ -20,8 +20,8 @@ sequenceDiagram
   participant PG as forecast.retrain
 
   Admin->>Grafana: Открыть Configuration
-  Grafana->>App: AppConfig Snapshot store
-  Admin->>App: Save jsonData storeHost
+  Grafana->>App: AppConfig (заметка о сторе + retrain schedule)
+  Admin->>App: Save jsonData retrainCron
   App->>Grafana: POST plugins settings
   Admin->>Grafana: Открыть Retrain schedules
   Grafana->>App: страница schedules

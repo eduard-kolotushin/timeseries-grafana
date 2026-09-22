@@ -184,6 +184,12 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	if err := checkTrainLen(len(in.Times), len(in.Values)); err != nil {
 		return ForecastResponse{}, err
 	}
+	// The pre-flight's body budget allows maxTrainSourceBytes for everything that is not the point
+	// arrays; this is where that allowance becomes an enforced limit, so the pre-flight can only ever
+	// refuse a body that really cannot be legal.
+	if err := checkTrainSourceLen(in.TrainSource); err != nil {
+		return ForecastResponse{}, err
+	}
 	hasTimes := len(in.Times) > 0 || len(in.Values) > 0
 	// Identify on the read paths only. A request that carries training points writes
 	// the whole spec a few lines below (recordPanelSchedule) with the same provenance,
@@ -519,7 +525,8 @@ func httpStatusFor(err error) int {
 	case errors.Is(err, errBusy):
 		return http.StatusTooManyRequests
 	case errors.Is(err, errTrainTooLong), errors.Is(err, errBodyTooLarge),
-		errors.Is(err, errTrainBodyTooLarge), errors.Is(err, errWindowTooManyPoints),
+		errors.Is(err, errTrainBodyTooLarge), errors.Is(err, errTrainSourceTooLarge),
+		errors.Is(err, errWindowTooManyPoints),
 		errors.Is(err, forecast.ErrTooManyPoints):
 		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, context.Canceled):

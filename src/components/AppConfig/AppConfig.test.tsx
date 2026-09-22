@@ -34,12 +34,19 @@ describe('Components/AppConfig', () => {
     mockPost.mockReset();
   });
 
-  test('shows snapshot store fields', () => {
+  test('documents the store as a deployment parameter and offers no store inputs', () => {
     render(<AppConfig plugin={props.plugin} query={props.query} />);
     expect(screen.getByText(/snapshot store/i)).toBeInTheDocument();
+    expect(screen.getByText(/deployment parameter/i)).toBeInTheDocument();
     expect(screen.getByText(/default retrain schedule/i)).toBeInTheDocument();
     expect(screen.getByText(/forecast\.ini\.template/)).toBeInTheDocument();
     expect(screen.getAllByText(/eduardkolotushin-forecast-app/).length).toBeGreaterThan(0);
+    // Only the default retrain schedule still has inputs; every store field is gone.
+    expect(screen.getByRole('textbox', { name: /^Cron/ })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: /^Timezone/ })).toBeInTheDocument();
+    for (const label of [/^Host/, /^Port/, /^Database/, /^User/, /^SSL mode/, /^Password/]) {
+      expect(screen.queryByRole('textbox', { name: label })).toBeNull();
+    }
   });
 
   test('does not render the schedule table, which lives on its own tab', () => {
@@ -57,9 +64,15 @@ describe('Components/AppConfig', () => {
     expect(notes.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  test('validates the default schedule and keeps settings jsonData it does not render', async () => {
+  test('validates the default schedule and leaves jsonData it does not render untouched', async () => {
     mockPost.mockResolvedValue({});
-    const plugin = propsWith({ retrainEnabled: false, grafanaUrl: 'https://grafana.internal', retrainCron: '*/5 * * * *' });
+    const plugin = propsWith({
+      retrainEnabled: false,
+      grafanaUrl: 'https://grafana.internal',
+      retrainCron: '*/5 * * * *',
+      storeHost: 'pg.internal',
+      storeDatabase: 'overlay',
+    });
     render(<AppConfig plugin={plugin.plugin} query={plugin.query} />);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2));
@@ -70,17 +83,17 @@ describe('Components/AppConfig', () => {
 
     const [settingsUrl, settingsBody] = mockPost.mock.calls[1];
     expect(settingsUrl).toBe(`/api/plugins/${APP_PLUGIN_ID}/settings`);
+    // A save writes only the retrain default: the provisioned store keys survive verbatim and the
+    // secure store password is not sent at all, so the page can never clear it.
     expect(settingsBody.jsonData).toEqual({
       retrainEnabled: false,
       grafanaUrl: 'https://grafana.internal',
-      storeHost: '',
-      storePort: 5432,
+      storeHost: 'pg.internal',
       storeDatabase: 'overlay',
-      storeUser: 'overlay',
-      storeSslMode: 'disable',
       retrainCron: '*/5 * * * *',
       retrainTimezone: 'UTC',
     });
+    expect(settingsBody.secureJsonData).toBeUndefined();
     expect(screen.queryByText(/Settings not saved/)).toBeNull();
   });
 
@@ -95,7 +108,7 @@ describe('Components/AppConfig', () => {
 
   test('still saves when the default schedule cannot be validated', async () => {
     // A plugins:write user without the Admin role the schedule API requires must keep
-    // being able to save the snapshot-store settings.
+    // being able to save the default schedule.
     mockPost.mockRejectedValueOnce({ status: 403, data: 'forecast: admin required\n' });
     mockPost.mockResolvedValueOnce({});
     render(<AppConfig plugin={props.plugin} query={props.query} />);

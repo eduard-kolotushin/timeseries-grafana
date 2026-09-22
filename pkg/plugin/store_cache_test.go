@@ -109,7 +109,7 @@ func TestCachedStoreHitsAvoidInner(t *testing.T) {
 
 func TestCachedStoreBounded(t *testing.T) {
 	ctx := context.Background()
-	inner := newMemoryStore()
+	inner := &countingStore{SnapshotStore: newMemoryStore()}
 	clock := time.Unix(1_000_000, 0)
 	c := newCachedStore(inner, time.Hour, 3)
 	c.now = func() time.Time { return clock }
@@ -119,20 +119,30 @@ func TestCachedStoreBounded(t *testing.T) {
 		if err := c.Put(ctx, 1, fmt.Sprintf("%064d", i), snapAt(int64(i))); err != nil {
 			t.Fatal(err)
 		}
-		if n := len(c.mem); n > 3 {
-			t.Fatalf("after put %d resident=%d > max", i, n)
+	}
+	// The bound is observable from outside: with three entries kept, the two oldest of five must have been
+	// evicted, so the newest three are served from memory and the two oldest reach the inner store.
+	// (Asserting len(c.mem) would pin the cache's representation, not its contract.) The resident keys are
+	// read first: a read of an evicted key re-populates the cache and would evict a resident one.
+	before := inner.gets
+	for i := 2; i < 5; i++ {
+		got, ok, err := c.Get(ctx, 1, fmt.Sprintf("%064d", i))
+		if err != nil || !ok || got.Last != int64(i) {
+			t.Fatalf("resident key %d: ok=%v err=%v", i, ok, err)
 		}
 	}
-	// Oldest entries were evicted from memory but remain readable through inner.
-	if _, ok := c.lookup(memKey{org: 1, key: fmt.Sprintf("%064d", 0)}); ok {
-		t.Fatal("oldest entry should have been evicted")
+	if inner.gets != before {
+		t.Fatalf("resident keys must be served from memory, gets=%d want %d", inner.gets, before)
 	}
-	if _, ok := c.lookup(memKey{org: 1, key: fmt.Sprintf("%064d", 4)}); !ok {
-		t.Fatal("newest entry should be resident")
+	before = inner.gets
+	for i := range 2 {
+		got, ok, err := c.Get(ctx, 1, fmt.Sprintf("%064d", i))
+		if err != nil || !ok || got.Last != int64(i) {
+			t.Fatalf("evicted key %d must still read through inner: ok=%v err=%v", i, ok, err)
+		}
 	}
-	got, ok, err := c.Get(ctx, 1, fmt.Sprintf("%064d", 0))
-	if err != nil || !ok || got.Last != 0 {
-		t.Fatalf("evicted key must still read through: ok=%v err=%v", ok, err)
+	if inner.gets != before+2 {
+		t.Fatalf("two evicted keys must each re-read inner, gets=%d want %d", inner.gets, before+2)
 	}
 }
 

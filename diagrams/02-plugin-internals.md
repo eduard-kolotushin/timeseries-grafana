@@ -2,7 +2,7 @@
 
 Grafana загружает один app-плагин с вложенной панелью, вложенным источником данных и Go-бэкендами ресурсов. Бинарник один (`gpx_forecast`), но Grafana запускает его дважды: как бэкенд app (`CallResource` `/forecast` и `/schedules`) и как бэкенд Forecast datasource (`QueryData`). Общего состояния в памяти между ними нет — общие только таблицы в Postgres.
 
-Страницы работают в процессе Grafana: лендинг и Configuration находятся вне пути оверлея, а Retrain schedules обращается к ресурсу `/schedules`. Configuration сохраняет DSN снимков (`jsonData` / `secureJsonData`); переменные окружения `FORECAST_STORE_*` перекрывают эти поля в процессе `gpx_forecast`.
+Страницы работают в процессе Grafana: лендинг и Configuration находятся вне пути оверлея, а Retrain schedules обращается к ресурсу `/schedules`. Configuration сохраняет только default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`); DSN снимков задаётся деплоем (env `FORECAST_STORE_*` / ini / provisioned jsonData) — полей стора на странице нет.
 
 Планировщик — горутина процесса app. Она не мешает запросам панели: `/api/ds/query` и `Put` снимка идут **вне** семафора вычислений, под ним выполняется только сам `fitRequest`.
 

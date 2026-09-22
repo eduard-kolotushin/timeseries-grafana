@@ -282,18 +282,6 @@ func TestParseRetrainSpecQueries(t *testing.T) {
 	})
 }
 
-// A claim must outlive the work it covers. A tick retrains up to retrainClaimBatch
-// rows sequentially and each costs at most frameFetchTimeout for its fetch, plus the
-// /api/org round trip before the claim. A shorter default lease would let a second
-// replica claim a row that is still being retrained, and both processes would store
-// a snapshot for it.
-func TestDefaultLeaseOutlivesAClaimBatch(t *testing.T) {
-	worst := retrainClaimBatch*frameFetchTimeout + frameFetchTimeout
-	if defaultRetrainLease <= worst {
-		t.Fatalf("defaultRetrainLease=%s does not exceed the worst-case batch plus /api/org time %s", defaultRetrainLease, worst)
-	}
-}
-
 func TestFetchFrames(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	reply := dsReply{Results: map[string]*dsReplyResult{

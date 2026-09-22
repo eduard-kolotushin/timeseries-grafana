@@ -70,7 +70,7 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 
 - Persist fitted snapshots in Postgres (`forecast.snapshots`) via **pgx** in `gpx_forecast`. Org-scoped, survives Grafana restart, shared across users. Not Grafana Postgres datasource HTTP and not Druid metadata Postgres
 - `POST /forecast` `cacheKey` / `needTrain` / `retrain`. Skip the training datasource query until Retrain or a change to query / model / train-range strings
-- Configuration page (existing) and env `FORECAST_STORE_*` for the DSN. No DSN: persist off (always `needTrain`)
+- Deployment configuration for the DSN: env `FORECAST_STORE_*` → `GF_PLUGIN_*` → grafana.ini → provisioned jsonData (`storeUrl`, or `storeHost`/… field-wise). No UI fields for it. No DSN: persist off (always `needTrain`)
 - Overlay Retrain control; status when a saved model is used
 
 ## v7 must-have
@@ -84,7 +84,7 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 - Nested Grafana datasource `eduardkolotushin-forecast-datasource` (`backend`, `metrics`, `alerting`) so unified alerting and expressions can use forecast / lower / upper by Grafana `refId`
 - Query editor: output kind, model and train-range **strings** (fingerprint only), series name, copy of query A’s datasource uid and inner query; frontend writes the same `cacheKey` as the overlay (canonical SQL/expr, Grafana time macros equivalent to interpolated panel timestamps). No train rewrite and no live train query on this path
 - `QueryData` `Restore`s the snapshot and `ForecastRange`s / `ForecastIntervalRange`s for the request time range. Miss (`needTrain`) is an error frame. Overlay remains the only train/retrain path
-- Snapshot DSN for this process: Forecast datasource jsonData (same keys as the app Configuration page), `[plugin.eduardkolotushin-forecast-datasource]`, or parent `AppInstanceSettings` when Grafana sends them. Overlay train still uses the app process DSN
+- Snapshot DSN for this process: Forecast datasource provisioned jsonData (same keys as the app process's), `[plugin.eduardkolotushin-forecast-datasource]`, or parent `AppInstanceSettings` when Grafana sends them. Overlay train still uses the app process DSN
 - Do not execute the source datasource from `pkg/` on alert eval. Live metric comparison stays Grafana query A
 - This plugin does not ship Grafana alert rules or notification channels
 

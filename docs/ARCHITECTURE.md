@@ -16,7 +16,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `src/forecast-panel/mixed.ts` | Metric vs Forecast datasource targets/frames on Mixed overlay |
 | `src/forecast-panel/alertFromPanel.ts` | Overlay options New alert rule: Grafana `/alerting/new` defaults from live panel queries |
 | `src/forecast-datasource/` | Nested queryable datasource for alerting (`kind` forecast / lower / upper) |
-| `src/components/AppConfig/` | Configuration tab: snapshot-store DSN + default retrain schedule |
+| `src/components/AppConfig/` | Configuration tab: store deployment note + default retrain schedule |
 | `src/pages/` | App config page bodies; the `schedules` tab renders the `forecast.retrain` table |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules; fit path records `trainSource` and upserts the `panel` schedule row |
@@ -66,7 +66,7 @@ DSN resolution (first non-empty wins per field; URL short-circuits the rest):
 
 1. Process env `FORECAST_STORE_URL` / `FORECAST_STORE_*` (only if Grafana forwards host env; Grafana 12.4+ does not by default)
 2. Grafana ini-to-env `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` or `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`, and `GrafanaCfg` keys (`store_host`, `store_port`, …) from `[plugin.eduardkolotushin-forecast-app]` or `[plugin.eduardkolotushin-forecast-datasource]`
-3. jsonData / secureJsonData (`storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword` — field-wise only; **no** jsonData key supplies a URL, and the camel `storeUrl` is not read at all, though a jsonData carrying it still counts as "has a store" and suppresses the parent fallback below): app Configuration page for the overlay process; Forecast datasource jsonData for alerting `QueryData`. If datasource jsonData has no host, `QueryData` also tries parent `AppInstanceSettings` when Grafana sends them
+3. jsonData / secureJsonData (`storeUrl` as one DSN, or field-wise `storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`; a `storeUrl` short-circuits the fields). Both plugin config pages render **no** store fields, so these come from provisioning or the settings API: the app process reads the app plugin's jsonData, and the Forecast datasource instance carries its own for alerting `QueryData` (which also falls back to the parent `AppInstanceSettings` when Grafana sends them and that instance has no host)
 
 CI/CD merges [`conf/forecast.ini.template`](../conf/forecast.ini.template) into `grafana.ini` (Grafana expands `${FORECAST_STORE_*}`). `org_id` comes from plugin context. No DSN: persist off.
 

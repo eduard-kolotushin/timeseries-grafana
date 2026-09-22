@@ -7,7 +7,8 @@
 ; Precedence in gpx_forecast: FORECAST_STORE_* env (only if Grafana forwards host
 ; env; Grafana 12.4+ does not by default), then GF_PLUGIN_* for this process's
 ; plugin id, then this plugin section via GrafanaCfg, then jsonData
-; (app Configuration page, or Forecast datasource jsonData).
+; (provisioned app or Forecast datasource jsonData; the plugin's pages
+; render no store fields).
 
 [plugin.eduardkolotushin-forecast-app]
 ; Optional full DSN. If set, the fields below are ignored.

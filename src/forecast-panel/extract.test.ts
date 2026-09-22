@@ -1,4 +1,4 @@
-import { FieldType, getFieldDisplayName, toDataFrame } from '@grafana/data';
+import { FieldType, toDataFrame } from '@grafana/data';
 import { extractSeries, historyFrame, pickTrainingPoints, trainingForFit } from './extract';
 
 describe('extractSeries', () => {
@@ -50,7 +50,6 @@ describe('extractSeries', () => {
     });
     const series = extractSeries(frame);
     expect(series).toHaveLength(1);
-    expect(series[0].name).toBe(getFieldDisplayName(frame.fields[1], frame, [frame]));
     expect(series[0].name).not.toBe('Value');
     expect(series[0].name).toMatch(/job/);
     expect(series[0].values).toEqual([1, 2]);

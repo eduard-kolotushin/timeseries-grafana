@@ -678,6 +678,57 @@ func TestForecastCapBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("a legal fit with a large replay payload is accepted", func(t *testing.T) {
+		// The pre-flight's budget is the two point arrays plus maxTrainSourceBytes, so a fit whose
+		// trainSource is large but legal must not be refused as "too large for a legal training
+		// series" (the audit's F50).
+		body, err := json.Marshal(ForecastRequest{
+			Times:  []int64{0, 60000, 120000},
+			Values: []nullableFloat{1, 2, 3},
+			Model:  "naive",
+			From:   180000,
+			To:     240000,
+			TrainSource: &TrainSource{
+				DatasourceUID: "druid",
+				Queries:       json.RawMessage(`["` + strings.Repeat("q", 512<<10) + `"]`),
+				To:            60000,
+				SeriesName:    "value",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status, raw := call(t, body); status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+
+	t.Run("a replay payload over the allowance is refused with its own reason", func(t *testing.T) {
+		body, err := json.Marshal(ForecastRequest{
+			Times:  []int64{0, 60000, 120000},
+			Values: []nullableFloat{1, 2, 3},
+			Model:  "naive",
+			From:   180000,
+			To:     240000,
+			TrainSource: &TrainSource{
+				DatasourceUID: "druid",
+				Queries:       json.RawMessage(`["` + strings.Repeat("q", maxTrainSourceBytes+1) + `"]`),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The body stays under the pre-flight budget, so this refusal comes from the decoded
+		// path's own bound and not from a size guess about what could be legal.
+		if int64(len(body)) > maxTrainBodyBytes() {
+			t.Fatalf("test body is %d bytes and would hit the pre-flight, want below %d", len(body), maxTrainBodyBytes())
+		}
+		status, raw := call(t, body)
+		if status != http.StatusRequestEntityTooLarge || !strings.Contains(string(raw), errTrainSourceTooLarge.Error()) {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+
 	t.Run("a body at the per-point budget still decodes", func(t *testing.T) {
 		status, raw := call(t, padded(int(maxTrainBodyBytes())))
 		if status != http.StatusOK {

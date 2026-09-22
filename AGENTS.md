@@ -52,7 +52,7 @@ Type-keyed train-query adapters (Prometheus range, OpenSearch metric+histogram o
 
 ## v6 in scope
 
-Postgres snapshot store (`forecast.snapshots` via pgx). Skip the train query until Retrain or a query/model/train-range-string change. Existing Configuration page holds the DSN.
+Postgres snapshot store (`forecast.snapshots` via pgx). Skip the train query until Retrain or a query/model/train-range-string change. The DSN is deployment configuration — env / `GF_PLUGIN_*` / grafana.ini / provisioned jsonData — and the plugin's config pages render no store fields.
 
 ## v7 in scope
 

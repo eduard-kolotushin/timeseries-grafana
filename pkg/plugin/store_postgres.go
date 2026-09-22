@@ -335,7 +335,11 @@ func storeDSNFrom(ctx context.Context, jsonData []byte, secure map[string]string
 		cfg:    backend.GrafanaConfigFromContext(ctx),
 		json:   jd,
 	}
-	if u := look.get("FORECAST_STORE_URL", "STORE_URL", "store_url", ""); u != "" {
+	// The json key is camel like every other jsonData key this plugin writes (storeHost, storePort, …),
+	// while env and the ini section spell it FORECAST_STORE_URL / store_url. A URL short-circuits the
+	// field-wise form, and jsonHasStore tests the same camel key, so an instance that declares only a
+	// URL is both detected as "has a store" and resolvable.
+	if u := look.get("FORECAST_STORE_URL", "STORE_URL", "store_url", "storeUrl"); u != "" {
 		return u
 	}
 	host := look.get("FORECAST_STORE_HOST", "STORE_HOST", "store_host", "storeHost")

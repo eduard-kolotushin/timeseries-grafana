@@ -40,7 +40,9 @@ func (a *App) handleForecast(w http.ResponseWriter, req *http.Request) {
 	// Refuse an impossible body before decoding it. Decoding is the expensive step:
 	// it expands every body byte into an 8-byte slice element plus growth copies, so
 	// a 16 MiB body would become >100 MB of live heap before checkTrainLen could
-	// reject it — multiplied by every concurrent caller.
+	// reject it — multiplied by every concurrent caller. The budget covers the two
+	// point arrays plus the maxTrainSourceBytes allowance checkTrainSourceLen
+	// enforces, so a body refused here cannot be a legal request.
 	if req.ContentLength > maxTrainBodyBytes() {
 		http.Error(w, errTrainBodyTooLarge.Error(), http.StatusRequestEntityTooLarge)
 		return

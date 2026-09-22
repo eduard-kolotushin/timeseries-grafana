@@ -1,11 +1,13 @@
 import React, { ChangeEvent, useState } from 'react';
 import { AppPluginMeta, PluginConfigPageProps } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
-import { Alert, Button, Field, FieldSet, Input, SecretInput } from '@grafana/ui';
+import { Alert, Button, Field, FieldSet, Input } from '@grafana/ui';
 import { httpStatusFromUnknown, reasonFromUnknown } from '../../forecast-panel/reasons';
 import { postScheduleDefault } from '../../forecast-panel/scheduleApi';
 import { testIds } from '../testIds';
 
+// The store keys stay in the type because provisioning writes them into this plugin's
+// jsonData/secureJsonData; the page itself only reads jsonData.retrainCron/retrainTimezone.
 export type ForecastStoreJsonData = {
   storeHost?: string;
   storePort?: number | string;
@@ -20,13 +22,6 @@ export type AppConfigProps = PluginConfigPageProps<AppPluginMeta<ForecastStoreJs
 
 const AppConfig = ({ plugin }: AppConfigProps) => {
   const json = plugin.meta.jsonData ?? {};
-  const [storeHost, setStoreHost] = useState(json.storeHost ?? '');
-  const [storePort, setStorePort] = useState(String(json.storePort ?? '5432'));
-  const [storeDatabase, setStoreDatabase] = useState(json.storeDatabase ?? 'overlay');
-  const [storeUser, setStoreUser] = useState(json.storeUser ?? 'overlay');
-  const [storeSslMode, setStoreSslMode] = useState(json.storeSslMode ?? 'disable');
-  const [storePassword, setStorePassword] = useState('');
-  const [passwordConfigured, setPasswordConfigured] = useState(Boolean(plugin.meta.secureJsonFields?.storePassword));
   const [retrainCron, setRetrainCron] = useState(json.retrainCron ?? '0 3 * * *');
   const [retrainTimezone, setRetrainTimezone] = useState(json.retrainTimezone ?? 'UTC');
   const [saving, setSaving] = useState(false);
@@ -49,19 +44,14 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       await getBackendSrv().post(`/api/plugins/${plugin.meta.id}/settings`, {
         enabled: true,
         pinned: plugin.meta.pinned,
-        // Spread first: settings this page does not render (retrainEnabled, retrainTick,
-        // grafanaUrl, grafanaToken, …) must survive a save.
+        // The store is a deployment parameter (env / GF_PLUGIN_* / ini / provisioned jsonData), so this
+        // page writes only the default retrain schedule. Spreading `json` first keeps every key this page
+        // does not render — the store's, and retrainEnabled/retrainTick/grafanaUrl/grafanaToken — intact.
         jsonData: {
           ...json,
-          storeHost,
-          storePort: Number(storePort) || 5432,
-          storeDatabase,
-          storeUser,
-          storeSslMode,
           retrainCron,
           retrainTimezone,
         },
-        secureJsonData: passwordConfigured && !storePassword ? {} : { storePassword },
       });
       setSaveError(null);
     } catch (e) {
@@ -78,35 +68,24 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         in Postgres (schema <code>forecast</code>), not the Grafana SQL datasource and not Druid metadata.
       </p>
       <FieldSet label="Snapshot store">
-        <Field label="Host">
-          <Input value={storeHost} onChange={(e: ChangeEvent<HTMLInputElement>) => setStoreHost(e.target.value)} />
-        </Field>
-        <Field label="Port">
-          <Input value={storePort} onChange={(e: ChangeEvent<HTMLInputElement>) => setStorePort(e.target.value)} />
-        </Field>
-        <Field label="Database">
-          <Input
-            value={storeDatabase}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => setStoreDatabase(e.target.value)}
-          />
-        </Field>
-        <Field label="User">
-          <Input value={storeUser} onChange={(e: ChangeEvent<HTMLInputElement>) => setStoreUser(e.target.value)} />
-        </Field>
-        <Field label="SSL mode">
-          <Input value={storeSslMode} onChange={(e: ChangeEvent<HTMLInputElement>) => setStoreSslMode(e.target.value)} />
-        </Field>
-        <Field label="Password">
-          <SecretInput
-            isConfigured={passwordConfigured}
-            value={storePassword}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => setStorePassword(e.target.value)}
-            onReset={() => {
-              setPasswordConfigured(false);
-              setStorePassword('');
-            }}
-          />
-        </Field>
+        <p>
+          The store has no fields here on purpose: it is a <strong>deployment parameter</strong>, so a save can never
+          overwrite a provisioned value. Per field, the first non-empty of env <code>FORECAST_STORE_*</code> (not
+          forwarded into plugin processes on Grafana 12.4+ by default — <code>FORECAST_STORE_URL</code> short-circuits
+          the rest) → <code>GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*</code> / <code>…_DATASOURCE_*</code> and
+          grafana.ini <code>[plugin.eduardkolotushin-forecast-app]</code> /{' '}
+          <code>[plugin.eduardkolotushin-forecast-datasource]</code> (<code>store_url</code>, <code>store_host</code>,{' '}
+          <code>store_port</code>, <code>store_database</code>, <code>store_user</code>, <code>store_ssl_mode</code>,{' '}
+          <code>store_password</code>) → provisioned jsonData/secureJsonData (<code>storeUrl</code>,{' '}
+          <code>storeHost</code>, <code>storePort</code>, <code>storeDatabase</code>, <code>storeUser</code>,{' '}
+          <code>storeSslMode</code>, <code>storePassword</code>) wins.
+        </p>
+        <p>
+          Empty host and no URL means persist off: fits still work, snapshots are not kept and every probe answers{' '}
+          <code>needTrain</code>. Alerting <code>QueryData</code> is a separate process and does not receive this
+          app&apos;s jsonData, so the Forecast datasource needs the same store from its own env/ini/provisioned data.
+          See <code>conf/forecast.ini.template</code>.
+        </p>
       </FieldSet>
       <FieldSet label="Default retrain schedule">
         <p>
@@ -126,10 +105,8 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       </FieldSet>
       <p>Plugin id: {plugin.meta.id}</p>
       <p>
-        Env <code>FORECAST_STORE_*</code> (not forwarded into plugin processes on Grafana 12.4+ by default) and
-        grafana.ini <code>[plugin.eduardkolotushin-forecast-app]</code> override these fields in the overlay backend.
-        Alerting QueryData is a separate process: set the same store on the Forecast datasource, or merge{' '}
-        <code>[plugin.eduardkolotushin-forecast-datasource]</code>. See <code>conf/forecast.ini.template</code>.
+        This page writes only <code>jsonData.retrainCron</code> / <code>jsonData.retrainTimezone</code>; every other key
+        it displays comes from deployment configuration and is left untouched by a save.
       </p>
       {saveError && (
         <Alert title="Settings not saved" severity="error">
