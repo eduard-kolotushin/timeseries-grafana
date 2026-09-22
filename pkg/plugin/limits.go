@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -58,8 +59,10 @@ var (
 	errTrainBodyTooLarge = errors.New("forecast: request body too large for a legal training series")
 	// errTrainSourceTooLarge is the replay-payload cap. The body can be legal-sized and still
 	// carry query objects past what the fit path stores, so it has its own 413 reason rather
-	// than sharing the pre-flight's "a legal training series cannot be this large" one.
-	errTrainSourceTooLarge = errors.New("forecast: trainSource is larger than 1048576 bytes")
+	// than sharing the pre-flight's "a legal training series cannot be this large" one. The
+	// message is derived from maxTrainSourceBytes, so the number it reports cannot drift from
+	// the number it enforces.
+	errTrainSourceTooLarge = fmt.Errorf("forecast: trainSource is larger than %d bytes", maxTrainSourceBytes)
 	// errWindowTooManyPoints is the emitted-window cap, checked before any
 	// allocation on the fit, restore and datasource paths. Its message matches the
 	// library's forecast.ErrTooManyPoints, and httpStatusFor maps the two to the

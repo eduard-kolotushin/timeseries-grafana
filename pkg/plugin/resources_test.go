@@ -724,7 +724,11 @@ func TestForecastCapBoundaries(t *testing.T) {
 			t.Fatalf("test body is %d bytes and would hit the pre-flight, want below %d", len(body), maxTrainBodyBytes())
 		}
 		status, raw := call(t, body)
-		if status != http.StatusRequestEntityTooLarge || !strings.Contains(string(raw), errTrainSourceTooLarge.Error()) {
+		// FUNCTIONAL_OVERVIEW F2 and the Discrepancy 1 table quote this sentence, so pin the
+		// literal rather than the variable that produces it: a change to maxTrainSourceBytes
+		// must be a deliberate one that updates the documented contract too.
+		const wantTrainSource = "forecast: trainSource is larger than 1048576 bytes"
+		if status != http.StatusRequestEntityTooLarge || !strings.Contains(string(raw), wantTrainSource) {
 			t.Fatalf("status=%d body=%s", status, raw)
 		}
 	})

@@ -167,6 +167,14 @@ func TestPostgresStore(t *testing.T) {
 
 	snap := forecast.Snapshot{V: 1, Kind: "naive", Last: 3000, Step: 1_000_000_000, Data: []byte(`{"last":4,"sigma":1}`)}
 	key := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	// FORECAST_TEST_PG can point at a shared database, so leave no row behind. Registered
+	// after t.Cleanup(s.Close) above, which makes it run first, while the pool is still open.
+	t.Cleanup(func() {
+		if _, err := s.pool.Exec(context.Background(),
+			`DELETE FROM forecast.snapshots WHERE org_id = $1 AND cache_key = $2`, int64(1), key); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
 	if err := s.Put(ctx, 1, key, snap); err != nil {
 		t.Fatal(err)
 	}
