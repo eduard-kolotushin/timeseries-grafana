@@ -1064,8 +1064,17 @@ entirely. The chart pins moved with the code:
 
 | Repo | Commits |
 | --- | --- |
-| `timeseries-grafana` | `861d25d` (the audit fixes and the store out of the app configuration page), `12b6381` (the store explanation dropped from the page) |
-| `timeseries-k8s` | `b175732` (`PLUGIN_REF=861d25d…`), `64ae2f5` (`PLUGIN_REF=12b6381e2092…`, both pins at the sibling heads) |
+| `timeseries-forecast` | `v0.5.1` at `ec7c534` — released so that the `timeseries v0.1.1` require is on the tagged line |
+| `timeseries-grafana` | `861d25d` (the audit fixes and the store out of the app configuration page), `12b6381` (the store explanation dropped from the page), `c4d09b9` (the pass-4 findings: the derived `trainSource` 413 message, the `ConfigEditor` key-list cases, the store test's cleanup), `84ad9b6` (require `timeseries-forecast v0.5.1`) |
+| `timeseries-baselines` | `a82e0f3` (require `timeseries-forecast v0.5.1`) |
+| `timeseries-k8s` | `b175732` (`PLUGIN_REF=861d25d…`), `64ae2f5` (`PLUGIN_REF=12b6381e2092…`), `606fdb1` (`PLUGIN_REF=84ad9b61b1b5…`, `BASELINES_REF=a82e0f30c79d…`, both pins at the sibling heads) |
+
+Pass 4's own findings were closed the same day, and all three were hygiene rather than behaviour: the 413 message
+for the replay payload is built from `maxTrainSourceBytes` instead of spelling the number, so the number it reports
+cannot drift from the one it enforces; the boundary subtest pins that literal as the documented contract; the
+Forecast datasource's `ConfigEditor` grew the table-driven key-list cases it lacked; and `TestPostgresStore`
+deletes its synthetic `cccc…` snapshot, so a suite run against a shared store leaves no row behind. No request, no
+response and no rendered page changed.
 
 What the plugin pages render now: `?page=configuration` has exactly two fields (*Cron*, *Timezone*) and prints no
 store key, no store field and no explanation of the store's absence; a save posts only
@@ -1076,7 +1085,8 @@ both environments: after a real Save the five provisioned `store*` keys were byt
 finds in its own jsonData and never a value — pass 4 gave it a `storeUrl` with a password in it and the rendered
 page contained neither the DSN nor the password. The body pre-flight is `2 × 100000 × 32 B + 1 MiB = 7448576` and a
 decoded `trainSource` above 1 MiB has its own 413 reason (F2/F50 above); `timeseries-forecast/go.mod` requires
-`timeseries v0.1.1`, though the `v0.5.0` tag still points at the commit before that bump.
+`timeseries v0.1.1`, and since `v0.5.1` both consumers require that released line instead of the `v0.5.0` tag that
+predated the bump.
 
 **Still not live-verified:** the pass-1 rows in the *Verified live, not verified live* table above (the OpenSearch and
 Postgres train rejections, the unsaved-dashboard reason (pass 4 tried to automate it and Grafana 13's add-panel
