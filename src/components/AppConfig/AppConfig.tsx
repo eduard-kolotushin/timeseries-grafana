@@ -67,26 +67,6 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         Enable this app, then use the <strong>Forecast overlay</strong> panel on a dashboard. Fitted models are stored
         in Postgres (schema <code>forecast</code>), not the Grafana SQL datasource and not Druid metadata.
       </p>
-      <FieldSet label="Snapshot store">
-        <p>
-          The store has no fields here on purpose: it is a <strong>deployment parameter</strong>, so a save can never
-          overwrite a provisioned value. Per field, the first non-empty of env <code>FORECAST_STORE_*</code> (not
-          forwarded into plugin processes on Grafana 12.4+ by default — <code>FORECAST_STORE_URL</code> short-circuits
-          the rest) → <code>GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*</code> / <code>…_DATASOURCE_*</code> and
-          grafana.ini <code>[plugin.eduardkolotushin-forecast-app]</code> /{' '}
-          <code>[plugin.eduardkolotushin-forecast-datasource]</code> (<code>store_url</code>, <code>store_host</code>,{' '}
-          <code>store_port</code>, <code>store_database</code>, <code>store_user</code>, <code>store_ssl_mode</code>,{' '}
-          <code>store_password</code>) → provisioned jsonData/secureJsonData (<code>storeUrl</code>,{' '}
-          <code>storeHost</code>, <code>storePort</code>, <code>storeDatabase</code>, <code>storeUser</code>,{' '}
-          <code>storeSslMode</code>, <code>storePassword</code>) wins.
-        </p>
-        <p>
-          Empty host and no URL means persist off: fits still work, snapshots are not kept and every probe answers{' '}
-          <code>needTrain</code>. Alerting <code>QueryData</code> is a separate process and does not receive this
-          app&apos;s jsonData, so the Forecast datasource needs the same store from its own env/ini/provisioned data.
-          See <code>conf/forecast.ini.template</code>.
-        </p>
-      </FieldSet>
       <FieldSet label="Default retrain schedule">
         <p>
           Written to <code>jsonData.retrainCron</code> / <code>jsonData.retrainTimezone</code> by the Save button below.
@@ -105,8 +85,8 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       </FieldSet>
       <p>Plugin id: {plugin.meta.id}</p>
       <p>
-        This page writes only <code>jsonData.retrainCron</code> / <code>jsonData.retrainTimezone</code>; every other key
-        it displays comes from deployment configuration and is left untouched by a save.
+        This page writes only <code>jsonData.retrainCron</code> / <code>jsonData.retrainTimezone</code>; every other
+        setting comes from deployment configuration and is left untouched by a save.
       </p>
       {saveError && (
         <Alert title="Settings not saved" severity="error">

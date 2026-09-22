@@ -305,21 +305,20 @@ train 30006 points; see [Discrepancies](#discrepancies-found)).
 **Kubernetes:** the same dashboard and option set (the panels come from the ConfigMap); the K8s store shows the
 resulting `panel` rows with `cron */5 * * * *`.
 
-### F11. Configuration page — store deployment note and default retrain schedule
+### F11. Configuration page — default retrain schedule
 
 | | |
 | --- | --- |
-| **Function** | Show where the snapshot store is configured (deployment only) and set the org's default cron in jsonData, validating it before saving. |
+| **Function** | Set the org's default cron and timezone in jsonData, validating the cron before saving. The snapshot store has no representation on this page: it is deployment configuration (F20). |
 | **Who can use** | **Admin** (Grafana's plugin configuration page, `role: Admin` in `plugin.json`). |
-| **How configured** | Fields: *Snapshot store* — a read-only note naming the deployment keys; *Default retrain schedule* — Cron, Timezone. A save posts only `retrainCron`/`retrainTimezone` merged over the existing jsonData, and sends no `secureJsonData`, so neither a provisioned store value nor the store password can be overwritten from the page. |
+| **How configured** | Fields: *Default retrain schedule* — Cron, Timezone. A save posts only `retrainCron`/`retrainTimezone` merged over the existing jsonData, and sends no `secureJsonData`, so neither a provisioned store value nor the store password can be overwritten from the page. The page prints no store key list and no explanation of the missing fields. |
 | **Input params** | `retrainCron`, `retrainTimezone`. |
 | **Expected result** | 200 and the alert `Settings not saved` + the reason when the cron does **not** parse; nothing is persisted in that case. |
 
-**Positive — Compose:** `?page=configuration` renders the *Snapshot store* note (the env / `GF_PLUGIN_*` / ini /
-jsonData key list) and the *Default retrain schedule* fields with the provisioned cron `*/5 * * * *`; no
-Host/Port/Database/User/SSL mode/Password input exists anywhere on the page, and a `Save` persists only the retrain
-keys (`jsonData.retrainTimezone: "UTC"` appeared after saving the valid cron while the provisioned store keys stayed
-untouched).
+**Positive — Compose:** `?page=configuration` renders the *Default retrain schedule* fields with the provisioned cron
+`*/5 * * * *` and the timezone; the page has no store field, no store key list and no explanation of why the store
+has none. A `Save` persists only the retrain keys (`jsonData.retrainTimezone: "UTC"` appeared after saving the valid
+cron while the provisioned store keys stayed untouched).
 
 **Negative — Compose:** typing `nope` into *Cron* and pressing Save → alert `Settings not saved` /
 `forecast: invalid cron`, and the stored jsonData was **unchanged** (`retrainCron` still `*/5 * * * *`).

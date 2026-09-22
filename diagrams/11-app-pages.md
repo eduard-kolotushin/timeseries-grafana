@@ -20,7 +20,7 @@ sequenceDiagram
   participant PG as forecast.retrain
 
   Admin->>Grafana: Открыть Configuration
-  Grafana->>App: AppConfig (заметка о сторе + retrain schedule)
+  Grafana->>App: AppConfig (retrain schedule)
   Admin->>App: Save jsonData retrainCron
   App->>Grafana: POST plugins settings
   Admin->>Grafana: Открыть Retrain schedules

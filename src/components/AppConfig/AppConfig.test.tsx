@@ -34,14 +34,13 @@ describe('Components/AppConfig', () => {
     mockPost.mockReset();
   });
 
-  test('documents the store as a deployment parameter and offers no store inputs', () => {
+  test('has no store fields and no store explanation, only the retrain schedule', () => {
     render(<AppConfig plugin={props.plugin} query={props.query} />);
-    expect(screen.getByText(/snapshot store/i)).toBeInTheDocument();
-    expect(screen.getByText(/deployment parameter/i)).toBeInTheDocument();
     expect(screen.getByText(/default retrain schedule/i)).toBeInTheDocument();
-    expect(screen.getByText(/forecast\.ini\.template/)).toBeInTheDocument();
     expect(screen.getAllByText(/eduardkolotushin-forecast-app/).length).toBeGreaterThan(0);
-    // Only the default retrain schedule still has inputs; every store field is gone.
+    // The store is deployment configuration: the page offers no fields for it and does not explain it either.
+    expect(screen.queryByText(/snapshot store/i)).toBeNull();
+    expect(screen.queryByText(/deployment parameter/i)).toBeNull();
     expect(screen.getByRole('textbox', { name: /^Cron/ })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: /^Timezone/ })).toBeInTheDocument();
     for (const label of [/^Host/, /^Port/, /^Database/, /^User/, /^SSL mode/, /^Password/]) {
