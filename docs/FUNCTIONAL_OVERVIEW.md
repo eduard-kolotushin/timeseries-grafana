@@ -1246,7 +1246,8 @@ against the same database, including a two-key `Supersede` case that failed befo
 the kind node from images built *by the pin*: `…-grafana:5b50446910f4` and `…-baselines:fe0c1cb4bd8f` — the
 twelve-character prefixes of `5b50446910f4f4ba7dc6466ea14fd025f77f567c` and
 `fe0c1cb4bd8fa204bd68fe95d8342e2c2e3b5175`, so the running pods carry exactly those pinned commits — the plugin
-commit this pass pushed, `5b50446`; the documentation below travels in the repo, not in the image.
+commit this pass pushed, `5b50446`; the documentation below travels in the repo, not in the image. (The release has
+since been re-pinned to the review's commits; the correction at the end of this block measures that image.)
 Grafana 13.1.0 answered `/api/health` at `http://localhost:80` (`commit b309c9bb…`, LoadBalancer `172.18.0.5`),
 `GET /resources/ping` returned `{"message":"ok"}`, and the same Holt fit the Compose half used returned the same
 three points and the same bands (`[4.421611712565687, 2.9984805394078187, 0.610897031576048]` …
@@ -1310,4 +1311,27 @@ checks every table rather than one — a half-applied pair of migration files no
 (`TestProbeSchemaChecksEveryTable`) — `SNAPSHOT_TTL` is verified against `DEFAULT_RETRAIN_CRON`'s next gap (a 1h
 window beside the daily default collects a healthy metric's snapshot and publishes nothing until the next retrain),
 and the sweep's correlation names the fleet-wide `org_id = 0`.
+
+**Kubernetes re-measured on the re-pinned release.** `make helm-images helm-refresh` rebuilt both images from the
+new pins (`ghcr.io/eduard-kolotushin/timeseries-grafana:24ac89f17b84`,
+`…/timeseries-baselines:467421fa4af7`) and rolled the pods onto them; `ghcr.io/eduard-kolotushin/timeseries-k8s`
+commit `9cc14da` carries the pins. Grafana 13.1.0 answered `/api/health` and `/resources/ping` on
+`http://localhost:80`, the `alpha: 0.8`, `beta: 0.2` fit returned the same three points and the same bands as the
+Compose half (`5.7616, 6.9152, 8.0688`; `[3.271699933312405, 3.4636560178723124, 3.6314655480479416]` …
+`[8.251500066687594, 10.366743982127687, 12.506134451952057]`), and a 65-key request answered
+`400 forecast: panelKeys holds more than 64 keys` there too — the two surfaces this correction changes, measured on
+the image rather than only in the workspace. The ConfigMap-provisioned **Forecast minute-of-week demo** rendered its
+three panels (three canvases, no `role="alert"`); its three probes all hit saved models (the fingerprints are
+deterministic, and the K8s store already held them), so the first panel was refitted through its own **Retrain**
+button to exercise the fit path: one fit, `cacheKey 2e8279…`, `panelKeys` of length **1** — right for a one-series
+panel, and the same shape the Compose half distinguishes from the two-series case.
+
+The pod's artifacts hash to `gpx_forecast_linux_amd64`
+`eb07112cf625b4b9fcf6b5be2b272cf9b72c1b4c6e22b88791a4aa7bf67b81d8`, `module.js`
+`07a1b24747a6b133ae3b8db7ed95f8ce36f8c4f3038a1cfefe4f4ae94ca253a2`, `forecast-datasource/module.js`
+`7a2757b818af36bdc3edaaa1423ab8347d2a6f8402f54567ea6c5069aa1b91df` and `forecast-panel/module.js`
+`68920cb5a18908dd7d5fb6982a292b0d3c91cef240e3b72ad7850e8827883e16`. Only the binary and the **panel** bundle
+moved from the pass-6 pin (`fcdb8f2d…` → `eb07112c…`, `df0642b9…` → `68920cb5…`); the app and datasource bundles are
+byte-identical because the review changed only `src/forecast-panel` and `pkg/`, which is what the change set
+predicts and a check that the image really is this source.
 
