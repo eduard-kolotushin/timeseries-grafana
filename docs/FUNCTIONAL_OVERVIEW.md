@@ -360,9 +360,11 @@ server row unchanged. Pressing *Delete* on the fixture row removed it immediatel
 **Kubernetes:** the tab lists the K8s store's 4 rows with the same columns, derived sources and deep links
 (`ready` baseline + the three dashboard panels, all `last ok`).
 
-**Pass 5 — Compose:** the tab's `Delete model` action (beside `Delete`, which still leaves the model — F5) sent
-`DELETE …/schedules?scope=panel&key=…&drop=model`; a `baseline` row answered with the note that its model belongs
-to the worker's schema, which the page rendered as an info alert.
+**Pass 5 — Compose:** `DELETE …/schedules?scope=panel&key=…&drop=model` — the request the tab's **Delete model**
+action sends, pinned by that action's own jest case — answered `{"message":"ok"}` for a `panel` key and, for a
+`baseline` row, `{"message":"ok","note":"the model behind a baseline key lives in the baselines worker's schema and
+is collected there"}`. The page renders that `note` as an info alert (unit-tested; the button itself was not
+clicked in this pass). The `Delete` beside it still leaves the model (F5).
 
 ### F13. Retrain action
 
