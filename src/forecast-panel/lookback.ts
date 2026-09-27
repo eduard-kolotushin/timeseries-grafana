@@ -157,7 +157,7 @@ export function absoluteDayBound(date: CivilDate, timeZone: string, endOfDay: bo
   return raw;
 }
 
-/** Grafana time-picker `now` (honors nowDelay), not wall clock and not panel `to`. */
+/** Grafana time-picker `now`, not wall clock and not panel `to`. */
 export function dashboardNowMs(timeZone?: string): number {
   try {
     const parsed = rangeUtil.convertRawToRange({ from: 'now', to: 'now' }, timeZone);

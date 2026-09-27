@@ -13,7 +13,7 @@ import { abortableLastValue, abortError } from './abortable';
 import { datasourceUid } from './alertFromPanel';
 import { trainMaxDataPoints, trainStepInterval } from './lookback';
 import { metricTargets } from './mixed';
-import { REASON_TRAIN_EMPTY } from './reasons';
+import { REASON_TRAIN_EMPTY, REASON_TRAIN_MULTI_DATASOURCE } from './reasons';
 import { rewriteTrainTargets, summarizeTrainTargets, TrainRewriteWindow } from './trainRewrite';
 
 /**
@@ -57,6 +57,12 @@ export type TrainQueryResult = {
   reason?: string;
   /** Absent when no group returned frames. Only the first producing group is kept. */
   source?: TrainQuerySource;
+  /**
+   * Why the frames can answer only part of the panel: set when a second datasource
+   * produced frames, which the stored `source` cannot replay. The series that match
+   * nothing then carry this reason instead of the generic empty one.
+   */
+  droppedReason?: string;
 };
 
 /**
@@ -134,6 +140,7 @@ export async function queryTrainingFrames(
   const frames: DataFrame[] = [];
   let source: TrainQuerySource | undefined;
   let skipReason: string | undefined;
+  let droppedReason: string | undefined;
   for (const group of groups.values()) {
     if (signal?.aborted) {
       throw abortError();
@@ -172,9 +179,17 @@ export async function queryTrainingFrames(
       signal
     )) as DataQueryResponse;
     if (resp?.data?.length) {
+      if (source) {
+        // A second datasource produced frames. The stored trainSource names one group's
+        // query objects and the scheduler re-extracts by series name from that group, so
+        // a series fitted from this one could never be replayed. Its frames are dropped
+        // and its series report droppedReason below.
+        droppedReason = droppedReason ?? REASON_TRAIN_MULTI_DATASOURCE;
+        continue;
+      }
       // The backend replays these exact objects and re-extracts the training series by
       // name, so they stay untouched here (`rewritten.targets` is already a clone).
-      source = source ?? {
+      source = {
         datasourceUid: group.key,
         queries: rewritten.targets,
         from: fromMs,
@@ -191,7 +206,7 @@ export async function queryTrainingFrames(
     }
   }
   if (frames.length > 0) {
-    return { frames, source };
+    return { frames, source, droppedReason };
   }
   return { frames: null, reason: skipReason };
 }

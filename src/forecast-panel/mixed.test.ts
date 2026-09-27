@@ -27,6 +27,15 @@ describe('isForecastTarget', () => {
     expect(isForecastTarget({ refId: 'B', kind: 'forecast', sourceTargets: [metric] })).toBe(true);
     expect(isForecastTarget({ refId: 'A', kind: 'forecast' })).toBe(false);
   });
+
+  it('does not read a bare string ref as a datasource type', () => {
+    // Grafana's string form is a uid; the type is only knowable from an object ref, so a
+    // legacy row whose datasource is a string must be classified by kind, not by its text.
+    expect(isForecastTarget({ refId: 'B', datasource: FORECAST_DATASOURCE_TYPE })).toBe(false);
+    expect(
+      isForecastTarget({ refId: 'B', datasource: FORECAST_DATASOURCE_TYPE, kind: 'forecast', sourceTargets: [metric] })
+    ).toBe(true);
+  });
 });
 
 describe('metricTargets', () => {

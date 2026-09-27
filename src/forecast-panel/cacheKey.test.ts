@@ -53,6 +53,34 @@ describe('fingerprintPayload', () => {
     expect(a).toEqual(b);
   });
 
+  it('keeps a nested query interval and drops only the row window fields', () => {
+    // Only a query row's own top level is a window field: an OpenSearch date-histogram
+    // interval is query content (the train rewrite pins it), so two targets that differ
+    // only there must not share a fingerprint.
+    const osTarget = {
+      refId: 'A',
+      datasource: { uid: 'os', type: 'grafana-opensearch-datasource' },
+      bucketAggs: [{ id: '2', type: 'date_histogram', settings: { interval: '1m' } }],
+      maxDataPoints: 100,
+      interval: '15s',
+    };
+    const base = fingerprintPayload({ targets: [osTarget], options: baseOptions, seriesName: 'up' });
+
+    const otherInterval = fingerprintPayload({
+      targets: [{ ...osTarget, bucketAggs: [{ id: '2', type: 'date_histogram', settings: { interval: '5m' } }] }],
+      options: baseOptions,
+      seriesName: 'up',
+    });
+    expect(otherInterval).not.toEqual(base);
+
+    const otherWindow = fingerprintPayload({
+      targets: [{ ...osTarget, refId: 'B', maxDataPoints: 500, interval: '1m' }],
+      options: baseOptions,
+      seriesName: 'up',
+    });
+    expect(otherWindow).toEqual(base);
+  });
+
   it('changes with expr, model, or train-range strings', () => {
     const target = { refId: 'A', datasource: { uid: 'prom' }, expr: 'up' };
     const base = fingerprintPayload({

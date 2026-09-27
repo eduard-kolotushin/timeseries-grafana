@@ -95,9 +95,13 @@ func (m *memSchedules) Upsert(_ context.Context, orgID int64, row ScheduleRow) e
 }
 
 // Supersede mirrors supersedeSQL: the rows a panel's other cache keys trained are
-// retired, keepKey's own flag is cleared, and rows without that provenance (or
-// another panel's) are untouched.
-func (m *memSchedules) Supersede(_ context.Context, orgID int64, dashboardUID string, panelID int, keepKey string) error {
+// retired, every key in keys keeps (or regains) a clear flag, and rows without that
+// provenance (or another panel's) are untouched.
+func (m *memSchedules) Supersede(_ context.Context, orgID int64, dashboardUID string, panelID int, keys []string) error {
+	keep := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		keep[key] = struct{}{}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k, row := range m.rows {
@@ -114,10 +118,11 @@ func (m *memSchedules) Supersede(_ context.Context, orgID int64, dashboardUID st
 		if spec.DashboardUID != dashboardUID || spec.PanelID != panelID {
 			continue
 		}
+		_, kept := keep[row.Key]
 		switch {
-		case row.Key == keepKey && !row.SupersededAt.IsZero():
+		case kept && !row.SupersededAt.IsZero():
 			row.SupersededAt = time.Time{}
-		case row.Key != keepKey && row.SupersededAt.IsZero():
+		case !kept && row.SupersededAt.IsZero():
 			row.SupersededAt = time.Now()
 		default:
 			continue
@@ -402,7 +407,9 @@ func TestPostgresDropModelRoute(t *testing.T) {
 	clearStoreEnv(t)
 	ctx := context.Background()
 	s := scratchPostgresStore(t, "forecast_drop_model")
-	app, err := newApp(ctx, backend.AppInstanceSettings{}, s, s, nil)
+	// The app's store is the read-through cache production uses (withCache), so the
+	// deletion is asserted where it matters: this process's own copy.
+	app, err := newApp(ctx, backend.AppInstanceSettings{}, withCache(s), s, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,9 +429,18 @@ func TestPostgresDropModelRoute(t *testing.T) {
 	}
 
 	seed()
+	// Warm this process's cache, which is what serves the panel and any alert
+	// evaluation in this process: the removal must be visible here at once, not only
+	// after snapshotCacheTTL expires.
+	if _, ok, err := app.store.Get(ctx, orgID, key); err != nil || !ok {
+		t.Fatalf("warm read: ok=%v err=%v", ok, err)
+	}
 	status, body := callRoute(t, app, adminCtx(orgID), http.MethodDelete, "schedules?scope=panel&key="+key+"&drop=model", nil)
 	if status != http.StatusOK {
 		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if _, ok, err := app.store.Get(ctx, orgID, key); err != nil || ok {
+		t.Fatalf("this process still answers the snapshot it deleted: ok=%v err=%v", ok, err)
 	}
 	if _, ok, err := s.Get(ctx, orgID, key); err != nil || ok {
 		t.Fatalf("the model survived drop=model: ok=%v err=%v", ok, err)

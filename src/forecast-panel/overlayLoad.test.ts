@@ -1,7 +1,7 @@
 import { MutableDataFrame, FieldType } from '@grafana/data';
 import { MAX_TRAIN_POINTS } from './lookback';
 import { loadOverlayForecasts } from './overlayLoad';
-import { REASON_BUSY, REASON_OVERSIZE, REASON_TRAIN_EMPTY, REASON_TRAIN_TOO_LONG } from './reasons';
+import { REASON_BUSY, REASON_OVERSIZE, REASON_TRAIN_EMPTY, REASON_TRAIN_MULTI_DATASOURCE, REASON_TRAIN_TOO_LONG } from './reasons';
 import { ForecastResponse } from './types';
 
 const visible = [{ name: 'up', times: [1, 2], values: [1, 2] }];
@@ -313,5 +313,70 @@ describe('loadOverlayForecasts', () => {
     });
     expect('trainSource' in post.mock.calls[0][0]).toBe(false);
     expect('trainSource' in post.mock.calls[1][0]).toBe(false);
+  });
+
+  it('names every visible series key on each fit', async () => {
+    const two = [
+      { name: 'up', times: [1, 2], values: [1, 2] },
+      { name: 'down', times: [1, 2], values: [3, 4] },
+    ];
+    const both = new MutableDataFrame();
+    both.addField({ name: 'Time', type: FieldType.time, values: [1, 2] });
+    both.addField({ name: 'up', type: FieldType.number, values: [10, 20] });
+    both.addField({ name: 'down', type: FieldType.number, values: [30, 40] });
+    const post = jest
+      .fn<Promise<ForecastResponse>, [Record<string, unknown>]>()
+      .mockResolvedValue({ times: [3], values: [30] });
+
+    await loadOverlayForecasts({
+      visible: two,
+      fromMs: 3,
+      toMs: 4,
+      level: 0,
+      retrain: true,
+      fitBody: { model: 'naive' },
+      cacheKeyFor: async (name) => (name === 'up' ? 'aa'.repeat(32) : 'bb'.repeat(32)),
+      queryTrain: async () => ({ frames: [both] }),
+      post,
+    });
+
+    // One fit per series, each naming the panel's whole key set: the backend retires the
+    // panel's rows absent from that set, so a fit naming only its own key would retire the
+    // panel's other series on every load.
+    expect(post).toHaveBeenCalledTimes(2);
+    const want = ['aa'.repeat(32), 'bb'.repeat(32)];
+    expect(post.mock.calls[0][0].panelKeys).toEqual(want);
+    expect(post.mock.calls[1][0].panelKeys).toEqual(want);
+  });
+
+  it('reports why a series the stored source cannot replay was dropped', async () => {
+    const two = [
+      { name: 'up', times: [1, 2], values: [1, 2] },
+      { name: 'other', times: [1, 2], values: [3, 4] },
+    ];
+    // Two training series, so the sole-candidate fallback cannot match `other`: it has no
+    // frame, which is exactly the case the dropped group's reason explains.
+    const source = new MutableDataFrame();
+    source.addField({ name: 'Time', type: FieldType.time, values: [1, 2] });
+    source.addField({ name: 'up', type: FieldType.number, values: [10, 20] });
+    source.addField({ name: 'unrelated', type: FieldType.number, values: [30, 40] });
+    const post = jest
+      .fn<Promise<ForecastResponse>, [Record<string, unknown>]>()
+      .mockResolvedValue({ times: [3], values: [30] });
+
+    const got = await loadOverlayForecasts({
+      visible: two,
+      fromMs: 3,
+      toMs: 4,
+      level: 0,
+      retrain: true,
+      fitBody: { model: 'naive' },
+      cacheKeyFor: async () => 'aa'.repeat(32),
+      queryTrain: async () => ({ frames: [source], droppedReason: REASON_TRAIN_MULTI_DATASOURCE }),
+      post,
+    });
+
+    expect(got.forecasts).toHaveLength(1);
+    expect(got.error).toBe(REASON_TRAIN_MULTI_DATASOURCE);
   });
 });

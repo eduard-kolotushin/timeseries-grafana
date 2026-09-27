@@ -1,4 +1,6 @@
 export const REASON_TRAIN_EMPTY = 'Training query returned no points';
+export const REASON_TRAIN_MULTI_DATASOURCE =
+  'The panel trains from more than one datasource; only one can be stored for retraining';
 export const REASON_INVALID_RANGE = 'Forecast range is inverted or invalid';
 export const REASON_INVALID_TRAIN_RANGE = 'Training period is inverted or invalid';
 export const REASON_EMPTY_WINDOW = 'No forecast points in the requested range';

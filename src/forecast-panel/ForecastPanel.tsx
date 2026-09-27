@@ -127,6 +127,9 @@ export const ForecastPanel: React.FC<Props> = ({
     const ac = loadGate.current.start(options.maxInflightLoads);
 
     async function load() {
+      // Taken before any of the checks that can reject the window: a click a load cannot
+      // honour must not stay queued and fire on a later, unrelated load of this panel.
+      retrain = takeRetrain(key);
       setError(null);
       const history: DataFrame[] = [];
       const nowMs = dashboardNowMs(timeZone);
@@ -144,6 +147,7 @@ export const ForecastPanel: React.FC<Props> = ({
           setUsedSaved(false);
           setLoad({ key: queryKey, frames: history });
           finished = true;
+          clearRetrain(key);
         }
         return;
       }
@@ -158,6 +162,7 @@ export const ForecastPanel: React.FC<Props> = ({
           setUsedSaved(false);
           setLoad({ key: queryKey, frames: history });
           finished = true;
+          clearRetrain(key);
         }
         return;
       }
@@ -180,6 +185,7 @@ export const ForecastPanel: React.FC<Props> = ({
           setUsedSaved(false);
           setLoad({ key: queryKey, frames: history });
           finished = true;
+          clearRetrain(key);
         }
         return;
       }
@@ -187,7 +193,6 @@ export const ForecastPanel: React.FC<Props> = ({
         setForecastToMs(window.toMs);
       }
 
-      retrain = takeRetrain(key);
       // Built once and shared: the probe needs it as much as the fit does. The summary
       // comes from the panel's own targets, so a probe can identify a row that has not
       // been retrained by a browser since the plugin started recording identity.

@@ -65,6 +65,12 @@ type ForecastRequest struct {
 	CacheKey    string          `json:"cacheKey"`
 	Retrain     bool            `json:"retrain"`
 	TrainSource *TrainSource    `json:"trainSource,omitempty"`
+	// PanelKeys is every visible series' cache key on the panel that sent this fit.
+	// The overlay POSTs one fit per series, so a supersede keyed on "every other row"
+	// would retire the panel's other series on every load; naming the whole set is
+	// what keeps a multi-series panel retrainable. The fit's own CacheKey is always
+	// part of the set, whether or not this field is sent (an older frontend omits it).
+	PanelKeys []string `json:"panelKeys,omitempty"`
 	// Provenance identifies the panel on both a probe and a fit, so a row written
 	// before the plugin recorded it is identified on the next dashboard load. It is
 	// deliberately outside trainSource: a probe never runs the training query.
@@ -188,6 +194,9 @@ func (a *App) dispatchForecast(ctx context.Context, orgID int64, in ForecastRequ
 	// arrays; this is where that allowance becomes an enforced limit, so the pre-flight can only ever
 	// refuse a body that really cannot be legal.
 	if err := checkTrainSourceLen(in.TrainSource); err != nil {
+		return ForecastResponse{}, err
+	}
+	if err := checkPanelKeys(in.PanelKeys); err != nil {
 		return ForecastResponse{}, err
 	}
 	hasTimes := len(in.Times) > 0 || len(in.Values) > 0
@@ -324,6 +333,14 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	// array both the claim predicate and the scheduler read as "no queries".
 	src := *in.TrainSource
 	src.Queries = queriesOrEmpty(src.Queries)
+	// The spec's text fields label cells in the Retrain schedules table, so they are
+	// clamped on the way in as well as out (provenanceJSON and List do the same):
+	// nothing stops a client from parking a megabyte in a panel title, a query
+	// summary or a series name, and nothing reads back more than the cap.
+	src.SeriesName = clampCellText(src.SeriesName)
+	src.PanelTitle = clampCellText(src.PanelTitle)
+	src.DashboardUID = clampCellText(src.DashboardUID)
+	src.QuerySummary = clampCellText(src.QuerySummary)
 	spec, err := json.Marshal(retrainSpec{
 		TrainSource: src,
 		Model:       in.Model,
@@ -356,10 +373,32 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	// fit knows no panel and supersedes nothing. A failed supersede never fails the
 	// fit the user is waiting on.
 	if in.TrainSource.DashboardUID != "" && in.TrainSource.PanelID != 0 {
-		if err := a.sched.Supersede(ctx, orgID, in.TrainSource.DashboardUID, in.TrainSource.PanelID, in.CacheKey); err != nil {
+		keys := panelKeySet(in.CacheKey, in.PanelKeys)
+		if err := a.sched.Supersede(ctx, orgID, in.TrainSource.DashboardUID, in.TrainSource.PanelID, keys); err != nil {
 			log.DefaultLogger.Warn("schedule supersede", "key", in.CacheKey, "err", err.Error())
 		}
 	}
+}
+
+// panelKeySet is the row keys a supersede must keep live: this fit's own key plus
+// the panel's other visible keys, deduplicated and with empty entries dropped. A
+// request without panelKeys therefore keeps the single-key behaviour (only its own
+// row stays current), and a fit carrying the whole set keeps every series the panel
+// still draws, which is what one fit per series needs.
+func panelKeySet(cacheKey string, panelKeys []string) []string {
+	keys := make([]string, 0, len(panelKeys)+1)
+	seen := make(map[string]struct{}, len(panelKeys)+1)
+	for _, key := range append([]string{cacheKey}, panelKeys...) {
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // queriesOrEmpty normalises an absent or JSON-null query list to the empty array.

@@ -339,6 +339,12 @@ func (a *App) deleteSchedule(w http.ResponseWriter, req *http.Request, orgID int
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// This process's own read-through cache would otherwise keep answering the
+		// snapshot it just deleted, so the panel (and any alert evaluation running in
+		// this process) would not see the removal until snapshotCacheTTL expired.
+		if forgetter, ok := a.store.(cacheForgetter); ok {
+			forgetter.Forget(orgID, key)
+		}
 		writeJSON(w, map[string]string{"message": "ok"})
 	default:
 		http.Error(w, errInvalidDrop.Error(), http.StatusBadRequest)

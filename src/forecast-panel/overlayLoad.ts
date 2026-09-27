@@ -117,11 +117,25 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
   }
 
   const trainSource = train.source;
+  // Every visible series' key, named on each fit: the backend retires the panel's rows
+  // that are absent from that set (Supersede), and the overlay POSTs one fit per series,
+  // so a fit naming only its own key would retire the panel's other series on every load.
+  // Computed once, before the first POST, because every fit carries the same set.
+  const panelKeys: string[] = [];
+  for (const points of args.visible) {
+    try {
+      panelKeys.push(await args.cacheKeyFor(points.name));
+    } catch {
+      // A series whose key cannot be computed is simply not part of the set; its own fit
+      // reports the failure below.
+    }
+  }
   for (const points of need) {
     const fit = trainingForFit(points, trained);
     if (!fit) {
-      // The training frame has no series for this one; say so rather than draw it with no reason.
-      overlayError = overlayError ?? REASON_TRAIN_EMPTY;
+      // The training frame has no series for this one; say so rather than draw it with no
+      // reason. A fit that could only be trained from one of several datasources says why.
+      overlayError = overlayError ?? train.droppedReason ?? REASON_TRAIN_EMPTY;
       continue;
     }
     if (fit.times.length > MAX_TRAIN_POINTS || fit.values.length > MAX_TRAIN_POINTS) {
@@ -135,6 +149,7 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
         ...args.fitBody,
         ...identify,
         cacheKey: key,
+        panelKeys,
         times: fit.times,
         values: fit.values,
         from: args.fromMs,

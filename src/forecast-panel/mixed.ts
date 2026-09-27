@@ -6,14 +6,19 @@ export function datasourceType(ref: DataQuery['datasource'] | string | null | un
     return '';
   }
   if (typeof ref === 'string') {
-    return ref;
+    // A bare string is a datasource *uid* (Grafana's own converters read it that way), not a
+    // type, so classifying by it would read a uid as a type name. The type is only knowable
+    // from a ref object.
+    return '';
   }
   return ref.type ?? '';
 }
 
 export function isForecastTarget(q: {
   refId?: string;
-  datasource?: DataQuery['datasource'];
+  // A string ref is accepted here because the classifier reads panel targets that may come
+  // from stored JSON, where Grafana's legacy string-uid form survives.
+  datasource?: DataQuery['datasource'] | string;
   kind?: unknown;
   sourceTargets?: unknown;
   cacheKey?: unknown;

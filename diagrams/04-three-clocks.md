@@ -36,7 +36,7 @@ flowchart TB
 | seasonal naive | 14d |
 | naive, mean, drift, SES, Holt | 7d |
 
-**Авто-длительность прогноза** (начало — Grafana `now`, с учётом `nowDelay`):
+**Авто-длительность прогноза** (начало — Grafana `now`; `nowDelay` панель не применяет, `convertRawToRange` его не принимает):
 
 | Модель | Длительность |
 | --- | --- |

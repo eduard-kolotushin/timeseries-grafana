@@ -154,6 +154,13 @@ func TestCallResource(t *testing.T) {
 			method:    http.MethodGet,
 			path:      "ping",
 			expStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				// FUNCTIONAL_OVERVIEW.md's F1 row publishes this literal body, so pin it
+				// and not only the status.
+				if got := strings.TrimSpace(string(body)); got != `{"message":"ok"}` {
+					t.Fatalf("ping body = %q, want the documented {\"message\":\"ok\"}", got)
+				}
+			},
 		},
 		{
 			// docs/ARCHITECTURE.md documents GET /ping, and nothing in the plugin or
@@ -877,7 +884,7 @@ func TestForecastSupersedesOlderPanelRows(t *testing.T) {
 	t.Cleanup(app.Dispose)
 
 	keyA, keyB, keyC := strings.Repeat("a1", 32), strings.Repeat("b2", 32), strings.Repeat("c3", 32)
-	fit := func(t *testing.T, key string, src *TrainSource) {
+	fitKeys := func(t *testing.T, key string, src *TrainSource, panelKeys []string) {
 		t.Helper()
 		body, _ := json.Marshal(ForecastRequest{
 			Times:       []int64{0, 1000, 2000, 3000},
@@ -887,11 +894,13 @@ func TestForecastSupersedesOlderPanelRows(t *testing.T) {
 			To:          5000,
 			CacheKey:    key,
 			TrainSource: src,
+			PanelKeys:   panelKeys,
 		})
 		if status, raw := callRoute(t, app, adminCtx(1), http.MethodPost, "forecast", body); status != http.StatusOK {
 			t.Fatalf("status=%d body=%s", status, raw)
 		}
 	}
+	fit := func(t *testing.T, key string, src *TrainSource) { fitKeys(t, key, src, nil) }
 	src := func(panel int, dash string) *TrainSource {
 		return &TrainSource{
 			DatasourceUID: "ds-uid",
@@ -985,6 +994,15 @@ func TestForecastSupersedesOlderPanelRows(t *testing.T) {
 	}
 	if byKey[keyB].SupersededAt == "" {
 		t.Fatalf("retired row has no supersededAt: %+v", byKey[keyB])
+	}
+
+	// A two-series panel sends one fit per series, each naming both keys: the fit for
+	// the second series must not retire the first one's row. With the single-key form
+	// the panel would keep only the series it fitted last, and every load would flip
+	// which one that is.
+	fitKeys(t, keyB, src(7, "dash-1"), []string{keyA, keyB})
+	if a, b := superseded(t, keyA), superseded(t, keyB); a || b {
+		t.Fatalf("a fit naming both of the panel's keys retired one: A=%v B=%v", a, b)
 	}
 }
 

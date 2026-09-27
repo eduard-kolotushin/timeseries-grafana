@@ -104,6 +104,14 @@ func (s errStore) Put(context.Context, int64, string, forecast.Snapshot) error {
 // the DSN that could not be opened rather than a generic failure.
 func (s errStore) Ping(context.Context) error { return s.err }
 
+// cacheForgetter drops this process's cached copy of one snapshot after the model
+// behind it has been deleted. It is an optional interface for the same reason
+// modelDropper is: the cache is a decoration (`withCache`), so a caller that holds
+// only a SnapshotStore cannot assume it, and an uncached store has nothing to drop.
+type cacheForgetter interface {
+	Forget(orgID int64, key string)
+}
+
 type cacheEntry struct {
 	snap     forecast.Snapshot
 	loadedAt time.Time
@@ -191,6 +199,14 @@ func (s *cachedStore) forget(k memKey) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.mem, k)
+}
+
+// Forget drops one cached entry without touching the inner store: a deletion in
+// this process must not keep being answered from this process's own copy for up to
+// snapshotCacheTTL. The delete route reaches it through cacheForgetter, because the
+// cache is a decoration over the store and a store without one has nothing to drop.
+func (s *cachedStore) Forget(orgID int64, key string) {
+	s.forget(memKey{org: orgID, key: key})
 }
 
 func (s *cachedStore) Get(ctx context.Context, orgID int64, key string) (forecast.Snapshot, bool, error) {

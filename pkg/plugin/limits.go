@@ -42,6 +42,12 @@ const (
 	// pre-flight's claim true; a realistic panel serialises its targets into a few kilobytes.
 	maxTrainSourceBytes = 1 << 20
 
+	// maxPanelKeys bounds the panel key set one fit may name: Supersede retires every
+	// other row of that panel, so the set becomes a parameter array. 64 is far above
+	// the series count of a real dashboard panel and keeps a hostile body from
+	// building an unbounded literal.
+	maxPanelKeys = 64
+
 	// Receive headroom over the app's body cap. The SDK's own default receive limit is the
 	// cap's twin, and a body at the cap then fails the transport (500
 	// plugin.requestFailureError) before the handler's MaxBytesReader can answer 413. A
@@ -63,6 +69,9 @@ var (
 	// message is derived from maxTrainSourceBytes, so the number it reports cannot drift from
 	// the number it enforces.
 	errTrainSourceTooLarge = fmt.Errorf("forecast: trainSource is larger than %d bytes", maxTrainSourceBytes)
+	// errTooManyPanelKeys parallels errTrainSourceTooLarge: a request naming more
+	// series than a panel can draw is refused before Supersede builds its array.
+	errTooManyPanelKeys = fmt.Errorf("forecast: panelKeys holds more than %d keys", maxPanelKeys)
 	// errWindowTooManyPoints is the emitted-window cap, checked before any
 	// allocation on the fit, restore and datasource paths. Its message matches the
 	// library's forecast.ErrTooManyPoints, and httpStatusFor maps the two to the
@@ -181,6 +190,16 @@ func checkTrainSourceLen(source *TrainSource) error {
 	}
 	if int64(len(raw)) > maxTrainSourceBytes {
 		return errTrainSourceTooLarge
+	}
+	return nil
+}
+
+// checkPanelKeys bounds the panel key set a fit may carry (maxPanelKeys). The set
+// only ever names rows of the sending panel, so a longer one is a client bug or a
+// hostile body, not a bigger panel.
+func checkPanelKeys(keys []string) error {
+	if len(keys) > maxPanelKeys {
+		return errTooManyPanelKeys
 	}
 	return nil
 }

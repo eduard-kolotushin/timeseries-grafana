@@ -1,6 +1,6 @@
 import { DataFrame, DataQueryRequest, FieldType, MutableDataFrame, dateTime } from '@grafana/data';
 import { of } from 'rxjs';
-import { REASON_TRAIN_EMPTY, REASON_UNSUPPORTED_PROM_INSTANT } from './reasons';
+import { REASON_TRAIN_EMPTY, REASON_TRAIN_MULTI_DATASOURCE, REASON_UNSUPPORTED_PROM_INSTANT } from './reasons';
 import { queryTrainingFrames, trainRejectReason } from './trainQuery';
 
 const mockGet = jest.fn();
@@ -181,9 +181,11 @@ describe('queryTrainingFrames', () => {
     });
   });
 
-  it('attributes the source to the first group that returned frames', async () => {
-    const first = datasource([frame('up')]);
-    const second = datasource([frame('other')]);
+  it('keeps only the first group that returned frames and names the drop', async () => {
+    const firstFrame = frame('up');
+    const secondFrame = frame('other');
+    const first = datasource([firstFrame]);
+    const second = datasource([secondFrame]);
     mockGet.mockResolvedValueOnce(first.ds).mockResolvedValueOnce(second.ds);
 
     const result = await queryTrainingFrames(
@@ -194,9 +196,14 @@ describe('queryTrainingFrames', () => {
       { fromMs, toMs, intervalMs: 60_000 }
     );
 
-    expect(result.frames).toHaveLength(2);
+    // The stored trainSource names one group's query objects and the scheduler re-extracts
+    // by series name from that group, so a series fitted from the second one could never be
+    // replayed: its frames are dropped and the reason travels with the result.
+    expect(result.frames).toHaveLength(1);
+    expect(result.frames?.[0]).toBe(firstFrame);
     expect(result.source?.datasourceUid).toBe('prom');
     expect(result.source?.queries).toBe(first.seen[0]);
+    expect(result.droppedReason).toBe(REASON_TRAIN_MULTI_DATASOURCE);
   });
 
   it('omits the source when no group returned frames', async () => {

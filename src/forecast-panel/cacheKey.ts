@@ -121,29 +121,38 @@ function canonicalizeOne(t: unknown): unknown {
   if (typeof o.expr === 'string') {
     return { uid, expr: o.expr };
   }
-  const rest = { ...o };
-  delete rest.datasource;
-  return { uid, body: rest };
+  // Only the target's own top level drops the window fields: `refId`, `interval` and
+  // `maxDataPoints` describe the query row, while a nested `bucketAggs[].settings.interval`
+  // is query content (the OpenSearch train rewrite pins it), so dropping it there would let
+  // two different queries share one fingerprint.
+  const body: Record<string, unknown> = {};
+  for (const [k, val] of Object.entries(o)) {
+    if (DROP_KEYS.has(k) || k === 'datasource') {
+      continue;
+    }
+    body[k] = stripNestedDatasource(val);
+  }
+  return { uid, body };
 }
 
 export function redactTargets(targets: unknown, visibleFromMs?: number, visibleToMs?: number): unknown {
   const json = redactTimeTokens(JSON.stringify(targets ?? []), visibleFromMs, visibleToMs);
   const parsed = JSON.parse(json) as unknown;
-  const list = Array.isArray(parsed) ? parsed.map(canonicalizeOne) : [canonicalizeOne(parsed)];
-  return stripWindowFields(list);
+  return Array.isArray(parsed) ? parsed.map(canonicalizeOne) : canonicalizeOne(parsed);
 }
 
-function stripWindowFields(v: unknown): unknown {
+/** Nested objects keep their fields; only a nested `datasource` ref is dropped. */
+function stripNestedDatasource(v: unknown): unknown {
   if (Array.isArray(v)) {
-    return v.map(stripWindowFields);
+    return v.map(stripNestedDatasource);
   }
   if (v && typeof v === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-      if (DROP_KEYS.has(k) || k === 'datasource') {
+      if (k === 'datasource') {
         continue;
       }
-      out[k] = stripWindowFields(val);
+      out[k] = stripNestedDatasource(val);
     }
     return out;
   }

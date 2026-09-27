@@ -66,12 +66,15 @@ type ScheduleStore interface {
 	// Identify merges a panel's identity into an existing row's spec. It never
 	// creates a row: only a fit knows the query objects a claimable row needs.
 	Identify(ctx context.Context, orgID int64, key string, prov PanelProvenance) error
-	// Supersede retires the org's other panel rows that carry the same
-	// dashboardUid+panelId provenance, and clears the flag on keepKey. It is how a
-	// panel that changed its query stops the scheduler refitting the series its old
-	// cache key trained. A row without that provenance (a cacheKey-only fit stores
+	// Supersede retires the org's panel rows that carry the same
+	// dashboardUid+panelId provenance and whose key is absent from keys, and clears
+	// the flag on every key in keys. It is how a panel stops the scheduler refitting
+	// the series its old cache keys trained: the overlay POSTs one fit per visible
+	// series, so the caller names the panel's whole key set — retiring "every key but
+	// mine" would leave only the last fitted series retrainable and flip which one it
+	// is on every load. A row without that provenance (a cacheKey-only fit stores
 	// none) is never touched, and neither is another panel's.
-	Supersede(ctx context.Context, orgID int64, dashboardUID string, panelID int, keepKey string) error
+	Supersede(ctx context.Context, orgID int64, dashboardUID string, panelID int, keys []string) error
 }
 
 // identifySQL merges the identity keys into whatever the spec already holds. Two
@@ -116,7 +119,7 @@ func provenanceJSON(prov PanelProvenance) ([]byte, error) {
 		patch["dashboardUid"] = clampCellText(prov.DashboardUID)
 	}
 	if prov.QuerySummary != "" {
-		patch["querySummary"] = prov.QuerySummary
+		patch["querySummary"] = clampCellText(prov.QuerySummary)
 	}
 	return json.Marshal(patch)
 }
@@ -161,25 +164,27 @@ RETURNING r.scope, r.key, r.org_id, r.cron, r.timezone, r.spec
 // stored spec with jsonb ->>, so only rows a browser wrote for this exact panel
 // are touched: a cacheKey-only fit stores no provenance and can therefore never
 // supersede a row it knows nothing about, and neither can another panel's fit.
-// keepKey's own flag is cleared (the panel is showing that key again) and the
+// Every key in $4 is one the panel currently shows, so its flag is cleared and the
 // others are stamped once — COALESCE, not now(), so re-running this on every fit
 // does not keep rewriting rows that are already superseded. The CASE is what makes
 // the statement idempotent: it updates only the rows whose value would change.
+// A NULL $4 (an empty set) stamps every row of the panel; the overlay always names
+// at least the fit's own key.
 const supersedeSQL = `
 UPDATE forecast.retrain
-SET superseded_at = CASE WHEN key = $4 THEN NULL ELSE COALESCE(superseded_at, now()) END,
+SET superseded_at = CASE WHEN key = ANY($4::text[]) THEN NULL ELSE COALESCE(superseded_at, now()) END,
     updated_at = now()
 WHERE scope = 'panel' AND org_id = $1
   AND spec->>'dashboardUid' = $2 AND spec->>'panelId' = $3
-  AND CASE WHEN key = $4 THEN superseded_at IS NOT NULL ELSE superseded_at IS NULL END
+  AND CASE WHEN key = ANY($4::text[]) THEN superseded_at IS NOT NULL ELSE superseded_at IS NULL END
 `
 
 // Supersede implements supersedeSQL.
-func (s *postgresStore) Supersede(ctx context.Context, orgID int64, dashboardUID string, panelID int, keepKey string) error {
+func (s *postgresStore) Supersede(ctx context.Context, orgID int64, dashboardUID string, panelID int, keys []string) error {
 	if err := s.ensureSchedules(ctx); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, supersedeSQL, orgID, dashboardUID, strconv.Itoa(panelID), keepKey)
+	_, err := s.pool.Exec(ctx, supersedeSQL, orgID, dashboardUID, strconv.Itoa(panelID), keys)
 	return err
 }
 
@@ -447,7 +452,7 @@ func (s errScheduleStore) Identify(context.Context, int64, string, PanelProvenan
 	return s.err
 }
 
-func (s errScheduleStore) Supersede(context.Context, int64, string, int, string) error {
+func (s errScheduleStore) Supersede(context.Context, int64, string, int, []string) error {
 	return s.err
 }
 

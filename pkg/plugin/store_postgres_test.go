@@ -958,10 +958,10 @@ func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
 	prefix := "test-supersede-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	const orgID int64 = 987656
 	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
-	keys := []string{prefix + "-a", prefix + "-b", prefix + "-other"}
+	keys := []string{prefix + "-a", prefix + "-b", prefix + "-c", prefix + "-other"}
 	for i, key := range keys {
 		dash, panel := "dash-1", 7
-		if i == 2 {
+		if i == 3 {
 			dash = "dash-2"
 		}
 		spec := fmt.Sprintf(`{"queries":[{"refId":"A"}],"model":"baseline","dashboardUid":%q,"panelId":%d}`, dash, panel)
@@ -988,7 +988,7 @@ func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
 		return false
 	}
 
-	if err := s.Supersede(ctx, orgID, "dash-1", 7, keys[1]); err != nil {
+	if err := s.Supersede(ctx, orgID, "dash-1", 7, []string{keys[1]}); err != nil {
 		t.Fatal(err)
 	}
 	if !retired(t, keys[0]) {
@@ -997,12 +997,17 @@ func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
 	if retired(t, keys[1]) {
 		t.Fatal("the key being kept was retired")
 	}
-	if retired(t, keys[2]) {
+	// Every other row of that panel is retired: the set named one key, so both of the
+	// panel's others are history.
+	if !retired(t, keys[0]) || !retired(t, keys[2]) {
+		t.Fatal("a key the panel dropped was not retired")
+	}
+	if retired(t, keys[3]) {
 		t.Fatal("another dashboard's panel was superseded")
 	}
 
 	// Re-selecting the old key clears its flag and retires the newer one.
-	if err := s.Supersede(ctx, orgID, "dash-1", 7, keys[0]); err != nil {
+	if err := s.Supersede(ctx, orgID, "dash-1", 7, []string{keys[0]}); err != nil {
 		t.Fatal(err)
 	}
 	if retired(t, keys[0]) {
@@ -1027,5 +1032,24 @@ func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
 	}
 	if claimedKeys[keys[1]] {
 		t.Fatal("a superseded row was claimed")
+	}
+
+	// A panel that draws two series POSTs one fit per series, each naming the panel's
+	// whole key set: every key in that set must stay current, or only the series fitted
+	// last is retrainable and each load flips which one it is.
+	if err := s.Supersede(ctx, orgID, "dash-1", 7, []string{keys[1]}); err != nil {
+		t.Fatal(err)
+	}
+	if retired(t, keys[1]) || !retired(t, keys[0]) {
+		t.Fatal("a single-key supersede did not flip the panel's current row")
+	}
+	if err := s.Supersede(ctx, orgID, "dash-1", 7, []string{keys[0], keys[1]}); err != nil {
+		t.Fatal(err)
+	}
+	if retired(t, keys[0]) || retired(t, keys[1]) {
+		t.Fatal("a key in the panel's current set was retired")
+	}
+	if retired(t, keys[3]) {
+		t.Fatal("another dashboard's panel was superseded")
 	}
 }

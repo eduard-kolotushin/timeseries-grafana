@@ -28,6 +28,9 @@ describe('scheduleApi', () => {
   it('lists the org schedules', async () => {
     mockGet.mockResolvedValue([row]);
     await expect(listSchedules()).resolves.toEqual([row]);
+    // The path is the module's contribution: asserting only the resolved value would pass
+    // for an implementation that never issued the request.
+    expect(mockGet).toHaveBeenCalledWith(RESOURCE);
   });
 
   it('deletes by scope and key query params', async () => {
