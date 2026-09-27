@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -143,5 +144,27 @@ func TestHttpStatusForLoadErrors(t *testing.T) {
 	}
 	if dataStatusFor(forecast.ErrTooManyPoints) != backend.Status(413) {
 		t.Fatalf("library data window=%d", dataStatusFor(forecast.ErrTooManyPoints))
+	}
+	// The panel key set's cap is a request-shape bound, not a size cap: the plan's
+	// "existing 400 path" is what it answers, and a 500 here would make the overlay
+	// treat a client-side bug as a fatal load limit.
+	if httpStatusFor(errTooManyPanelKeys) != http.StatusBadRequest {
+		t.Fatalf("panel keys=%d", httpStatusFor(errTooManyPanelKeys))
+	}
+	if dataStatusFor(errTooManyPanelKeys) != backend.StatusBadRequest {
+		t.Fatalf("data panel keys=%d", dataStatusFor(errTooManyPanelKeys))
+	}
+}
+
+func TestCheckPanelKeys(t *testing.T) {
+	atCap := make([]string, maxPanelKeys)
+	for i := range atCap {
+		atCap[i] = strings.Repeat("a", 64)
+	}
+	if err := checkPanelKeys(atCap); err != nil {
+		t.Fatalf("a set at the cap must be accepted: %v", err)
+	}
+	if err := checkPanelKeys(append(atCap, strings.Repeat("b", 64))); !errors.Is(err, errTooManyPanelKeys) {
+		t.Fatalf("a set above the cap must be errTooManyPanelKeys, got %v", err)
 	}
 }

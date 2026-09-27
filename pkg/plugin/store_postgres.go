@@ -60,6 +60,7 @@ SELECT EXISTS (
   WHERE n.nspname = 'forecast' AND t.relname = 'snapshots' AND c.contype IN ('p', 'u')
     AND array_length(c.conkey, 1) = 2
     AND c.conkey @> ARRAY[(SELECT a.attnum FROM pg_attribute a WHERE a.attrelid = t.oid AND a.attname = 'cache_key')]
+    AND c.conkey @> ARRAY[(SELECT a.attnum FROM pg_attribute a WHERE a.attrelid = t.oid AND a.attname = 'org_id')]
 )`
 
 // errSnapshotKey is the snapshot table's upgrade error: the migrations ran, but

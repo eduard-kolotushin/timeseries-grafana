@@ -580,6 +580,7 @@ func httpStatusFor(err error) int {
 		return http.StatusRequestTimeout
 	case errors.Is(err, errUnknownModel),
 		errors.Is(err, errInvalidCacheKey),
+		errors.Is(err, errTooManyPanelKeys),
 		errors.Is(err, forecast.ErrEmpty),
 		errors.Is(err, forecast.ErrHorizon),
 		errors.Is(err, forecast.ErrNoFrequency),

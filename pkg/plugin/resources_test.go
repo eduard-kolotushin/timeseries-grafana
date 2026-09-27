@@ -1315,3 +1315,36 @@ func TestForecastRecordsTrainSource(t *testing.T) {
 		t.Fatalf("a browser fit re-enabled a schedule the admin turned off: %+v", rows[0])
 	}
 }
+
+// A fit may name at most maxPanelKeys panel keys; a longer set is a client bug or a
+// hostile body, and it is refused as a request error (400) rather than as a server
+// failure (500). The overlay never sends one (W8's MAX_PANEL_KEYS guard), so this is
+// a hand-made request's path.
+func TestForecastRouteRefusesAnOversizePanelKeySet(t *testing.T) {
+	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, newMemoryStore(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	keys := make([]string, maxPanelKeys+1)
+	for i := range keys {
+		keys[i] = strings.Repeat(string(rune('a'+i%6)), 64)
+	}
+	body, _ := json.Marshal(ForecastRequest{
+		Times:     []int64{0, 1000, 2000},
+		Values:    []nullableFloat{1, 2, 3},
+		Model:     "naive",
+		From:      3000,
+		To:        4000,
+		CacheKey:  strings.Repeat("a", 64),
+		PanelKeys: keys,
+	})
+	status, raw := callRoute(t, app, adminCtx(1), http.MethodPost, "forecast", body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", status, raw)
+	}
+	if !strings.Contains(string(raw), "panelKeys") {
+		t.Fatalf("the refusal does not name the field: %s", raw)
+	}
+}

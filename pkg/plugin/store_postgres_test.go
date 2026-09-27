@@ -1053,3 +1053,36 @@ func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
 		t.Fatal("another dashboard's panel was superseded")
 	}
 }
+
+// TestSnapshotProbeRequiresTheOrgIDColumn: the probe exists to refuse a table Put can
+// never write to, so checking that some two-column key contains cache_key is not enough.
+// A key on (cache_key, snapshot) — an older shape, or a hand-built table — leaves Put's
+// `ON CONFLICT (org_id, cache_key)` with no constraint to match, i.e. SQLSTATE 42P10 on
+// every call, which is exactly the outcome the probe pre-empts.
+func TestSnapshotProbeRequiresTheOrgIDColumn(t *testing.T) {
+	ctx := context.Background()
+	s := scratchPostgresStore(t, "forecast_probe_orgid")
+
+	// Replace the real (org_id, cache_key) key with the shape the probe must refuse:
+	// two columns, cache_key among them, org_id absent.
+	var name string
+	if err := s.pool.QueryRow(ctx, `
+SELECT conname FROM pg_constraint
+WHERE conrelid = 'forecast.snapshots'::regclass AND contype IN ('p', 'u')
+  AND array_length(conkey, 1) = 2`).Scan(&name); err != nil {
+		t.Fatalf("find the snapshot table's two-column key: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE forecast.snapshots DROP CONSTRAINT "`+name+`"`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE forecast.snapshots ADD UNIQUE (cache_key, snapshot)`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.Get(ctx, 1, strings.Repeat("a", 64)); !errors.Is(err, errSnapshotKey) {
+		t.Fatalf("a table keyed (cache_key, snapshot) must be refused with errSnapshotKey, got %v", err)
+	}
+	if s.snap.ready {
+		t.Fatal("the store latched ready on a table with no (org_id, cache_key) key")
+	}
+}

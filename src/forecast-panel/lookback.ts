@@ -3,6 +3,12 @@ import { BaselineSeason, ForecastModel, TrainTimeRange } from './types';
 
 export const MAX_TRAIN_POINTS = 100_000;
 
+// MAX_PANEL_KEYS MIRRORS the backend's maxPanelKeys (pkg/plugin/limits.go): one fit may
+// name at most this many panel keys, and a request above it is refused. A panel showing
+// more series than this cannot hand its whole set to Supersede, so overlayLoad omits the
+// field instead of having every fit refused. Keep the two numbers equal.
+export const MAX_PANEL_KEYS = 64;
+
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;

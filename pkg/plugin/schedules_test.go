@@ -204,7 +204,7 @@ func (m *memSchedules) Due(_ context.Context, orgID int64, key string, now time.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	row, ok := m.rows[schedKey(scopePanel, orgID, key)]
-	return ok && row.Enabled && !row.NextRunAt.IsZero() && !row.NextRunAt.After(now), nil
+	return ok && row.Enabled && row.SupersededAt.IsZero() && !row.NextRunAt.IsZero() && !row.NextRunAt.After(now), nil
 }
 
 // specHasQueries is the in-memory twin of panelClaimSQL's jsonb predicates: a

@@ -1,6 +1,6 @@
 import { DataFrame } from '@grafana/data';
 import { extractSeries, SeriesPoints, trainingForFit } from './extract';
-import { MAX_TRAIN_POINTS } from './lookback';
+import { MAX_PANEL_KEYS, MAX_TRAIN_POINTS } from './lookback';
 import {
   REASON_ALL_NAN,
   REASON_EMPTY_WINDOW,
@@ -130,6 +130,11 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
       // reports the failure below.
     }
   }
+  // A panel showing more series than the backend accepts in one request cannot name its
+  // whole set, and a partial one would retire the series it left out on every load. So
+  // such a panel sends no set at all: Supersede then keys off the fit's own key, which is
+  // the behaviour every panel had before the set existed (its rows keep flipping).
+  const panelKeyField = panelKeys.length <= MAX_PANEL_KEYS ? { panelKeys } : {};
   for (const points of need) {
     const fit = trainingForFit(points, trained);
     if (!fit) {
@@ -149,7 +154,7 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
         ...args.fitBody,
         ...identify,
         cacheKey: key,
-        panelKeys,
+        ...panelKeyField,
         times: fit.times,
         values: fit.values,
         from: args.fromMs,

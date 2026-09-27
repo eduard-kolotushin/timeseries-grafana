@@ -201,6 +201,47 @@ func TestSweepCollectsAnIdleBaselineRow(t *testing.T) {
 	}
 }
 
+// TestSweepKeepsAClaimedRow: neither clock moves while a claim is in flight, so an
+// idle-looking row another replica has claimed is not idle. Without the claimed_until
+// guard a sweep could collect a row mid-fit — and the reconcile would then hand the row
+// back carrying this process's deployment default cron instead of the admin's.
+func TestSweepKeepsAClaimedRow(t *testing.T) {
+	ctx := context.Background()
+	s := scratchPostgresStore(t, "forecast_retention_claimed")
+	claimed, idle := strings.Repeat("e", 64), strings.Repeat("f", 64)
+	for _, key := range []string{claimed, idle} {
+		if err := s.Upsert(ctx, 0, ScheduleRow{
+			Scope: scopeBaseline, Key: key, Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+			NextRunAt: time.Now().Add(-time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backdateRow(t, ctx, s, 0, scopeBaseline, claimed, 30*24*time.Hour)
+	backdateRow(t, ctx, s, 0, scopeBaseline, idle, 30*24*time.Hour)
+	if _, err := s.pool.Exec(ctx, `
+UPDATE forecast.retrain SET claimed_by = 'peer', claimed_until = now() + interval '5 minutes'
+WHERE scope = $1 AND org_id = 0 AND key = $2
+`, scopeBaseline, claimed); err != nil {
+		t.Fatal(err)
+	}
+
+	res := sweep(t, ctx, s)
+	if res.Rows != 1 {
+		t.Fatalf("sweep=%+v want only the unclaimed idle row", res)
+	}
+	row, ok, err := s.Row(ctx, 0, scopeBaseline, claimed)
+	if err != nil || !ok {
+		t.Fatalf("a claimed row was collected: ok=%v err=%v", ok, err)
+	}
+	if row.Cron != "0 3 * * *" {
+		t.Fatalf("the claimed row lost its cron: %+v", row)
+	}
+	if _, ok, err := s.Row(ctx, 0, scopeBaseline, idle); err != nil || ok {
+		t.Fatalf("the idle unclaimed row survived: ok=%v err=%v", ok, err)
+	}
+}
+
 // TestSweepRecreatesARowForAnOrphanSnapshot: a snapshot whose row an admin deleted
 // (or an earlier release never wrote) gets the deployment default back, once, and
 // with no spec — so the scheduler cannot claim a row it could not fetch training

@@ -32,16 +32,20 @@ DELETE FROM forecast.snapshots WHERE updated_at < now() - $1::interval
 // alone would collect a row that is still alive: next_run_at is what the scheduler
 // moves on success, last_run_at is what a failed attempt moves, so a Druid or
 // Grafana outage (retried every lease, each failure writing last_run_at) never
-// looks like a dead metric. The NOT EXISTS is what preserves an admin's cron on a
-// live panel whose snapshot is only ever refreshed by browser fits — and it makes
-// the same statement correct for scope='baseline': the plugin's snapshots table
-// never holds a baseline key, so for those rows the condition reduces to the two
-// clocks the worker itself updates.
+// looks like a dead metric. Neither clock moves while a claim is in flight, so a
+// live claim is excluded too: without that, a sweep could delete a row another
+// replica is fitting and the reconcile would give the row back with this process's
+// deployment default cron instead of the cron an admin set. The NOT EXISTS is what
+// preserves an admin's cron on a live panel whose snapshot is only ever refreshed
+// by browser fits — and it makes the same statement correct for scope='baseline':
+// the plugin's snapshots table never holds a baseline key, so for those rows the
+// condition reduces to the two clocks the worker itself updates.
 const deleteIdleRowsSQL = `
 DELETE FROM forecast.retrain r
 WHERE r.next_run_at IS NOT NULL
   AND r.next_run_at < now() - $1::interval
   AND (r.last_run_at IS NULL OR r.last_run_at < now() - $1::interval)
+  AND (r.claimed_until IS NULL OR r.claimed_until < now())
   AND NOT EXISTS (
     SELECT 1 FROM forecast.snapshots s
     WHERE s.org_id = r.org_id AND s.cache_key = r.key)
