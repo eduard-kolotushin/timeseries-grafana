@@ -59,8 +59,8 @@ still-running pair of stacks; a transcript that quotes a build hash quotes the b
 
 The Kubernetes plugin image is still not *pulled* from GHCR (`timeseries-k8s` carries no `v*` tag, so the two
 `:0.1.0` tags are unpublished), but the sandbox no longer asks it to be: `make helm-images` builds both images
-from the Dockerfiles' pinned sibling refs, tags them by the pin's short sha (`…-grafana:12b6381e2092`,
-`…-baselines:7ec489faafeb` — an immutable tag, which `pullPolicy: IfNotPresent` cannot mask behind a cached
+from the Dockerfiles' pinned sibling refs, tags them by the pin's short sha (`…-grafana:5b50446910f4`,
+`…-baselines:fe0c1cb4bd8f` — an immutable tag, which `pullPolicy: IfNotPresent` cannot mask behind a cached
 one), and `make helm-import` loads them into the node's containerd; `make helm-up`/`helm-refresh` run the import
 before the upgrade, so the pods come up `1/1 Running` without a manual `ctr` step. The Compose sandbox needs
 none of that (it mounts the workspace `dist/`: the in-container `gpx_forecast_linux_amd64`,
@@ -1188,4 +1188,87 @@ Pass 5's own limits: the sweep was observed under a **temporary** `snapshotTtl: 
 waited out, and the collection of a *superseded* row is that short window's consequence), the Kubernetes
 environment was not re-measured, and the build measured here is the working tree that became `c8339fe` — `dist/`
 was rebuilt from it before the commit, so the hashes above describe that build, not an earlier release.
+
+### Pass 6 (2026-09-27) — the audit's fixes, measured on Compose and Kubernetes against the head this pass published
+
+Pass 6 re-measured **Compose** against the pushed head `5b50446` with the `dist/` built from it:
+`gpx_forecast_linux_amd64` sha256 `104cd6c4b47f0ae6a3812155b8f11dfde1c0dec1bcd8d78df2b1f2d525401e83` (identical to
+the `forecast-datasource/` copy), `gpx_forecast_migrate_linux_amd64`
+`d2c5825973c2d62f88a5c96e1711fae83bfc79948675f72128e48c59df7ad5f1`, `module.js`
+`c73acf8abe18db252b563881a223f690d07b1d3303787c6c02a0427bd5dc5277`, `forecast.ini.template`
+`a42a4974ddf54f68b66643d8721cde3a4191317e168b03219bf9b22250a28bf2` — on Grafana 13.1.0 with the plugin's own store in
+`overlay-postgres`. The one live surface this pass changes is the supersede key set; the panel path that serves it was
+measured on a throwaway two-series TestData dashboard (created through the dashboard API, **deleted afterwards**,
+with its rows and snapshots).
+
+**The panel names its whole key set, so a two-series panel stays retrainable (G1/W8).** A panel drawing two series
+(`scenarioId: random_walk`, `seriesCount: 2`) sent four `/resources/forecast` POSTs on one load, captured from the
+page: two probes (no `times`, no `panelKeys`, `cacheKey e5f8a3…` / `cc4af2…`) and then two fits — each carrying
+`panelKeys` of **length 2** (`[e5f8a3…, cc4af2…]`), `trainSource.seriesName` `A-series` / `A-series1` and the
+`provenance` object. Both rows those fits wrote were current (`superseded_at IS NULL`: `e4abff…` and `71cc2c…`)
+afterwards; before this pass's fix the second fit would have stamped the first series' row, leaving only the series
+drawn last claimable — and flipping which one that was on every load. The same contract at the route level, with no
+panel: a fit for a second key under one `dashboardUid`+`panelId` and carrying `panelKeys: [k1, k2]` left **both**
+rows current and the row count unchanged (`a1…|t, b1…|t`, three rows), while a fit that omits the field still
+retired the panel's other rows (`a1…|f, b1…|f, c1…|t`) — the pre-pass behaviour preserved exactly for an older
+frontend.
+
+**A deletion is visible to the deleting process at once (G4).** Against one key: the fit stored the snapshot
+(`snapshots c=1`), a probe answered `{"times":[1700000240000,1700000300000],"values":[4,4],"cached":true}`, a second
+probe answered from this process's own cache, `DELETE /schedules?scope=panel&key=…&drop=model` answered
+`{"message":"ok"}` — and the next probe answered `{"needTrain":true}` with `snapshots c=0`. The row's `next_run_at`
+was set an hour ahead before the probes, so the scheduler's `needTrain`-when-due rule cannot be what answered: the
+change is purely the cached copy the deletion now drops, which without it would have served the deleted forecast for
+up to `snapshotCacheTTL` = 30 s.
+
+**The Holt band matches the corrected coefficient (F1).** `model: holt`, `alpha: 1`, `beta: 1` over `1,2,2,5`
+(`sse = 10`, three residuals, σ = √(10/3)) with `level: 0.95` returned exactly the points `8, 11, 14` and the bands
+`[4.421611712565687, 11.578388287434313]`, `[2.9984805394078187, 19.00151946059218]`,
+`[0.610897031576048, 27.389102968423952]` — the `σ²·trace(1, 5, 14)` the AAN recursion implies, with the h=3 width
+`26.778205937 = 2·z·σ·√14`. The pre-fix coefficient put `√11` there (`23.73`); `TestHoltInterval` now pins the
+`h = 3, α = β = 1 → 14σ²` trace so the recursion, not the formula's own text, is the reference.
+
+**The library and worker fixes were shown failing first, then green.** `Interpolate`'s step branch returned the last
+observation past the range end (now NaN, and NaN before the first point), `RegularGrid`'s pre-size grew to `n+1`
+(now clamped to `1<<20` with the full grid still returned — `cap=1048577` immediately failed the new case before the
+fix), the Holt trace above, and `ceilDuration`'s ceiling wrapped `int64` in the step-wide band below `Sub`'s
+saturation, so `windowK` emitted a 106751-point grid instead of the single point the caller asked for
+(`TestWindowKCap`'s new row: `k0, k1 = 1, 106751, want 106751, 106751` before the fix). The worker's pg-gated suite
+ran against `overlay-postgres` — the sweep now passes its `Duration` straight to `::interval`
+(`TestPostgresSweepSnapshots` green) and `pruneFits` releases all three per-hash maps — and the plugin's suite ran
+against the same database, including a two-key `Supersede` case that failed before the statement took a key array.
+
+**Kubernetes re-measured (same day, the release this pass pinned).** `make helm-up` installed the six releases on
+the kind node from images built *by the pin*: `…-grafana:5b50446910f4` and `…-baselines:fe0c1cb4bd8f` — the
+twelve-character prefixes of `5b50446910f4f4ba7dc6466ea14fd025f77f567c` and
+`fe0c1cb4bd8fa204bd68fe95d8342e2c2e3b5175`, so the running pods carry exactly those pinned commits — the plugin
+commit this pass pushed, `5b50446`; the documentation below travels in the repo, not in the image.
+Grafana 13.1.0 answered `/api/health` at `http://localhost:80` (`commit b309c9bb…`, LoadBalancer `172.18.0.5`),
+`GET /resources/ping` returned `{"message":"ok"}`, and the same Holt fit the Compose half used returned the same
+three points and the same bands (`[4.421611712565687, 2.9984805394078187, 0.610897031576048]` …
+`[11.578388287434313, 19.00151946059218, 27.389102968423952]`) — the corrected `σ²·trace(1, 5, 14)` on the
+Kubernetes image too. The Helm-provisioned **Forecast minute-of-week demo** (from the `timeseries-overlay-dashboards`
+ConfigMap) rendered its three panels (three canvases, no `role="alert"`, i.e. no reason text), and the
+`/resources/forecast` traffic it sent was captured from the page: three probes without `panelKeys`
+(`cacheKey 2e8279…`, `f8046f…`, `7713db…` — the same fingerprints the Compose run of the same dashboard mints) and
+then three fits, each with `panelKeys` of length **1**, which is right for a one-series panel and is exactly what
+distinguishes it from the two-series case in the Compose half above.
+
+The plugin's files **inside the pod** hash to `gpx_forecast_linux_amd64`
+`fcdb8f2de356052faefab80fe8ef9d07c87ab50b771b8fa71fc203429f49e948`, `module.js`
+`07a1b24747a6b133ae3b8db7ed95f8ce36f8c4f3038a1cfefe4f4ae94ca253a2`, `forecast-datasource/module.js`
+`7a2757b818af36bdc3edaaa1423ab8347d2a6f8402f54567ea6c5069aa1b91df` and `forecast-panel/module.js`
+`df0642b9d77b9cb18e7d520039243f0c3ddab99c1b2aae3a84f7debff5f8c0b1`. Those are **not** byte-identical to the host
+`dist/` hashes above, and that is expected: the image compiles the pinned source inside its own containers — node 22
+against this host's node 24, its own Go toolchain, and a source tarball that has no `.git`, so the binary carries no
+`vcs.revision` stamp at all — while the Compose numbers describe the workspace build. What identifies the pod's
+source is therefore the image tag, not a hash comparison. `forecast.ini.template` is absent there because the
+image's own build steps do not run `make ini-template`; only `make build`, which the sandbox path uses, copies it.
+
+**Pass 6's limits:** the Compose Druid broker never finished starting while those images were building (its entrypoint
+was still writing `runtime.properties` ten minutes in), so the *provisioned* Druid-backed dashboards were not
+re-measured on Compose this time — the Kubernetes paragraph above measures one of them, and every Compose
+measurement in this block is Druid-free by construction (a TestData panel, route-level fits, one pure-data Holt fit).
+The `SNAPSHOT_TTL` sweep was not re-driven (pass 5 covered it), the sandbox's `VPS.txt` and its uncommitted `xtunnel`
+service were left exactly as they were, and the retired-name and scope-gate corrections are documentation-only.
 
