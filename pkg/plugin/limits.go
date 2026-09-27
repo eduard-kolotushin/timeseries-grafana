@@ -154,7 +154,7 @@ func maxInflightFrom(ctx context.Context, jsonData []byte) int {
 		cfg:    backend.GrafanaConfigFromContext(ctx),
 		json:   jd,
 	}
-	if n := parseMaxInflight(look.get("FORECAST_MAX_INFLIGHT", "MAX_INFLIGHT", "max_inflight", "maxInflight")); n >= 1 {
+	if n := parseMaxInflight(look.Get("FORECAST_MAX_INFLIGHT", "MAX_INFLIGHT", "max_inflight", "maxInflight")); n >= 1 {
 		return n
 	}
 	return defaultMaxInflight

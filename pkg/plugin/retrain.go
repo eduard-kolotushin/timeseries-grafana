@@ -86,22 +86,22 @@ func computeRetrain(ctx context.Context, settings backend.AppInstanceSettings) r
 		cfg:    backend.GrafanaConfigFromContext(ctx),
 		json:   jd,
 	}
-	token := look.get("FORECAST_GRAFANA_TOKEN", "GRAFANA_TOKEN", "grafana_token", "grafanaToken")
+	token := look.Get("FORECAST_GRAFANA_TOKEN", "GRAFANA_TOKEN", "grafana_token", "grafanaToken")
 	if token == "" && settings.DecryptedSecureJSONData != nil {
 		token = strings.TrimSpace(settings.DecryptedSecureJSONData["grafanaToken"])
 	}
-	cronSpec := look.get("FORECAST_RETRAIN_CRON", "RETRAIN_CRON", "retrain_cron", "retrainCron")
+	cronSpec := look.Get("FORECAST_RETRAIN_CRON", "RETRAIN_CRON", "retrain_cron", "retrainCron")
 	if cronSpec == "" {
 		cronSpec = defaultRetrainCron
 	}
-	url := look.get("FORECAST_GRAFANA_URL", "GRAFANA_URL", "grafana_url", "grafanaUrl")
+	url := look.Get("FORECAST_GRAFANA_URL", "GRAFANA_URL", "grafana_url", "grafanaUrl")
 	if url == "" {
 		url = defaultGrafanaURL
 	}
 	return retrainConfig{
-		Enabled:    parseBool(look.get("FORECAST_RETRAIN_ENABLED", "RETRAIN_ENABLED", "retrain_enabled", "retrainEnabled"), defaultRetrainEnabled),
-		Tick:       parseDuration(look.get("FORECAST_RETRAIN_TICK", "RETRAIN_TICK", "retrain_tick", "retrainTick"), defaultRetrainTick),
-		Lease:      parseDuration(look.get("FORECAST_RETRAIN_LEASE", "RETRAIN_LEASE", "retrain_lease", "retrainLease"), defaultRetrainLease),
+		Enabled:    parseBool(look.Get("FORECAST_RETRAIN_ENABLED", "RETRAIN_ENABLED", "retrain_enabled", "retrainEnabled"), defaultRetrainEnabled),
+		Tick:       parseDuration(look.Get("FORECAST_RETRAIN_TICK", "RETRAIN_TICK", "retrain_tick", "retrainTick"), defaultRetrainTick),
+		Lease:      parseDuration(look.Get("FORECAST_RETRAIN_LEASE", "RETRAIN_LEASE", "retrain_lease", "retrainLease"), defaultRetrainLease),
 		Cron:       cronSpec,
 		Timezone:   jsonField(jd, "retrainTimezone"),
 		GrafanaURL: url,

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/store"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
 
@@ -19,20 +20,20 @@ func clearStoreEnv(t *testing.T) {
 		"FORECAST_STORE_USER",
 		"FORECAST_STORE_SSLMODE",
 		"FORECAST_STORE_PASSWORD",
-		gfPluginPrefix + "STORE_URL",
-		gfPluginPrefix + "STORE_HOST",
-		gfPluginPrefix + "STORE_PORT",
-		gfPluginPrefix + "STORE_DATABASE",
-		gfPluginPrefix + "STORE_USER",
-		gfPluginPrefix + "STORE_SSL_MODE",
-		gfPluginPrefix + "STORE_PASSWORD",
-		gfPluginDSPrefix + "STORE_URL",
-		gfPluginDSPrefix + "STORE_HOST",
-		gfPluginDSPrefix + "STORE_PORT",
-		gfPluginDSPrefix + "STORE_DATABASE",
-		gfPluginDSPrefix + "STORE_USER",
-		gfPluginDSPrefix + "STORE_SSL_MODE",
-		gfPluginDSPrefix + "STORE_PASSWORD",
+		store.PluginEnvPrefixApp + "STORE_URL",
+		store.PluginEnvPrefixApp + "STORE_HOST",
+		store.PluginEnvPrefixApp + "STORE_PORT",
+		store.PluginEnvPrefixApp + "STORE_DATABASE",
+		store.PluginEnvPrefixApp + "STORE_USER",
+		store.PluginEnvPrefixApp + "STORE_SSL_MODE",
+		store.PluginEnvPrefixApp + "STORE_PASSWORD",
+		store.PluginEnvPrefixDatasource + "STORE_URL",
+		store.PluginEnvPrefixDatasource + "STORE_HOST",
+		store.PluginEnvPrefixDatasource + "STORE_PORT",
+		store.PluginEnvPrefixDatasource + "STORE_DATABASE",
+		store.PluginEnvPrefixDatasource + "STORE_USER",
+		store.PluginEnvPrefixDatasource + "STORE_SSL_MODE",
+		store.PluginEnvPrefixDatasource + "STORE_PASSWORD",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -67,19 +68,19 @@ func TestStoreDSN(t *testing.T) {
 		},
 		{
 			name:     "FORECAST_STORE_HOST wins over GF_PLUGIN and json",
-			env:      map[string]string{"FORECAST_STORE_HOST": "from-env", gfPluginPrefix + "STORE_HOST": "from-gf"},
+			env:      map[string]string{"FORECAST_STORE_HOST": "from-env", store.PluginEnvPrefixApp + "STORE_HOST": "from-gf"},
 			settings: backend.AppInstanceSettings{JSONData: jsonHost},
 			wantHost: "from-env:5432",
 		},
 		{
 			name:     "GF_PLUGIN after FORECAST_STORE empty",
-			env:      map[string]string{gfPluginPrefix + "STORE_HOST": "from-gf"},
+			env:      map[string]string{store.PluginEnvPrefixApp + "STORE_HOST": "from-gf"},
 			settings: backend.AppInstanceSettings{JSONData: jsonHost},
 			wantHost: "from-gf:5432",
 		},
 		{
 			name:     "GF_PLUGIN datasource prefix after app prefix empty",
-			env:      map[string]string{gfPluginDSPrefix + "STORE_HOST": "from-ds-gf"},
+			env:      map[string]string{store.PluginEnvPrefixDatasource + "STORE_HOST": "from-ds-gf"},
 			settings: backend.AppInstanceSettings{JSONData: jsonHost},
 			wantHost: "from-ds-gf:5432",
 		},
@@ -121,8 +122,8 @@ func TestStoreDSN(t *testing.T) {
 		{
 			name: "GF_PLUGIN password",
 			env: map[string]string{
-				"FORECAST_STORE_HOST":             "pg",
-				gfPluginPrefix + "STORE_PASSWORD": "ini-secret",
+				"FORECAST_STORE_HOST":                       "pg",
+				store.PluginEnvPrefixApp + "STORE_PASSWORD": "ini-secret",
 			},
 			want: "postgres://overlay:ini-secret@pg:5432/overlay?sslmode=disable",
 		},

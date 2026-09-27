@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -13,93 +13,38 @@ import (
 	"time"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/store"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ensureSQL is the only creator of both tables. The plugin owns forecast.retrain
-// outright: the baselines worker inserts, claims and finishes its own rows there
-// but never provisions them, so a deployment that runs the worker without ever
-// loading the plugin would not get the table.
-//
-// forecast.retrain carries no secondary index on purpose: it holds one row per
-// trained panel (plus one per worker-owned baseline hash), every plugin read is
-// the (scope, org_id, key) primary key, and the claim scan orders a table that
-// stays in the hundreds of rows — an index would only add write cost to each
-// retrain.
-//
-// org_id is part of the key because a panel's cache key is org-independent: the
-// same dashboard and datasource uids hash the same in two orgs, so a (scope, key)
-// key would put two orgs on one row, where either org's fit would rewrite the
-// other's cron and stored query objects. See scheduleKeySQL.
-const ensureSQL = `
-CREATE SCHEMA IF NOT EXISTS forecast;
-CREATE TABLE IF NOT EXISTS forecast.snapshots (
-  org_id BIGINT NOT NULL,
-  cache_key CHAR(64) NOT NULL,
-  snapshot JSONB NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (org_id, cache_key)
-);
-CREATE TABLE IF NOT EXISTS forecast.retrain (
-  scope TEXT NOT NULL,                -- 'panel' | 'baseline'
-  key TEXT NOT NULL,                  -- panel: cache_key, baseline: metric_hash
-  org_id BIGINT NOT NULL DEFAULT 0,
-  cron TEXT NOT NULL,
-  timezone TEXT NOT NULL DEFAULT 'UTC',
-  enabled BOOLEAN NOT NULL DEFAULT true,
-  spec JSONB,                         -- panel: opaque datasource query objects; baseline: model spec
-  next_run_at TIMESTAMPTZ,
-  last_run_at TIMESTAMPTZ,
-  last_status TEXT,
-  claimed_by TEXT,
-  claimed_until TIMESTAMPTZ,
-  superseded_at TIMESTAMPTZ,          -- panel: the row's key is no longer the panel's current one
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (scope, org_id, key)
-);
--- A table created before supersede existed gets the column here; IF NOT EXISTS
--- makes it a no-op on the CREATE above and on every later connect.
-ALTER TABLE forecast.retrain ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMPTZ;
-DO $$
-DECLARE pk_name TEXT; pk_cols TEXT;
-BEGIN
-  SELECT c.conname, string_agg(a.attname, ',' ORDER BY a.attnum)
-    INTO pk_name, pk_cols
-  FROM pg_constraint c
-  JOIN pg_class t ON t.oid = c.conrelid
-  JOIN pg_namespace n ON n.oid = t.relnamespace
-  JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
-  WHERE n.nspname = 'forecast' AND t.relname = 'retrain' AND c.contype = 'p'
-  GROUP BY c.conname;
-  IF pk_cols = 'scope,key' THEN
-    -- A table created before org_id joined the key. Existing rows keep their
-    -- org: a panel row was written with the org that fitted it.
-    EXECUTE format('ALTER TABLE forecast.retrain DROP CONSTRAINT %I', pk_name);
-    ALTER TABLE forecast.retrain ADD PRIMARY KEY (scope, org_id, key);
-  END IF;
-END $$;
-`
+// schemaMigrations is this binary's copy of the embedded migration set, read
+// once. The schema itself lives in pkg/store/migrations; store.Apply (below, in
+// ensureTable) applies the pending files. The files' rationale — the per-org key,
+// the missing secondary index, the worker that inserts rows it does not create —
+// is in pkg/store/migrations/0002_retrain.sql.
+var schemaMigrations = store.All()
 
-// scheduleKeySQL reports whether forecast.retrain's primary key is the per-org
-// shape ensureSQL migrates to, so a runtime user that may not ALTER an upgraded
-// table fails the schedule store loudly instead of sharing a row between orgs.
+// scheduleKeySQL reports whether forecast.retrain carries the per-org key shape
+// the migrations establish: the (scope, org_id, key) unique constraint, or the
+// primary key of a table that predates the uuid surrogate. A runtime user that
+// may not ALTER an upgraded table fails the schedule store loudly instead of
+// sharing a row between orgs.
 const scheduleKeySQL = `
 SELECT EXISTS (
   SELECT 1
   FROM pg_constraint c
   JOIN pg_class t ON t.oid = c.conrelid
   JOIN pg_namespace n ON n.oid = t.relnamespace
-  WHERE n.nspname = 'forecast' AND t.relname = 'retrain' AND c.contype = 'p'
+  WHERE n.nspname = 'forecast' AND t.relname = 'retrain' AND c.contype IN ('p', 'u')
     AND array_length(c.conkey, 1) = 3
     AND c.conkey @> ARRAY[(SELECT a.attnum FROM pg_attribute a WHERE a.attrelid = t.oid AND a.attname = 'org_id')]
 )`
 
-// errScheduleKey is the schedule table's upgrade error: the DDL ran, but the
-// table still keys on (scope, key), so the process cannot store per-org rows.
-var errScheduleKey = errors.New("forecast store: forecast.retrain has no per-org primary key; it needs PRIMARY KEY (scope, org_id, key), which the table owner must apply")
+// errScheduleKey is the schedule table's upgrade error: the migrations ran, but
+// the table still keys on (scope, key), so the process cannot store per-org rows.
+var errScheduleKey = errors.New("forecast store: forecast.retrain has no per-org unique key; it needs UNIQUE (scope, org_id, key), which the table owner must apply")
 
 // ensureRetryAfter throttles reconnect attempts while Postgres is unreachable so
 // a burst of overlay loads does not turn into a burst of failed dials.
@@ -107,17 +52,17 @@ const ensureRetryAfter = 5 * time.Second
 
 // pgxPool is the slice of *pgxpool.Pool this store uses. It is an interface so
 // the per-table readiness split below can be exercised without a live Postgres;
-// *pgxpool.Pool is its only production implementation.
+// *pgxpool.Pool is its only production implementation. store.Pool is the part the
+// migration engine needs.
 type pgxPool interface {
+	store.Pool
 	Ping(ctx context.Context) error
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Close()
 }
 
 // storeProbe is one table's readiness and retry state. Every table has its own:
-// ensureSQL provisions both, so a runtime user that may not CREATE can be missing
+// the migrations provision both, so a runtime user that may not CREATE can be missing
 // forecast.retrain while forecast.snapshots is fine — and that schedule failure
 // must not change the answer a snapshot call gets.
 type storeProbe struct {
@@ -160,9 +105,9 @@ func (s *postgresStore) ensureSchedules(ctx context.Context) error {
 }
 
 // ensureTable provisions one table and records its readiness. shapeSQL, when set,
-// must answer true or this store stays unusable for that table: ensureSQL may have
-// been refused by a runtime user without ALTER, and an upgraded table with the old
-// key is worse than no schedules at all.
+// must answer true or this store stays unusable for that table: the migrations may
+// have been refused by a runtime user without ALTER, and a table with the old key
+// is worse than no schedules at all.
 func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, readySQL, shapeSQL string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,12 +123,21 @@ func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, read
 		probe.err = fmt.Errorf("forecast store: %w", err)
 		return probe.err
 	}
-	if _, err := s.pool.Exec(ctx, ensureSQL); err != nil {
+	res, err := store.Apply(ctx, s.pool, schemaMigrations, false)
+	if err != nil {
 		// A locked-down runtime user may lack CREATE. Accept that when the table
-		// this call needs is already provisioned.
+		// this call needs is already provisioned. store.Apply's error already names
+		// the store (or the migration), so it is not wrapped again.
 		if _, probeErr := s.pool.Exec(ctx, readySQL); probeErr != nil {
-			probe.err = fmt.Errorf("forecast store: %w", err)
+			probe.err = err
 			return probe.err
+		}
+	} else {
+		if len(res.Applied) > 0 {
+			slog.Info("forecast schema migrated", "applied", res.Applied)
+		}
+		if len(res.Unknown) > 0 {
+			slog.Warn("forecast schema is newer than this binary", "versions", res.Unknown)
 		}
 	}
 	if shapeSQL != "" {
@@ -289,11 +243,6 @@ func openPostgresStore(ctx context.Context, dsn string) (*postgresStore, error) 
 	return &postgresStore{pool: pool, now: time.Now}, nil
 }
 
-const (
-	gfPluginPrefix   = "GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_"
-	gfPluginDSPrefix = "GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_"
-)
-
 func storeDSN(ctx context.Context, settings backend.AppInstanceSettings) string {
 	return storeDSNFrom(ctx, settings.JSONData, settings.DecryptedSecureJSONData)
 }
@@ -325,6 +274,9 @@ func storeJSONFromContext(dsJSON []byte, dsSecure map[string]string, app *backen
 	return dsJSON, dsSecure
 }
 
+// storeDSNFrom resolves the store DSN from datasource or app settings. The
+// precedence chain and every field default live in pkg/store, which cmd/migrate
+// reuses with an env-only lookup.
 func storeDSNFrom(ctx context.Context, jsonData []byte, secure map[string]string) string {
 	jd := map[string]any{}
 	if len(jsonData) > 0 {
@@ -335,53 +287,7 @@ func storeDSNFrom(ctx context.Context, jsonData []byte, secure map[string]string
 		cfg:    backend.GrafanaConfigFromContext(ctx),
 		json:   jd,
 	}
-	// The json key is camel like every other jsonData key this plugin writes (storeHost, storePort, …),
-	// while env and the ini section spell it FORECAST_STORE_URL / store_url. A URL short-circuits the
-	// field-wise form, and jsonHasStore tests the same camel key, so an instance that declares only a
-	// URL is both detected as "has a store" and resolvable.
-	if u := look.get("FORECAST_STORE_URL", "STORE_URL", "store_url", "storeUrl"); u != "" {
-		return u
-	}
-	host := look.get("FORECAST_STORE_HOST", "STORE_HOST", "store_host", "storeHost")
-	if host == "" {
-		return ""
-	}
-	port := look.get("FORECAST_STORE_PORT", "STORE_PORT", "store_port", "storePort")
-	if port == "" {
-		port = "5432"
-	}
-	db := look.get("FORECAST_STORE_DATABASE", "STORE_DATABASE", "store_database", "storeDatabase")
-	if db == "" {
-		db = "overlay"
-	}
-	user := look.get("FORECAST_STORE_USER", "STORE_USER", "store_user", "storeUser")
-	if user == "" {
-		user = "overlay"
-	}
-	ssl := look.get("FORECAST_STORE_SSLMODE", "STORE_SSL_MODE", "store_ssl_mode", "storeSslMode")
-	if ssl == "" {
-		ssl = "disable"
-	}
-	pass := look.get("FORECAST_STORE_PASSWORD", "STORE_PASSWORD", "store_password", "")
-	if pass == "" && secure != nil {
-		pass = strings.TrimSpace(secure["storePassword"])
-	}
-	u := &url.URL{
-		Scheme: "postgres",
-		Host:   host + ":" + port,
-		Path:   "/" + db,
-	}
-	if user != "" {
-		if pass != "" {
-			u.User = url.UserPassword(user, pass)
-		} else {
-			u.User = url.User(user)
-		}
-	}
-	q := u.Query()
-	q.Set("sslmode", ssl)
-	u.RawQuery = q.Encode()
-	return u.String()
+	return store.DSNFrom(look, secure["storePassword"])
 }
 
 type storeLookup struct {
@@ -390,11 +296,14 @@ type storeLookup struct {
 	json   map[string]any
 }
 
-func (s storeLookup) get(forecastEnv, gfSuffix, iniKey, jsonKey string) string {
+// Get resolves one setting in the precedence order store.Lookup documents:
+// FORECAST_* env, then GF_PLUGIN_* env, then grafana.ini via GrafanaCfg, then
+// jsonData.
+func (s storeLookup) Get(forecastEnv, gfSuffix, iniKey, jsonKey string) string {
 	if v := strings.TrimSpace(s.getenv(forecastEnv)); v != "" {
 		return v
 	}
-	for _, prefix := range []string{gfPluginPrefix, gfPluginDSPrefix} {
+	for _, prefix := range []string{store.PluginEnvPrefixApp, store.PluginEnvPrefixDatasource} {
 		if v := strings.TrimSpace(s.getenv(prefix + gfSuffix)); v != "" {
 			return v
 		}
@@ -402,8 +311,8 @@ func (s storeLookup) get(forecastEnv, gfSuffix, iniKey, jsonKey string) string {
 	if s.cfg != nil {
 		keys := []string{
 			iniKey,
-			gfPluginPrefix + gfSuffix,
-			gfPluginDSPrefix + gfSuffix,
+			store.PluginEnvPrefixApp + gfSuffix,
+			store.PluginEnvPrefixDatasource + gfSuffix,
 			"plugin.eduardkolotushin-forecast-app." + iniKey,
 			"plugin.eduardkolotushin-forecast-datasource." + iniKey,
 		}

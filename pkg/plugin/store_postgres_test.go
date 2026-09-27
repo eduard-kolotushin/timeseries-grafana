@@ -12,6 +12,7 @@ import (
 	"time"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -76,15 +77,38 @@ func (p *fakePool) QueryRow(context.Context, string, ...any) pgx.Row {
 	return fakeRow{err: p.rowErr, shape: p.shape}
 }
 
+func (p *fakePool) Begin(context.Context) (pgx.Tx, error) { return fakeTx{p: p}, nil }
+
 func (p *fakePool) Close() {}
+
+// fakeTx routes the migration engine's statements through the same recorder as
+// fakePool, so a test can assert what Apply did inside its transaction. Commit and
+// Rollback are no-ops: the fake records statements, it does not transact.
+type fakeTx struct {
+	pgx.Tx
+	p *fakePool
+}
+
+func (t fakeTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return t.p.Exec(ctx, sql, args...)
+}
+
+func (t fakeTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return t.p.QueryRow(ctx, sql, args...)
+}
+
+func (fakeTx) Commit(context.Context) error   { return nil }
+func (fakeTx) Rollback(context.Context) error { return nil }
 
 type fakeRow struct {
 	err   error
 	shape bool
 }
 
-// Scan answers the two QueryRow calls a store makes: the schedule primary-key probe
-// (a bool) and a snapshot read (which has no row here).
+// Scan answers the QueryRow calls a store and the migration engine make: the
+// schedule key probe (a bool), a snapshot read (no row here), the engine's
+// "already applied?" probe (no row, so the ledger does not have that version) and
+// its ledger read (one aggregated row, empty here).
 func (r fakeRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
@@ -96,12 +120,17 @@ func (r fakeRow) Scan(dest ...any) error {
 			return nil
 		case *[]byte:
 			return pgx.ErrNoRows
+		case *int:
+			return pgx.ErrNoRows
+		case *string:
+			*d = ""
+			return nil
 		}
 	}
 	return errors.New("fakeRow does not answer this statement")
 }
 
-// TestScheduleDDLFailureLeavesSnapshotsServing: ensureSQL provisions both
+// TestScheduleDDLFailureLeavesSnapshotsServing: the migrations provision both
 // tables, so a runtime user that may not CREATE can be missing forecast.retrain
 // while forecast.snapshots is fine. A schedule failure must not change what a
 // snapshot call answers — sharing one cached error made every overlay probe 500
@@ -329,10 +358,11 @@ func mustList(t *testing.T, ctx context.Context, s *postgresStore, orgID int64) 
 	return rows
 }
 
-// TestPostgresRetrainKeyMigration pins the upgrade path inside ensureSQL: a
+// TestPostgresRetrainKeyMigration pins the upgrade path in 0002_retrain.sql: a
 // forecast.retrain keyed on (scope, key) — every deployment that predates org_id
 // joining the key — must come out keyed per org with its rows intact, and running
-// the statement again must be a no-op, because ensureSQL runs on every connect.
+// the statement again must be a no-op, because the block is idempotent and a
+// deployment can have it run against a table another replica already widened.
 //
 // The block is the shipped text, retargeted at a scratch table so the test can start
 // from the old shape. The batch shape check in ensureSchedules reports a table whose
@@ -385,16 +415,27 @@ CREATE TABLE `+probe+` (
 	}
 }
 
-// migrationStatement returns ensureSQL's retrain-key migration, retargeted at
-// another table: both the table it alters and the relname it detects.
+// migrationStatement returns 0002_retrain.sql's legacy-key block, retargeted at
+// another table: both the table it alters and the relname it detects. The block is
+// the shipped text, so a mistake in it fails here rather than on a deployment.
 func migrationStatement(t *testing.T, table string) string {
 	t.Helper()
-	at := strings.Index(ensureSQL, "DO $$")
-	if at < 0 {
-		t.Fatal("ensureSQL no longer carries the retrain-key migration")
+	var sql string
+	for _, m := range store.All() {
+		if m.Name == "retrain" {
+			sql = m.SQL
+		}
+	}
+	if sql == "" {
+		t.Fatal("the embedded migrations no longer carry the retrain table")
+	}
+	start := strings.Index(sql, "-- legacy-key:")
+	end := strings.Index(sql, "-- uuid-key:")
+	if start < 0 || end < start {
+		t.Fatal("0002_retrain.sql no longer marks its legacy-key and uuid-key blocks")
 	}
 	relname := table[strings.LastIndex(table, ".")+1:]
-	block := strings.ReplaceAll(ensureSQL[at:], "forecast.retrain", table)
+	block := strings.ReplaceAll(sql[start:end], "forecast.retrain", table)
 	return strings.ReplaceAll(block, "t.relname = 'retrain'", "t.relname = '"+relname+"'")
 }
 

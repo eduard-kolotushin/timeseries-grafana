@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/store"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 )
@@ -81,13 +82,13 @@ func clearRetrainEnv(t *testing.T) {
 		"FORECAST_RETRAIN_CRON",
 		"FORECAST_GRAFANA_URL",
 		"FORECAST_GRAFANA_TOKEN",
-		gfPluginPrefix + "RETRAIN_ENABLED",
-		gfPluginPrefix + "RETRAIN_TICK",
-		gfPluginPrefix + "RETRAIN_LEASE",
-		gfPluginPrefix + "RETRAIN_CRON",
-		gfPluginPrefix + "GRAFANA_URL",
-		gfPluginPrefix + "GRAFANA_TOKEN",
-		gfPluginDSPrefix + "RETRAIN_CRON",
+		store.PluginEnvPrefixApp + "RETRAIN_ENABLED",
+		store.PluginEnvPrefixApp + "RETRAIN_TICK",
+		store.PluginEnvPrefixApp + "RETRAIN_LEASE",
+		store.PluginEnvPrefixApp + "RETRAIN_CRON",
+		store.PluginEnvPrefixApp + "GRAFANA_URL",
+		store.PluginEnvPrefixApp + "GRAFANA_TOKEN",
+		store.PluginEnvPrefixDatasource + "RETRAIN_CRON",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -120,13 +121,13 @@ func TestComputeRetrain(t *testing.T) {
 		{
 			name: "env wins over everything",
 			env: map[string]string{
-				"FORECAST_RETRAIN_ENABLED":      "false",
-				"FORECAST_RETRAIN_TICK":         "15s",
-				"FORECAST_RETRAIN_LEASE":        "90s",
-				"FORECAST_RETRAIN_CRON":         "*/2 * * * *",
-				"FORECAST_GRAFANA_URL":          "http://from-env:3000",
-				"FORECAST_GRAFANA_TOKEN":        "env-token",
-				gfPluginPrefix + "RETRAIN_CRON": "*/30 * * * *",
+				"FORECAST_RETRAIN_ENABLED":                "false",
+				"FORECAST_RETRAIN_TICK":                   "15s",
+				"FORECAST_RETRAIN_LEASE":                  "90s",
+				"FORECAST_RETRAIN_CRON":                   "*/2 * * * *",
+				"FORECAST_GRAFANA_URL":                    "http://from-env:3000",
+				"FORECAST_GRAFANA_TOKEN":                  "env-token",
+				store.PluginEnvPrefixApp + "RETRAIN_CRON": "*/30 * * * *",
 			},
 			settings: backend.AppInstanceSettings{JSONData: jsonAll},
 			want: retrainConfig{

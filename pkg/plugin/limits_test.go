@@ -11,14 +11,15 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/store"
 )
 
 func clearLimitEnv(t *testing.T) {
 	t.Helper()
 	keys := []string{
 		"FORECAST_MAX_INFLIGHT",
-		gfPluginPrefix + "MAX_INFLIGHT",
-		gfPluginDSPrefix + "MAX_INFLIGHT",
+		store.PluginEnvPrefixApp + "MAX_INFLIGHT",
+		store.PluginEnvPrefixDatasource + "MAX_INFLIGHT",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -56,10 +57,10 @@ func TestMaxInflightFrom(t *testing.T) {
 		{name: "FORECAST_MAX_INFLIGHT", env: map[string]string{"FORECAST_MAX_INFLIGHT": "2"}, want: 2},
 		{
 			name: "FORECAST wins over GF_PLUGIN",
-			env:  map[string]string{"FORECAST_MAX_INFLIGHT": "3", gfPluginPrefix + "MAX_INFLIGHT": "9"},
+			env:  map[string]string{"FORECAST_MAX_INFLIGHT": "3", store.PluginEnvPrefixApp + "MAX_INFLIGHT": "9"},
 			want: 3,
 		},
-		{name: "GF_PLUGIN", env: map[string]string{gfPluginPrefix + "MAX_INFLIGHT": "6"}, want: 6},
+		{name: "GF_PLUGIN", env: map[string]string{store.PluginEnvPrefixApp + "MAX_INFLIGHT": "6"}, want: 6},
 		{name: "ini", cfg: map[string]string{"max_inflight": "5"}, want: 5},
 		{name: "jsonData", json: jsonN, want: 8},
 	} {

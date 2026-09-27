@@ -13,10 +13,11 @@ SHELL := $(GIT_SH)
 endif
 endif
 
-.PHONY: all build frontend backend ini-template help
+.PHONY: all build frontend backend migrate ini-template help
 
 DIST_BIN := dist/gpx_forecast_linux_amd64
 DIST_DS_BIN := dist/forecast-datasource/gpx_forecast_linux_amd64
+DIST_MIGRATE_BIN := dist/gpx_forecast_migrate_linux_amd64
 
 # node/npm on PATH are nvm shims and can point at an install that is gone ("Node.js
 # v22.x.x is not installed or cannot be found"), so resolve a runtime that starts: the
@@ -39,11 +40,13 @@ help:
 	@echo "make build         webpack production build + Linux backend -> dist/"
 	@echo "make frontend      webpack only, via $(NPM) on $(NODE)"
 	@echo "make backend       Linux amd64 gpx_forecast for the Grafana container"
+	@echo "make migrate       Linux amd64 migration CLI -> dist/"
 	@echo "make ini-template  copy conf/forecast.ini.template into dist/"
 
 build:
 	$(MAKE) frontend
 	$(MAKE) backend
+	$(MAKE) migrate
 	$(MAKE) ini-template
 
 frontend:
@@ -57,6 +60,13 @@ backend:
 	mkdir -p "dist/forecast-datasource"
 	GOOS=linux GOARCH=amd64 go build -o "$(DIST_BIN)" ./pkg
 	cp "$(DIST_BIN)" "$(DIST_DS_BIN)"
+
+# gpx_forecast_migrate is the CI/CD entry point: it applies the embedded migrations
+# (pkg/store/migrations) to a database before Grafana starts. It is not required to
+# run — the plugin applies the same set at its first store use.
+migrate:
+	mkdir -p "dist"
+	GOOS=linux GOARCH=amd64 go build -o "$(DIST_MIGRATE_BIN)" ./cmd/migrate
 
 ini-template:
 	cp "conf/forecast.ini.template" "dist/forecast.ini.template"
