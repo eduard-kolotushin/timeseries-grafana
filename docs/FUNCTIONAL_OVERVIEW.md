@@ -440,7 +440,7 @@ keys (`2e827911…`, `f8046f42…`, `7713db25…`), which is the cross-environme
 | **Who can use** | **Operator** (it runs by itself once the app is configured). |
 | **How configured** | jsonData `retrainCron` (default `0 3 * * *`; both environments use `*/5 * * * *`) and `grafanaUrl` (default `http://127.0.0.1:3000`); the token comes from `FORECAST_GRAFANA_TOKEN`, the ini section, or `secureJsonData.grafanaToken`. The ticker itself is `FORECAST_RETRAIN_ENABLED` (default `true`, the same precedence chain) with `FORECAST_RETRAIN_TICK` (default `30s`) and `FORECAST_RETRAIN_LEASE` (derived from the claim batch and the fetch timeout — 6m today). |
 | **Input params** | Per row: `cron`, `timezone`, `enabled`; per spec: the stored queries and window. A window the picker expressed relatively — Auto, a legacy duration, or a Quick range such as `now-7d`/`now` — is stored as `relative: true` with `lookbackMs` and re-resolved at claim time, so a cron retrain follows the clock; a calendar/absolute pick, a window that does not end at `now`, and a rounded bound stay absolute and replay verbatim. |
-| **Expected result** | `next_run_at` advances, `last_run_at`/`last_status` are written, `forecast.snapshots.updated_at` moves; a failure records `last_status = "error: …"` and never fails a user query. Every tick also **collects** what nothing refreshes (v14): a snapshot untouched for `FORECAST_SNAPSHOT_TTL` (default `72h`; `0` disables the sweep, a value below `1h` is refused and the default kept) is deleted, a row idle for the whole window with no snapshot behind it goes with it, and a snapshot without a row gets the deployment default schedule back — which is what keeps *deleting a schedule row* from deleting the model (F5). `FORECAST_RETRAIN_ENABLED=false` turns the sweep off with the ticker; a sweep failure is a log line, never a failed query. |
+| **Expected result** | `next_run_at` advances, `last_run_at`/`last_status` are written, `forecast.snapshots.updated_at` moves; a failure records `last_status = "error: …"` and never fails a user query. Every tick also **collects** what nothing refreshes (v14): a snapshot untouched for `FORECAST_SNAPSHOT_TTL` (default `72h`; `0` disables the sweep, a value below `1h` is refused and the default kept) is deleted, a row idle for the whole window with no snapshot behind it goes with it (a row another replica has claimed is not idle — neither `next_run_at` nor `last_run_at` moves while a claim is in flight — so a sweep cannot delete a row mid-fit and have the reconcile hand back the deployment default in place of an admin's cron), and a snapshot without a row gets the deployment default schedule back — which is what keeps *deleting a schedule row* from deleting the model (F5). `FORECAST_RETRAIN_ENABLED=false` turns the sweep off with the ticker; a sweep failure is a log line, never a failed query. |
 
 **Positive — Compose:** `$PG "SELECT scope,key,last_run_at,last_status,next_run_at FROM forecast.retrain ORDER BY next_run_at"`
 showed the panel rows advancing on the `*/5` cron with `last_status ok` (`…10:55:24Z`, then `…11:00:32Z`), and
@@ -1205,8 +1205,10 @@ with its rows and snapshots).
 (`scenarioId: random_walk`, `seriesCount: 2`) sent four `/resources/forecast` POSTs on one load, captured from the
 page: two probes (no `times`, no `panelKeys`, `cacheKey e5f8a3…` / `cc4af2…`) and then two fits — each carrying
 `panelKeys` of **length 2** (`[e5f8a3…, cc4af2…]`), `trainSource.seriesName` `A-series` / `A-series1` and the
-`provenance` object. Both rows those fits wrote were current (`superseded_at IS NULL`: `e4abff…` and `71cc2c…`)
-afterwards; before this pass's fix the second fit would have stamped the first series' row, leaving only the series
+`provenance` object. Both rows those fits wrote were current (`superseded_at IS NULL`) afterwards; the row keys this
+sentence first quoted came from a different run of the same dashboard, so the correction below re-measures the panel
+and quotes one run's keys end to end.
+Before this pass's fix the second fit would have stamped the first series' row, leaving only the series
 drawn last claimable — and flipping which one that was on every load. The same contract at the route level, with no
 panel: a fit for a second key under one `dashboardUid`+`panelId` and carrying `panelKeys: [k1, k2]` left **both**
 rows current and the row count unchanged (`a1…|t, b1…|t`, three rows), while a fit that omits the field still
@@ -1224,9 +1226,11 @@ up to `snapshotCacheTTL` = 30 s.
 **The Holt band matches the corrected coefficient (F1).** `model: holt`, `alpha: 1`, `beta: 1` over `1,2,2,5`
 (`sse = 10`, three residuals, σ = √(10/3)) with `level: 0.95` returned exactly the points `8, 11, 14` and the bands
 `[4.421611712565687, 11.578388287434313]`, `[2.9984805394078187, 19.00151946059218]`,
-`[0.610897031576048, 27.389102968423952]` — the `σ²·trace(1, 5, 14)` the AAN recursion implies, with the h=3 width
-`26.778205937 = 2·z·σ·√14`. The pre-fix coefficient put `√11` there (`23.73`); `TestHoltInterval` now pins the
-`h = 3, α = β = 1 → 14σ²` trace so the recursion, not the formula's own text, is the reference.
+`[0.610897031576048, 27.389102968423952]` — `α = β = 1`, the one point where every candidate trace coincides, with
+the h=3 width `26.778205937 = 2·z·σ·√14` (the correction below shows the coefficient was still wrong for the
+panel's own defaults). The pre-fix coefficient put `√11` there (`23.73`); `TestHoltInterval` pins the
+`h = 3, α = β = 1 → 14σ²` trace, and after the review it pins the interval against an impulse rollout of the
+recursion at `α = 0.8, β = 0.2` as well, because `α = β = 1` alone cannot tell the candidate traces apart.
 
 **The library and worker fixes were shown failing first, then green.** `Interpolate`'s step branch returned the last
 observation past the range end (now NaN, and NaN before the first point), `RegularGrid`'s pre-size grew to `n+1`
@@ -1246,8 +1250,8 @@ commit this pass pushed, `5b50446`; the documentation below travels in the repo,
 Grafana 13.1.0 answered `/api/health` at `http://localhost:80` (`commit b309c9bb…`, LoadBalancer `172.18.0.5`),
 `GET /resources/ping` returned `{"message":"ok"}`, and the same Holt fit the Compose half used returned the same
 three points and the same bands (`[4.421611712565687, 2.9984805394078187, 0.610897031576048]` …
-`[11.578388287434313, 19.00151946059218, 27.389102968423952]`) — the corrected `σ²·trace(1, 5, 14)` on the
-Kubernetes image too. The Helm-provisioned **Forecast minute-of-week demo** (from the `timeseries-overlay-dashboards`
+`[11.578388287434313, 19.00151946059218, 27.389102968423952]`) — the `α = β = 1` trace on the Kubernetes image too,
+the same case the Compose half used. The Helm-provisioned **Forecast minute-of-week demo** (from the `timeseries-overlay-dashboards`
 ConfigMap) rendered its three panels (three canvases, no `role="alert"`, i.e. no reason text), and the
 `/resources/forecast` traffic it sent was captured from the page: three probes without `panelKeys`
 (`cacheKey 2e8279…`, `f8046f…`, `7713db…` — the same fingerprints the Compose run of the same dashboard mints) and
@@ -1271,4 +1275,39 @@ re-measured on Compose this time — the Kubernetes paragraph above measures one
 measurement in this block is Druid-free by construction (a TestData panel, route-level fits, one pure-data Holt fit).
 The `SNAPSHOT_TTL` sweep was not re-driven (pass 5 covered it), the sandbox's `VPS.txt` and its uncommitted `xtunnel`
 service were left exactly as they were, and the retired-name and scope-gate corrections are documentation-only.
+
+**Correction (2026-09-27, after an independent review of this pass).** The review found the Holt coefficient this
+pass shipped wrong for every `α < 1`: `se` computed the trace of the recursion whose trend update is
+`b_t = b_{t−1} + β·e_t`, while `holt.go` moves the trend by the level increment it just applied — `b_t = b_{t−1} +
+αβ·e_t` — whose trace is `1 + α²(h−1)(1 + βh + β²·h(2h−1)/6)`. `α = β = 1`, the only point the numbers above
+measured, is the one point where the two coincide, so it hid the error; at the panel's own defaults the shipped
+trace was `32.56σ²` at `h = 10` against the recursion's `25.58σ²` (Monte-Carlo over 2·10⁶ paths: `25.574`), i.e.
+bands ~13% too wide — *wider* than the pre-fix code, not narrower. `timeseries-forecast v0.5.3` (commit `4f1a7ea`)
+fixes it, the plugin's `go.mod` moved to it in `24ac89f`, and `TestHoltInterval` now pins the interval against an
+impulse rollout of `holt.go` — the `α = 0.8, β = 0.2` case compares width *ratios* between horizons, which cancels
+σ, and fails against v0.5.2 (`h = 2/h = 1` = 1.4142 = √2 against the recursion's 1.3862).
+
+Re-measured on the same Compose stack, `dist/` from `24ac89f`, `model: holt`, `alpha: 0.8`, `beta: 0.2`,
+`level: 0.95` over `1,2,2,5`: points `5.7616, 6.9152, 8.0688`; `lower` `[3.271699933312405, 3.4636560178723124,
+3.6314655480479416]`; `upper` `[8.251500066687594, 10.366743982127687, 12.506134451952057]`. Hand-checked against
+the recursion: `σ = √(4.8416/3) = 1.270287`, trace `1, 1.9216, 3.176`, so `h = 1` is `5.7616 ± z·σ` and `h = 3` is
+`8.0688 ± z·σ·√3.176`. The `α = β = 1` numbers above remain the case where the two traces agree.
+
+The panel key set was re-measured end to end on that build, through the panel's own **Retrain** button so the fits
+ran with the rows in place: the two fits carried `cacheKey`/`panelKeys` `b3d1578f…` (A-series) and `5cc80279…`
+(A-series1), each naming **both** keys, and `forecast.retrain` then held rows keyed `b3d1578f…` and `5cc80279…`,
+both `superseded_at IS NULL`; the panel's earlier key `112b7f70…`, left by a run whose two series shared one
+fingerprint, was stamped. A hand-made request with 65 keys answered `400 forecast: panelKeys holds more than 64
+keys` and one with 64 answered `200`; the overlay sends no set at all for a panel wider than the cap, since a
+partial one would retire the series it left out on every load.
+
+The same review fixed three more surfaces this pass touched: the retention sweep no longer collects a row another
+replica has claimed (`TestSweepKeepsAClaimedRow`, which collected both rows before the guard), `snapshotKeySQL` now
+requires the `org_id` column in the key it accepts (a table keyed `(cache_key, snapshot)` passed readiness and then
+answered every `Put` with `42P10`; `TestSnapshotProbeRequiresTheOrgIDColumn`), and `memSchedules.Due` mirrors the
+production predicate's `superseded_at IS NULL`. In `timeseries-baselines` (commit `467421f`) the schema probe now
+checks every table rather than one — a half-applied pair of migration files no longer reads as provisioned
+(`TestProbeSchemaChecksEveryTable`) — `SNAPSHOT_TTL` is verified against `DEFAULT_RETRAIN_CRON`'s next gap (a 1h
+window beside the daily default collects a healthy metric's snapshot and publishes nothing until the next retrain),
+and the sweep's correlation names the fleet-wide `org_id = 0`.
 
