@@ -1,12 +1,11 @@
-import { deleteSchedule, listSchedules, postScheduleDefault, putSchedule, ScheduleRow } from './scheduleApi';
+import { deleteSchedule, deleteScheduleModel, listSchedules, postScheduleDefault, ScheduleRow } from './scheduleApi';
 
 const mockGet = jest.fn();
-const mockPut = jest.fn();
 const mockDelete = jest.fn();
 const mockPost = jest.fn();
 
 jest.mock('@grafana/runtime', () => ({
-  getBackendSrv: () => ({ get: mockGet, put: mockPut, delete: mockDelete, post: mockPost }),
+  getBackendSrv: () => ({ get: mockGet, delete: mockDelete, post: mockPost }),
 }));
 
 const RESOURCE = '/api/plugins/eduardkolotushin-forecast-app/resources/schedules';
@@ -22,7 +21,6 @@ const row: ScheduleRow = {
 describe('scheduleApi', () => {
   beforeEach(() => {
     mockGet.mockReset();
-    mockPut.mockReset();
     mockDelete.mockReset();
     mockPost.mockReset();
   });
@@ -30,20 +28,18 @@ describe('scheduleApi', () => {
   it('lists the org schedules', async () => {
     mockGet.mockResolvedValue([row]);
     await expect(listSchedules()).resolves.toEqual([row]);
-    expect(mockGet).toHaveBeenCalledWith(RESOURCE);
-  });
-
-  it('upserts a row', async () => {
-    mockPut.mockResolvedValue(row);
-    const edited = { ...row, cron: '*/2 * * * *', enabled: false };
-    await putSchedule(edited);
-    expect(mockPut).toHaveBeenCalledWith(RESOURCE, edited);
   });
 
   it('deletes by scope and key query params', async () => {
     mockDelete.mockResolvedValue({ message: 'ok' });
     await deleteSchedule('panel', row.key);
     expect(mockDelete).toHaveBeenCalledWith(`${RESOURCE}?scope=panel&key=${row.key}`);
+  });
+
+  it('deletes the stored model with drop=model', async () => {
+    mockDelete.mockResolvedValue({ message: 'ok' });
+    await deleteScheduleModel('panel', row.key);
+    expect(mockDelete).toHaveBeenCalledWith(`${RESOURCE}?scope=panel&key=${row.key}&drop=model`);
   });
 
   it('posts the default schedule', async () => {

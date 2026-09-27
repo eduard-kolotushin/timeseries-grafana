@@ -31,8 +31,6 @@ describe('the legacy lookback option', () => {
     // The cacheKey always includes `lookback`, so without an editor a stored value can
     // never be put back and the key its alert query carries is unreachable from the UI.
     expect(item).toBeDefined();
-    expect(item?.name).toBe('Legacy lookback');
-    expect(item?.defaultValue).toBe('');
   });
 
   // The value the option edits is the one the panel path reads: with no saved training

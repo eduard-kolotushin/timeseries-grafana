@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -100,17 +101,19 @@ func (s *postgresStore) Identify(ctx context.Context, orgID int64, key string, p
 }
 
 // provenanceJSON renders only the fields the overlay resolved, so a merge never
-// blanks an identity a previous load stored.
+// blanks an identity a previous load stored. The two text fields are clamped: a
+// panel title and a dashboard uid label a table cell, and nothing stops a client
+// from sending megabytes in either.
 func provenanceJSON(prov PanelProvenance) ([]byte, error) {
 	patch := map[string]any{}
 	if prov.PanelID != 0 {
 		patch["panelId"] = prov.PanelID
 	}
 	if prov.PanelTitle != "" {
-		patch["panelTitle"] = prov.PanelTitle
+		patch["panelTitle"] = clampCellText(prov.PanelTitle)
 	}
 	if prov.DashboardUID != "" {
-		patch["dashboardUid"] = prov.DashboardUID
+		patch["dashboardUid"] = clampCellText(prov.DashboardUID)
 	}
 	if prov.QuerySummary != "" {
 		patch["querySummary"] = prov.QuerySummary
@@ -194,12 +197,29 @@ func intervalSeconds(d time.Duration) string {
 // the column default, so they are fleet-wide by construction: filtering them by
 // org would hide every worker schedule from the Retrain schedules page and from
 // the PUT echo.
+//
+// The spec is projected down to the identification keys the response can carry
+// (Row reads the whole column, because the scheduler parses it). A panel's spec
+// holds its datasource query objects, and this runs on every admin page load, so
+// transferring them here would put query text on the wire for a table that never
+// shows it. The projection is what keeps HasSpec and scheduleSourceFromSpec
+// working: panelId travels as jsonb so a number stays a number, every string key
+// travels as text.
 func (s *postgresStore) List(ctx context.Context, orgID int64) ([]ScheduleRow, error) {
 	if err := s.ensureSchedules(ctx); err != nil {
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
-SELECT scope, key, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status, superseded_at
+SELECT scope, key, cron, timezone, enabled,
+  CASE WHEN spec IS NULL THEN NULL ELSE jsonb_build_object(
+    'dashboardUid', spec->>'dashboardUid',
+    'panelId', spec->'panelId',
+    'panelTitle', spec->>'panelTitle',
+    'datasourceUid', spec->>'datasourceUid',
+    'seriesName', spec->>'seriesName',
+    'querySummary', spec->>'querySummary',
+    'lookback', spec->>'lookback') END,
+  next_run_at, last_run_at, last_status, superseded_at
 FROM forecast.retrain WHERE scope = 'baseline' OR org_id = $1 ORDER BY scope, key
 `, orgID)
 	if err != nil {
@@ -290,8 +310,47 @@ func (s *postgresStore) Delete(ctx context.Context, orgID int64, scope, key stri
 	return err
 }
 
+// DropModel removes a panel's model and its row together, in one transaction.
+// Both halves are required for `drop=model` to stick: deleting the snapshot alone
+// would leave the row pointing at nothing (and the next fit would store a new
+// snapshot under a key the caller meant to be rid of), and deleting the row alone
+// is what the sweep's reconcile undoes on its next tick.
+func (s *postgresStore) DropModel(ctx context.Context, orgID int64, key string) error {
+	if err := s.ensure(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureSchedules(ctx); err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("forecast store: %w", err)
+	}
+	// Rollback after a commit is a no-op, so every error path can share it.
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `DELETE FROM forecast.snapshots WHERE org_id = $1 AND cache_key = $2`, orgID, key); err != nil {
+		return fmt.Errorf("forecast store: %w", err)
+	}
+	// A panel's key is the whole row key, so this is the only row it can leave
+	// behind; a superseded stamp on it is irrelevant to a caller removing the model.
+	if _, err := tx.Exec(ctx, `DELETE FROM forecast.retrain WHERE scope = 'panel' AND org_id = $1 AND key = $2`, orgID, key); err != nil {
+		return fmt.Errorf("forecast store: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("forecast store: %w", err)
+	}
+	return nil
+}
+
 // Due answers the probe path only: "is this panel's schedule past its next run".
 // It is a single primary-key lookup because it runs on every overlay probe.
+//
+// A superseded row is never due, exactly as panelClaimSQL refuses to claim one:
+// the predicate is the claim's minus the lease, because a stale browser tab whose
+// options still hash a retired key must be answered from the stored snapshot, not
+// sent back to refit. A refit would fall through to Supersede(keepKey=the retired
+// key), which un-retires it and stamps the panel's current row — after which the
+// live panel's snapshot freezes until that panel is next loaded.
 func (s *postgresStore) Due(ctx context.Context, orgID int64, key string, now time.Time) (bool, error) {
 	if err := s.ensureSchedules(ctx); err != nil {
 		return false, err
@@ -301,6 +360,7 @@ func (s *postgresStore) Due(ctx context.Context, orgID int64, key string, now ti
 SELECT EXISTS (
   SELECT 1 FROM forecast.retrain
   WHERE scope = 'panel' AND org_id = $1 AND key = $2 AND enabled
+    AND superseded_at IS NULL
     AND next_run_at IS NOT NULL AND next_run_at <= $3
 )
 `, orgID, key, now.UTC()).Scan(&due)

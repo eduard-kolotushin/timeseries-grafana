@@ -3,7 +3,8 @@
 What a caller can invoke in `timeseries-grafana` and `timeseries-baselines`, as whom, configured how, with what
 input, and what comes back — plus a positive and a negative scenario observed live on two environments.
 
-`timeseries-grafana` ships three Grafana plugins from one backend binary (`gpx_forecast`): the **app**
+`timeseries-grafana` ships three Grafana plugins from one backend binary (`gpx_forecast`) plus the
+`gpx_forecast_migrate` CLI, which applies the schema out of process (F33): the **app**
 (`eduardkolotushin-forecast-app`, HTTP resources, snapshot store, retrain scheduler, two configuration pages),
 the **overlay panel** (`eduardkolotushin-forecast-panel`, draws history + forecast + interval bands) and the
 **Forecast datasource** (`eduardkolotushin-forecast-datasource`, a second `gpx_forecast` process that restores
@@ -25,6 +26,7 @@ B=http://localhost:3000/api/plugins/eduardkolotushin-forecast-app/resources   # 
 G=http://localhost:3000                                                       # Grafana
 PG='docker compose exec -T overlay-postgres psql -U overlay -d overlay -tAc'  # overlay Postgres
 KAFKA='docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092'
+MIG='FORECAST_STORE_URL=postgres://overlay:overlay@127.0.0.1:5433/overlay?sslmode=disable go run ./cmd/migrate'  # schema CLI (F33); add --dry-run to look without writing
 ```
 
 `docker compose` commands run in `C:/Users/Eduard/Cursor/timeseries-grafana-sandbox`. In the Kubernetes
@@ -48,8 +50,8 @@ still-running pair of stacks; a transcript that quotes a build hash quotes the b
 | | Compose sandbox | Kubernetes (Helm) |
 | --- | --- | --- |
 | Grafana | 13.1.0 (`commit b309c9bb3b81a748c3a75289236a27309ed2566a`), `http://localhost:3000`, anonymous Admin, org 1 | 13.1.0, `svc/timeseries-grafana` — LoadBalancer `EXTERNAL-IP 172.18.0.5:80` (a cluster-internal address); the host reaches it at `http://localhost:80` through Docker Desktop's kind cloud provider (`kindccm-…`, `envoyproxy/envoy:v1.36.7`, `0.0.0.0:80->80/tcp`), and `kubectl -n timeseries port-forward svc/timeseries-grafana 30001:80` (what `make helm-grafana` runs) serves the same — anonymous Admin, org 1 |
-| Plugin build | **2026-09-22 (head `12b6381`, pass 4)**: `dist/` mounted from the workspace — `gpx_forecast_linux_amd64` sha256 `7b62cf133fb88afcaf230515747ae367c6eec76dc956d30cfa0e111712b58073`, app `module.js` sha256 `167f3dcf36d9cf4e635ace39d7d483daa2645c1051fcf92d87ad1425ed0c6613`, `forecast-datasource/module.js` sha256 `2c4fef85936ffafdcf6848f0946c330409e69096a4d239e8395d078905264bf2`, `forecast-panel/module.js` sha256 `0b3b25d0b56727ff7081524686ff108f792bc0efccbb18fc850ec1fcc4fb4226` — every one byte-identical inside the Grafana container. The binary embeds `vcs.revision=12b6381…`, so its hash moves with every commit; the bundles are content-addressed and do not. Pass 3 measured `33b9ede9…` for the binary at `74b12e4`. For reference: pass 1 measured `34bf53244166948b6a0bbfc9fb79f942da2a4dbd229b54a5b1cba91ae98b43d6` / `42564adfe17e496b3463f344d49fd7c0db3477c978f0e0e5fb3c7e8e13977f15`, the discrepancy rebuild `a034c1ca02c028f065f0bc8eb206e8fec12b950a04d4f22126c9fbfae7c1d4df` / `429a2f99d4257049fdc13c4b7132df4c5a92600b3c0b8d586d6194808e6b4c80` | images built from the pinned refs and tagged by the **pin's short sha**: `ghcr.io/eduard-kolotushin/timeseries-grafana:12b6381e2092` and `…-baselines:7ec489faafeb`, imported into the node's containerd by the sandbox's `make helm-import` (`docker save … \| docker exec -i desktop-control-plane ctr -n k8s.io images import -`); the pass-3 `--set grafana.configRevision=…` run rolled the Deployment to `timeseries-grafana-7f89fd5cb-nr9zw`, and the pass-4 release runs the tags above (`timeseries-grafana-66bddd6cc4-zb6dl`, `timeseries-baselines-5c7d8976db-p5x6k`, both `1/1 Running`) |
-| Source revisions | **2026-09-22 (pass 4)**: `timeseries-grafana` `12b6381e20920b31f8cc2a7087377d018006652d`, `timeseries-baselines` `7ec489faafeb85971dd5f5c247aaf0bc37c63913`; the plugin depends on the tags `timeseries v0.1.1` (`e74ecaa`) and `timeseries-forecast v0.5.0` (`029c690`), and `timeseries-forecast/go.mod` requires `timeseries v0.1.1`. Pass 3 measured `74b12e46dc28…`; the store-UI commits added `861d25d` and `12b6381` | the same two commits, baked into the images by `timeseries-k8s` `64ae2f5`'s `PLUGIN_REF=12b6381e2092…` / `BASELINES_REF=7ec489faafeb…` — both pins at the sibling heads, which `make check-pins` reports |
+| Plugin build | **2026-09-22 (head `12b6381`, pass 4)**: `dist/` mounted from the workspace — `gpx_forecast_linux_amd64` sha256 `7b62cf133fb88afcaf230515747ae367c6eec76dc956d30cfa0e111712b58073`, app `module.js` sha256 `167f3dcf36d9cf4e635ace39d7d483daa2645c1051fcf92d87ad1425ed0c6613`, `forecast-datasource/module.js` sha256 `2c4fef85936ffafdcf6848f0946c330409e69096a4d239e8395d078905264bf2`, `forecast-panel/module.js` sha256 `0b3b25d0b56727ff7081524686ff108f792bc0efccbb18fc850ec1fcc4fb4226` — every one byte-identical inside the Grafana container. The binary embeds `vcs.revision=12b6381…`, so its hash moves with every commit; the bundles are content-addressed and do not. Pass 3 measured `33b9ede9…` for the binary at `74b12e4`. For reference: pass 1 measured `34bf53244166948b6a0bbfc9fb79f942da2a4dbd229b54a5b1cba91ae98b43d6` / `42564adfe17e496b3463f344d49fd7c0db3477c978f0e0e5fb3c7e8e13977f15`, the discrepancy rebuild `a034c1ca02c028f065f0bc8eb206e8fec12b950a04d4f22126c9fbfae7c1d4df` / `429a2f99d4257049fdc13c4b7132df4c5a92600b3c0b8d586d6194808e6b4c80`. **2026-09-27 (pass 5, head `28916fe` plus the v14 working tree, Compose):** `gpx_forecast_linux_amd64` (and its `forecast-datasource/` copy) `bab9bf26f641ccb6424b9cc44ecb1e46a3a41c257168f7ee8bb7635a450c365f`, `gpx_forecast_migrate_linux_amd64` `ffa86a9def2c1c11ed2b1bd5cbb3ceaf585cd77808b7a11af4080ce8d930d11d`, app `module.js` `c73acf8abe18db252b563881a223f690d07b1d3303787c6c02a0427bd5dc5277`, `forecast-datasource/module.js` `c10657243a5507ddcf5d9ab1928922787397a44f09a10bf88f666e5b0347ec03`, `forecast-panel/module.js` `b8234d7fd984e5586f21025bdf2e056063a92cc5b9ae171f9625500ffc7f8399` — all six re-checked inside the container and byte-identical to the host files (the migrator included, which the same `dist/` mount publishes). The Kubernetes release was **not** re-measured in pass 5; its last measured pins remain pass 4's. | images built from the pinned refs and tagged by the **pin's short sha**: `ghcr.io/eduard-kolotushin/timeseries-grafana:12b6381e2092` and `…-baselines:7ec489faafeb`, imported into the node's containerd by the sandbox's `make helm-import` (`docker save … \| docker exec -i desktop-control-plane ctr -n k8s.io images import -`); the pass-3 `--set grafana.configRevision=…` run rolled the Deployment to `timeseries-grafana-7f89fd5cb-nr9zw`, and the pass-4 release runs the tags above (`timeseries-grafana-66bddd6cc4-zb6dl`, `timeseries-baselines-5c7d8976db-p5x6k`, both `1/1 Running`) |
+| Source revisions | **2026-09-22 (pass 4)**: `timeseries-grafana` `12b6381e20920b31f8cc2a7087377d018006652d`, `timeseries-baselines` `7ec489faafeb85971dd5f5c247aaf0bc37c63913`; the plugin depends on the tags `timeseries v0.1.1` (`e74ecaa`) and `timeseries-forecast v0.5.1` (`ec7c534`) — this head still pinned `v0.5.0` (`029c690`), and `84ad9b6`, the commit the pass-4 refresh then deployed, moved it (and `timeseries-baselines`' `a82e0f3`) to `v0.5.1` — and `timeseries-forecast/go.mod` requires `timeseries v0.1.1`. Pass 3 measured `74b12e46dc28…`; the store-UI commits added `861d25d` and `12b6381`. **Pass 5 (2026-09-27)** measured `timeseries-grafana` `28916fe087cd91543d1cbd682b58adc803d435c6` with the v14 retention and audit change set uncommitted on top, `timeseries-baselines` `7ec489faafeb85971dd5f5c247aaf0bc37c63913` plus its own v4/v5 working tree (migrations + retention), and the dependency tags above (`timeseries v0.1.1`, `timeseries-forecast v0.5.1`) | the same two commits, baked into the images by `timeseries-k8s` `64ae2f5`'s `PLUGIN_REF=12b6381e2092…` / `BASELINES_REF=7ec489faafeb…` — both pins at the sibling heads, which `make check-pins` reports |
 | Data plane | Druid 37.0.0 (`http://localhost:8888`, datasource `druid`, tables `minuteweek`/`metrics`/`baselines`), Kafka 3.9.1 (`metrics`, `baselines`), OpenSearch 2.18.0, Prometheus 2.55.1, overlay Postgres 17.6 (schema `forecast`) | Helm releases `kafka`, `druid`, `prometheus`, `opensearch`, `overlay-postgres`, `timeseries` — all `deployed` on one kind node (`desktop-control-plane`, v1.36.1, containerd 2.3.1) |
 | Worker | `alpine:3.21` + `/usr/local/bin/baselines` (2026-09-22 build sha256 `759a9be5280e986e56a179c28befe5cc38f405b1b9de1efb9080fada4ff01e46`; pass 1 measured `c725417cbd3a84cbb97258b8d40e5368bd9e2434f18373f938c26d748a072c7a`), env from `docker-compose.yaml` | Deployment `timeseries-baselines` (`SHARD_DNS=timeseries-baselines-headless`, `SHARD_MEMBERSHIP=store`), env from ConfigMap `timeseries-baselines-env` |
 | Configuration source | provisioning `timeseries-grafana-sandbox/provisioning/plugins/apps.yaml` + `docker-compose.yaml` env | ConfigMaps `timeseries-forecast-app` (app `apps.yaml`), `timeseries-forecast-datasource`, `timeseries-forecast-store`, `timeseries-baselines-env` |
@@ -62,8 +64,8 @@ from the Dockerfiles' pinned sibling refs, tags them by the pin's short sha (`�
 one), and `make helm-import` loads them into the node's containerd; `make helm-up`/`helm-refresh` run the import
 before the upgrade, so the pods come up `1/1 Running` without a manual `ctr` step. The Compose sandbox needs
 none of that (it mounts the workspace `dist/`: the in-container `gpx_forecast_linux_amd64`,
-`forecast-datasource/gpx_forecast_linux_amd64` and `forecast-panel/module.js` are byte-identical to the host
-files, sha256 `33b9ede9…`, `33b9ede9…` and `0b3b25d0…` on 2026-09-22). The Kubernetes dashboards are
+`forecast-datasource/gpx_forecast_linux_amd64`, `gpx_forecast_migrate_linux_amd64` and the three frontend bundles
+are byte-identical to the host files; pass 5 re-checked all six, sha256 in the Plugin-build row). The Kubernetes dashboards are
 provisioned **read-only** (`Cannot save provisioned dashboard`), so panel checks that need an edit run against a
 throwaway copy of `forecast-minute-week`, which is deleted afterwards; Compose dashboards are writable and are
 restored from `timeseries-grafana-sandbox/provisioning/dashboards/minute-week.json` after such a check.
@@ -185,15 +187,15 @@ links.
 
 **Kubernetes:** unknown baseline key → 404 with the identical literal; `"cron":"nope"` → 400 `forecast: invalid cron`.
 
-### F5. `DELETE /schedules` — drop a row
+### F5. `DELETE /schedules` — drop a row, or the row and its model
 
 | | |
 | --- | --- |
 | **Function** | Remove one row. A `panel` row is this org's; a `baseline` row is fleet-wide and is re-created by the worker on its next tick while the metric still reports. |
 | **Who can use** | **Admin only** (403 as Viewer). |
 | **How configured** | Store required. |
-| **Input params** | Query `?scope=…&key=…`, both required. |
-| **Expected result** | 200 `{"message":"ok"}`; 400 on missing/invalid parameters. |
+| **Input params** | Query `?scope=…&key=…`, both required, plus optional `drop=row` (the default) or `drop=model`. |
+| **Expected result** | 200 `{"message":"ok"}`; 400 on missing/invalid parameters (`drop` outside `row`/`model` → 400 `forecast: invalid drop: want row or model`). `drop=row` is v12's contract: the row goes and the model stays, because the snapshot is what the panel's `cacheKey` still resolves to. `drop=model` removes the snapshot and the row together, so the retention reconcile (F16) cannot hand the row back on its next tick; a `baseline` key's model lives in the worker's schema, so that call also answers a `note` saying so. |
 
 **Positive — Compose:** `DELETE "$B/schedules?scope=panel&key=0f…0f"` → `{"message":"ok"}` (row gone);
 `DELETE "$B/schedules?scope=baseline&key=ready"` → `{"message":"ok"}`, and on the following worker tick the row
@@ -205,6 +207,11 @@ insert path, not a leftover.
 
 **Kubernetes:** 400 `forecast: scope and key required` for the parameterless call; the tab's `Delete` removes the
 row immediately (no confirmation dialog) as observed on Compose.
+
+**Pass 5 — Compose (a temporary `snapshotTtl: 1h`):** `drop=row` on a `panel` key removed the row, kept the
+snapshot, and the next tick gave the row back with the deployment default cron (`*/5 * * * *`, `last_run_at` NULL);
+`drop=model` removed both (`snaps c=0`) and the following tick re-created neither; `drop=everything` → **400**
+`forecast: invalid drop: want row or model`, with the row still in place.
 
 ### F6. `POST /schedules/default` — validate a default cron
 
@@ -229,7 +236,7 @@ row immediately (no confirmation dialog) as observed on Compose.
 | --- | --- |
 | **Function** | Turn a stored snapshot back into a frame so Grafana alerting can query the forecast and its interval by `refId`. This is the **only** way to read a snapshot from another datum. |
 | **Who can use** | **Alert rule** (Grafana alerting) or any datasource query. No Admin gate; the datasource's own jsonData carries the store (F20). |
-| **How configured** | Datasource provisioned jsonData — `storeUrl` as one DSN, or field-wise `storeHost`/`storePort`/… (the datasource's config editor renders no store fields; F20) — or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
+| **How configured** | Datasource provisioned jsonData — `storeUrl` as one DSN, or field-wise `storeHost`/`storePort`/… (the datasource's config editor renders only a read-only list of the `store*` keys it finds, never a value; F20) — or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
 | **Input params** | Query `{kind: "forecast"\|"lower"\|"upper", cacheKey, level?}` inside a normal `/api/ds/query` body with `from`/`to`. Each query's JSON is capped at 64 KiB (`maxQueryJSONBytes`); a larger one is rejected rather than decoded. |
 | **Expected result** | 200 with one frame per query and real values; a miss is an error: `needTrain: train on the Forecast overlay panel first`; unknown `kind` → 400. |
 
@@ -287,7 +294,7 @@ history, forecast and bands, and no reason text.
 | --- | --- |
 | **Function** | Choose the model, the two windows, the band and the panel's load cap. |
 | **Who can use** | **Panel** (any user who can edit the dashboard). |
-| **How configured** | Panel options, stored in the dashboard JSON. Live labels: *Model*, *Forecast range*, *Alpha*, *Beta*, *Seasonal period*, *Seasonality*, *Calendar*, *Show prediction interval*, *Interval coverage*, *Training period*, *Legacy lookback*, *Max in-flight loads*, *Saved model*, *Retrain*, and the *Alerting* group (*New alert rule*). Keys: `model`, `forecastRange`, `alpha`, `beta`, `period`, `season`, `calendar`, `showInterval`, `interval`, `trainRange`, `lookback`, `maxInflightLoads` (source: `src/forecast-panel/module.ts`). |
+| **How configured** | Panel options, stored in the dashboard JSON. Live labels: *Model*, *Forecast range*, *Alpha*, *Beta*, *Seasonal period*, *Seasonality*, *Calendar*, *Show prediction interval*, *Interval coverage*, *Training period*, *Legacy lookback*, *Max in-flight loads*, *Saved model*, *Retrain*, and the *Alerting* group (*New alert rule*). Keys: `model`, `forecastRange`, `alpha`, `beta`, `period`, `season`, `calendar`, `showInterval`, `interval`, `trainRange`, `lookback`, `maxInflightLoads` (source: `src/forecast-panel/module.ts`). The same file registers two button-only editors whose keys store nothing — `retrainAction` (*Saved model*) and `alertAction` (*New alert rule*): they never call `onChange`, so they are named after actions rather than options. |
 | **Input params** | `forecastRange`/`trainRange` are `{from,to}` raw strings — empty means **Auto** (`now` → `now` + model duration; the last model window ending at the panel's `to`). `interval` 0 hides the band; `maxInflightLoads` minimum 1 (default 1). |
 | **Expected result** | The panel redraws with the new option. |
 
@@ -338,8 +345,8 @@ schedule.
 | **Function** | A page over the `forecast.retrain` table: what will retrain, when, how it last went, and what it belongs to. |
 | **Who can use** | **Admin** (peer tab of Overview and Configuration on the plugin configuration page). |
 | **How configured** | Store required (F20). Rows come from the overlay's fits (F2) and from the worker (F25). |
-| **Input params** | Filters *Search* / *Scope* (All, panel, baseline) / *Enabled* (All, Enabled, Disabled) / *Status* (All, ok, error, never run); per-row cron, timezone and enabled editors; per-row *copy key*, *Save*, *Delete*; a *Refresh* button; 20-row client-side paging; a *Source* deep link for `panel` rows. |
-| **Expected result** | Columns *Source, Scope, Key, Cron, Timezone, Next run, Last run, Status, Enabled* + actions; a row a newer key superseded shows a *Superseded* marker beside its status and is never retrained again; errors surface as `Schedules failed` + the backend reason. |
+| **Input params** | Filters *Search* / *Scope* (All, panel, baseline) / *Enabled* (All, Enabled, Disabled) / *Status* (All, ok, error, never run); per-row cron, timezone and enabled editors; per-row *copy key*, *Save*, *Delete*, *Delete model*; a *Refresh* button; 20-row client-side paging; a *Source* deep link for `panel` rows. *Delete* removes the row (`DELETE /schedules?scope=&key=`, F5) and leaves the model; *Delete model* adds `drop=model`, which removes the snapshot with it, so the backend's retention reconcile cannot give the row back on its next tick (v14). |
+| **Expected result** | Columns *Source, Scope, Key, Cron, Timezone, Next run, Last run, Status, Enabled* + actions; a row a newer key superseded shows a *Superseded* marker beside its status and is never retrained again; errors surface as `Schedules failed` + the backend reason; a `drop=model` of a `baseline` row answers with a note that the model belongs to the worker's schema, which the page renders as an info alert. |
 
 **Positive — Compose:** the tab listed 6 then 5 rows; the `panel` rows showed the panel title and
 `value 21d Druid: minuteweek · minute` as their source with `/d/forecast-minute-week?viewPanel=N` links, and the
@@ -352,6 +359,10 @@ server row unchanged. Pressing *Delete* on the fixture row removed it immediatel
 
 **Kubernetes:** the tab lists the K8s store's 4 rows with the same columns, derived sources and deep links
 (`ready` baseline + the three dashboard panels, all `last ok`).
+
+**Pass 5 — Compose:** the tab's `Delete model` action (beside `Delete`, which still leaves the model — F5) sent
+`DELETE …/schedules?scope=panel&key=…&drop=model`; a `baseline` row answered with the note that its model belongs
+to the worker's schema, which the page rendered as an info alert.
 
 ### F13. Retrain action
 
@@ -427,7 +438,7 @@ keys (`2e827911…`, `f8046f42…`, `7713db25…`), which is the cross-environme
 | **Who can use** | **Operator** (it runs by itself once the app is configured). |
 | **How configured** | jsonData `retrainCron` (default `0 3 * * *`; both environments use `*/5 * * * *`) and `grafanaUrl` (default `http://127.0.0.1:3000`); the token comes from `FORECAST_GRAFANA_TOKEN`, the ini section, or `secureJsonData.grafanaToken`. The ticker itself is `FORECAST_RETRAIN_ENABLED` (default `true`, the same precedence chain) with `FORECAST_RETRAIN_TICK` (default `30s`) and `FORECAST_RETRAIN_LEASE` (derived from the claim batch and the fetch timeout — 6m today). |
 | **Input params** | Per row: `cron`, `timezone`, `enabled`; per spec: the stored queries and window. A window the picker expressed relatively — Auto, a legacy duration, or a Quick range such as `now-7d`/`now` — is stored as `relative: true` with `lookbackMs` and re-resolved at claim time, so a cron retrain follows the clock; a calendar/absolute pick, a window that does not end at `now`, and a rounded bound stay absolute and replay verbatim. |
-| **Expected result** | `next_run_at` advances, `last_run_at`/`last_status` are written, `forecast.snapshots.updated_at` moves; a failure records `last_status = "error: …"` and never fails a user query. |
+| **Expected result** | `next_run_at` advances, `last_run_at`/`last_status` are written, `forecast.snapshots.updated_at` moves; a failure records `last_status = "error: …"` and never fails a user query. Every tick also **collects** what nothing refreshes (v14): a snapshot untouched for `FORECAST_SNAPSHOT_TTL` (default `72h`; `0` disables the sweep, a value below `1h` is refused and the default kept) is deleted, a row idle for the whole window with no snapshot behind it goes with it, and a snapshot without a row gets the deployment default schedule back — which is what keeps *deleting a schedule row* from deleting the model (F5). `FORECAST_RETRAIN_ENABLED=false` turns the sweep off with the ticker; a sweep failure is a log line, never a failed query. |
 
 **Positive — Compose:** `$PG "SELECT scope,key,last_run_at,last_status,next_run_at FROM forecast.retrain ORDER BY next_run_at"`
 showed the panel rows advancing on the `*/5` cron with `last_status ok` (`…10:55:24Z`, then `…11:00:32Z`), and
@@ -439,6 +450,14 @@ Grafana's log carried one `msg=retrain … status=ok dur=230ms` line per row per
 exercised live, because the same code path's failure recording is visible on the worker side (F26) and the
 scheduler never fails a query. The `needTrain` flag is the user-visible half: when a row is due, the next probe
 returns `{"needTrain":true}` (F2c), which is what makes the overlay refit on the next dashboard load.
+
+**Pass 5 — Compose (a temporary `snapshotTtl: 1h`):** planning three fixtures and one pre-existing stale pair, one
+tick logged `msg="forecast retention" recreated=1 rows=2 snapshots=2` — a snapshot and row backdated three hours
+went, the four-day-idle *superseded* key `2e827911…` went with its snapshot, the fresh snapshot whose row had been
+idle for three hours survived **with the admin's `*/9 * * * *` cron** (the scheduler then retrained it), and the
+orphan snapshot was re-created as a row with the deployment default `*/5 * * * *`, `enabled true` and no `spec`
+(unclaimable, which is why the reconcile cannot resurrect a fetchable-but-unscheduled row). A later tick logged
+`recreated=1 rows=0 snapshots=0` after a `drop=row` removed the row it had just given back (F5).
 
 ### F17. Scheduler credentials
 
@@ -509,7 +528,7 @@ all retrained to `ok`).
 | **Who can use** | **Operator** (deployment configuration; the store has no UI fields — F11). |
 | **How configured** | In order: process env `FORECAST_STORE_URL`/`FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `…_DATASOURCE_*` / `GrafanaCfg` (`[plugin.eduardkolotushin-forecast-app]`, `[plugin.eduardkolotushin-forecast-datasource]`), then provisioned jsonData / `secureJsonData`. |
 | **Input params** | `storeUrl` (one DSN, jsonData camel; env/ini spell it `FORECAST_STORE_URL` / `store_url`), or field-wise `storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`. A URL short-circuits the fields at the same level. |
-| **Expected result** | With a store: snapshots in `forecast.snapshots (id uuid pk, org_id, cache_key, snapshot jsonb, updated_at)` and schedules usable. Without: `/schedules` is 503 and every probe answers `needTrain`. |
+| **Expected result** | With a store: snapshots in `forecast.snapshots (id uuid pk, org_id, cache_key, snapshot jsonb, updated_at)` and schedules usable. Without: `/schedules` is 503 and every probe answers `needTrain`. Retention (v14): the retrain ticker deletes a snapshot nothing refreshed for `FORECAST_SNAPSHOT_TTL` (default `72h`, `0` disables), so the table does not grow forever, and gives a snapshot without a schedule row the deployment default back rather than orphaning it (F16). |
 
 **Positive — Compose:** the store comes from provisioning, not from a page:
 `timeseries-grafana-sandbox/provisioning/plugins/apps.yaml`
@@ -685,10 +704,10 @@ through the chart-provisioned store.
 | **Function** | Keep the fleet's peer set current, so rendezvous ownership reflects the workers that are actually alive. |
 | **Who can use** | **Operator**. |
 | **How configured** | `SHARD_MEMBERSHIP=store` + store DSN (or `SHARD_DNS` + `SHARD_PEERS`). |
-| **Input params** | Nothing; the worker writes `baselines.workers (id, last_seen, owned, peers)` each tick. |
+| **Input params** | Nothing; the worker writes `baselines.workers (id, worker_id, last_seen, owned, peers)` each tick. |
 | **Expected result** | One row per live worker with a fresh `last_seen`; a stopped worker's row ages out and its share is taken over. |
 
-**Positive — Compose:** `$PG "SELECT id,last_seen,owned,peers FROM baselines.workers"` → the live worker with
+**Positive — Compose:** `$PG "SELECT id,worker_id,last_seen,owned,peers FROM baselines.workers"` → the live worker with
 `owned`/`peers` populated and `last_seen` inside the last tick; the Kubernetes store showed the same for
 `10.244.0.29` (`owned=2 peers=1`).
 
@@ -783,6 +802,34 @@ result for the worker meaningful.
 **Kubernetes:** the Deployment declares no container port and the chart ships no probes (the sandbox's K8s path
 inherits that).
 
+### F33. `gpx_forecast_migrate` — apply the schema before Grafana starts
+
+| | |
+| --- | --- |
+| **Function** | Apply the embedded versioned migrations (`pkg/store/migrations`) out of process, so a pipeline can prepare the database before Grafana starts. |
+| **Who can use** | **Operator** — a CI/CD step or a human holding the store DSN. No Grafana identity and no HTTP surface. |
+| **How configured** | `--dsn`, or the same `FORECAST_STORE_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` env chain the plugin reads (no grafana.ini, no jsonData); `--timeout` (default 60s). `make migrate` builds `dist/gpx_forecast_migrate_linux_amd64`. |
+| **Input params** | `--dsn`, `--dry-run`, `--timeout`. |
+| **Expected result** | `applied NNNN_name` per pending file, `pending NNNN_name` under `--dry-run`, or `nothing to apply (2 known, 2 applied)`; exit 0. A failing file is named with exit 1 and leaves neither its DDL nor its ledger row. |
+
+One transaction per file, opened with `pg_advisory_xact_lock(0x666f726563617374)`, against the ledger `forecast.schema_migrations (id uuid pk, version TEXT UNIQUE, name, applied_at)` — created by the engine, not by a migration file, so a CI job and every Grafana replica's lazy apply serialise. Running it is **optional**: the plugin applies the same set at its first store use, one request late.
+
+**Positive — Compose (pass 5, head `28916fe` plus the v14 working tree):** `$MIG` → `nothing to apply (2 known, 2 applied)` (exit 0), the same with `--dry-run`, and the *shipped linux artifact* inside the Grafana container — `docker exec timeseries-grafana-sandbox /var/lib/grafana/plugins/eduardkolotushin-forecast-app/gpx_forecast_migrate_linux_amd64`, which reads that container's own `FORECAST_STORE_*` env — → `nothing to apply (2 known, 2 applied)` (exit 0).
+
+**Negative — Compose (a scratch database created for the check, dropped afterwards):** `--dry-run` → `pending 0001_snapshots` / `pending 0002_retrain` (exit 0) and `to_regnamespace('forecast')` **false** — nothing is created, not even the ledger; a real run then printed `applied 0001_snapshots` / `applied 0002_retrain` and a second run `nothing to apply (2 known, 2 applied)`, leaving `snapshots_pkey PRIMARY KEY (id)`, `snapshots_org_cache_key_unique UNIQUE (org_id, cache_key)`, `retrain_pkey PRIMARY KEY (id)`, `retrain_scope_org_key_unique UNIQUE (scope, org_id, key)` and `id uuid DEFAULT gen_random_uuid()` on all three tables.
+
+### F34. Overview page — the app's landing page
+
+| | |
+| --- | --- |
+| **Function** | The app's root page at `/a/<plugin id>` (the *Overview* tab, a peer of Configuration and Retrain schedules). |
+| **Who can use** | **Any user** who can open the plugin's page. |
+| **How configured** | Nothing: the page is static copy (`src/module.tsx`, `src/components/App/App.tsx`, `src/pages/Home.tsx`) and calls no plugin resource route. |
+| **Input params** | None. |
+| **Expected result** | 200 rendering the plugin's own text, with no `/api/plugins/eduardkolotushin-forecast-app/resources/…` request issued by the page. |
+
+**Positive — Compose (pass 5):** loading the page as an anonymous Admin rendered "Overlay univariate forecasts from timeseries-forecast on Grafana queries. Add the Forecast overlay visualization to a dashboard panel…" and the page made **no** `/resources/…` request (the only resource calls in that session came from the dashboard panels).
+
 ## The contract between the two
 
 The two processes meet at exactly two places, both in the overlay Postgres:
@@ -796,7 +843,7 @@ The two processes meet at exactly two places, both in the overlay Postgres:
   uuid primary key `id`, `UNIQUE (scope, org_id, key)` — the queue. `panel` rows are written by the plugin (with `spec` holding the
   queries, window and identity), `baseline` rows by the worker (with no `spec`), and each side claims only what it
   owns: the plugin its own org's `panel` rows, the worker the fleet-wide (`org_id = 0`) `baseline` rows.
-  `superseded_at` is the plugin's retire marker (see [Scaling and HA](#scaling-and-ha) and the audit's finding F46 in `audit/AUDIT.md`): the worker reads
+  `superseded_at` is the plugin's retire marker (see [Scaling and HA](#scaling-and-ha) and finding F46 of the pass-2 report (`audit/AUDIT-2026-09-22-pass2.md`)): the worker reads
   it in its own claim predicate, so a superseded row is claimed by neither side.
 - The worker also owns `baselines.snapshots` (gzip `forecast.Snapshot` + `trained_at`) and
   `baselines.workers` (heartbeat). The worker creates only schema `baselines`; `forecast.retrain` is created and
@@ -1024,7 +1071,7 @@ The Compose plugin was rebuilt for this run (`gpx_forecast_linux_amd64` sha256
 tagged with the pins (`…-grafana:8feecafc14ba`, `…-baselines:7ec489faafeb`).
 
 The `F` ids in this table are the audit's **findings** in `audit/AUDIT.md`, not the feature ids used above: the two
-series share the `F` prefix by coincidence (findings `F1…F60`, features `F1…F32`). Read a *Finding* cell as a
+series share the `F` prefix by coincidence (findings `F1…F60`, features `F1…F34`). Read a *Finding* cell as a
 finding; read a `### F…` heading as a feature.
 
 | Finding | Fix | Live re-verification |
@@ -1044,14 +1091,14 @@ finding; read a `### F…` heading as a feature.
 | **F29/F30/F31** | `JoinLeft`'s sharing is documented and pinned (the accessors copy); `FromPoints` allocates twice instead of three times; the unreachable resample branch is gone | library suites green; the allocation test reports three allocations against the old code |
 | **F32-F44, F47** | the chart exposes the nine worker knobs, `postgres.sslMode`, default Grafana resources (2Gi limit) and a DSN-aware `postgres.url`; the store password moved to a Secret; the pod rolls on `retrainCron`/`pluginToken` through a checksum env plus the documented `grafana.configRevision` lever; plugin versions are pinned; the sandbox tags images by pin, imports them into the kind node and no longer shares one dashboards ConfigMap | rendered proofs for each value; `make check-pins` reports both pins at the sibling heads; the cluster shows the Secret, `FORECAST_CONFIG_CHECKSUM=e80beffb…`, `limits.memory=2Gi`; every Compose datasource still reports OK after the pinned preinstall |
 | **F46** a panel's old key kept retraining forever | `superseded_at`: a fit stamps the same dashboard panel's other keys and clears its own | switching panel 1 to Last 7 days stamped `2e827911` (`superseded=12:20:43`), switching back to Auto cleared it and stamped the 7-day key; a superseded row is never claimed |
-| **D1-D10** | the ten documentation corrections listed under *Discrepancies found* above | each was re-checked against the code before the edit |
+| **D1-D10** | the ten documentation corrections the pass-2 report's own table lists (`audit/AUDIT-2026-09-22-pass2.md`; the items were never renumbered into the sections above) | each was re-checked against the code before the edit |
 
 Every row the pass-2 record left unit-tested only — and the rollout lever it recorded as not exercised — was
 driven live in pass 3 (2026-09-22) on the Compose stack and the Kubernetes release:
 
 | Row | Live observation |
 | --- | --- |
-| F12 a target with no `datasource` field | a throwaway dashboard whose query A omits `datasource` trained from the panel's own datasource and drew history + forecast (`POST …/forecast` 200, "Using saved model"); the copy was deleted afterwards |
+| F12 a target with no `datasource` field | a throwaway dashboard whose query A omits `datasource` trained from the panel's own datasource and drew history + forecast (`POST …/forecast` 200, "Using saved model"); the copy was deleted afterwards. Pass 5 repeated it and settled *why* it works: Grafana supplies the panel's datasource on every target it sends, so the panel never needs a fallback of its own — its `panelDatasource` parameter was dead weight and was deleted (`trainQuery.ts`), and a target that still arrives bare is reported as `Training query returned no points` rather than resolved against the org default |
 | F13 *Legacy lookback* | the option exists as a panel option (empty = Auto) **and** as a field in the Forecast query editor (`Explore`, datasource `forecast`: *Train from*, *Train to*, *Legacy lookback*); it is part of the `cacheKey` fingerprint (`src/forecast-panel/cacheKey.ts`), which is why the editor's tooltip tells you to keep it equal to the panel's |
 | F14 a Mixed panel with a reduce row | **New alert rule** navigated to `/alerting/new` with a `defaults` payload carrying both rows: the Druid metric (query A) and the reduce expression (`refId B`, `datasourceUid __expr__`, `queryType expression`, `model.reducer mean`, `model.expression A`) |
 | F15 two option edits in one editing session | *Show prediction interval* off plus *Max in-flight loads* 2 applied without an intermediate save; the save dialog's diff listed `"maxInflightLoads": 2`, `"showInterval": false` and the clamped `"interval": 0.99`, the saved dashboard (version 41) carries all three, and the band left the drawn panel at the same time |
@@ -1092,11 +1139,50 @@ decoded `trainSource` above 1 MiB has its own 413 reason (F2/F50 above); `timese
 `timeseries v0.1.1`, and since `v0.5.1` both consumers require that released line instead of the `v0.5.0` tag that
 predated the bump.
 
+### Pass 5 (2026-09-27) — the v13 schema, v14 retention and the audit's fixes, measured on Compose
+
+Pass 5 re-measured **Compose** on the current head; the Kubernetes release was **not** re-measured, so its rows
+above remain pass 4's. The build is the workspace `dist/` from head `28916fe` **plus** the working tree that
+carries this pass's change set (v13 is committed; the audit fixes and v14 are not yet), hash for hash in the
+Plugin-build row.
+
+**The schema is versioned and every primary key is a uuid (v13)** — F33 carries the transcripts:
+`nothing to apply (2 known, 2 applied)` against the deployed database from both the host CLI and the shipped linux
+artifact inside the container; `pending 0001_snapshots` / `pending 0002_retrain` under `--dry-run` on a scratch
+database with `to_regnamespace('forecast')` still false; then `applied 0001_snapshots` / `applied 0002_retrain`,
+then `nothing to apply`, with `snapshots_pkey PRIMARY KEY (id)`, `snapshots_org_cache_key_unique UNIQUE (org_id,
+cache_key)`, `retrain_pkey PRIMARY KEY (id)`, `retrain_scope_org_key_unique UNIQUE (scope, org_id, key)` and
+`id uuid DEFAULT gen_random_uuid()` on all three tables.
+
+**Retention and the schedule reconcile (v14)** were driven live with a temporary `snapshotTtl: 1h` (reverted
+afterwards; the deployed default is `72h`), on three planted fixtures plus the environment's own stale pair — the
+tick lines and the outcomes are in F5/F16. In short: two stale snapshots and two idle rows collected (one of them
+the four-day-idle *superseded* key `2e827911…` pass 3 had left behind), one row re-created for an orphan snapshot,
+a fresh snapshot kept with an admin's cron, `drop=row` leaving the model and getting the row back, `drop=model`
+removing both with nothing coming back.
+
+**The panel and the datasource** were exercised in a throwaway Mixed dashboard (two Prometheus targets plus one
+Forecast datasource query), deleted afterwards:
+
+- a panel whose `targets[0]` omits `datasource` trained and drew history + forecast (probe 347 B, fit 2 985 B with
+  `trainSource`), which answers the pass-3 question behind the F12 row below: **Grafana supplies the panel's
+  datasource on every target it sends**, so the panel's own fallback was dead weight and was deleted
+  (`trainQuery.ts`);
+- *Copy source from query A* — the one item pass 4 recorded as unexercised — copied **both** metric siblings into
+  `sourceTargets`, and the datasource query then carried
+  `cacheKey 25985f9e4577d19c4b4e1da348dce6d916b826e5412482f6acf68eaf67759474`, byte-identical to the key the panel
+  had stored for the series `metrics-exporter:8000`; `POST /api/ds/query` with that key restored the snapshot
+  (`status 200`, one frame with real values) where an unknown key still answered `needTrain: train on the Forecast
+  overlay panel first` — the v9 Mixed path and F7's contract;
+- the app landing page (`/a/eduardkolotushin-forecast-app`) rendered the plugin's own copy and issued no
+  `/resources/…` request — F34.
+
 **Still not live-verified:** the pass-1 rows in the *Verified live, not verified live* table above (the OpenSearch and
 Postgres train rejections, the unsaved-dashboard reason (pass 4 tried to automate it and Grafana 13's add-panel
-flow would not co-operate), the credential auto-disable, *Copy source from query A* (its editor fields *Train
-from*, *Train to* and *Legacy lookback* were driven in `Explore` in pass 4; only the copy button itself is
-unexercised),
-`DRUID_MAX_INFLIGHT` saturation, the `FORECAST_MAX_INFLIGHT` env precedence), and the 30 s cache-staleness window
-that the HA table already names.
+flow would not co-operate), the credential auto-disable, `DRUID_MAX_INFLIGHT` saturation, the
+`FORECAST_MAX_INFLIGHT` env precedence), and the 30 s cache-staleness window that the HA table already names.
+Pass 5's own limits: the sweep was observed under a **temporary** `snapshotTtl: 1h` (so the `72h` default was never
+waited out, and the collection of a *superseded* row is that short window's consequence), the Kubernetes
+environment was not re-measured, and the deployed build contains an uncommitted working tree — the change set is
+what `dist/` was rebuilt from, not a released commit.
 

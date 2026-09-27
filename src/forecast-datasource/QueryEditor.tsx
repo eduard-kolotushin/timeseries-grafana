@@ -106,8 +106,11 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    // The same serial `update` uses: an edit that lands after this effect started has
+    // already composed a newer query, so this flush must not push the pre-edit one back.
+    const seq = updateSeq.current;
     void withCacheKey(query).then((next) => {
-      if (!cancelled && next.cacheKey !== query.cacheKey) {
+      if (!cancelled && seq === updateSeq.current && next.cacheKey !== query.cacheKey) {
         onChange(next);
       }
     });
@@ -284,7 +287,7 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
                 variant="secondary"
                 size="sm"
                 type="button"
-                onClick={() => update((q) => copySourceFromSibling(q, sourceSibling))}
+                onClick={() => update((q) => copySourceFromSibling(q, siblings))}
               >
                 Copy source from query {sourceSibling.refId || 'A'}
               </Button>
@@ -297,10 +300,9 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
             onChange={(ds) =>
               update((q) => {
                 const innerQ = innerSourceQuery(q);
-                return withSourceTarget(q, { uid: ds.uid, type: ds.type }, {
-                  ...(innerQ as unknown as Record<string, unknown>),
-                  refId: innerQ.refId || 'A',
-                });
+                return withSourceTarget(q, { uid: ds.uid, type: ds.type }, [
+                  { ...(innerQ as unknown as Record<string, unknown>), refId: innerQ.refId || 'A' },
+                ]);
               })
             }
           />
@@ -316,7 +318,7 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
               withSourceTarget(
                 current,
                 { uid: sourceDs.uid, type: sourceDs.type },
-                q as unknown as Record<string, unknown>
+                [q as unknown as Record<string, unknown>]
               )
             )
           }

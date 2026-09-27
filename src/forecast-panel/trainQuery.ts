@@ -60,12 +60,11 @@ export type TrainQueryResult = {
 };
 
 /**
- * The training window plus what the request itself cannot carry: the panel's own
- * datasource (for a target whose own ref is missing) and the schedule-row identity.
+ * The training window plus what the request itself cannot carry: the schedule-row
+ * identity.
  */
 export type TrainQueryWindow = TrainRewriteWindow & {
   provenance?: TrainProvenance;
-  panelDatasource?: DataSourceRef;
 };
 
 /**
@@ -98,7 +97,7 @@ export async function queryTrainingFrames(
   window: TrainQueryWindow,
   signal?: AbortSignal
 ): Promise<TrainQueryResult> {
-  const { fromMs, toMs, intervalMs, provenance, panelDatasource } = window;
+  const { fromMs, toMs, intervalMs, provenance } = window;
   const targets = metricTargets(request?.targets ?? []);
   if (!request || targets.length === 0 || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
     return { frames: null };
@@ -130,7 +129,7 @@ export async function queryTrainingFrames(
     __to: { text: String(toMs), value: String(toMs) },
   };
 
-  const groups = groupByDatasource(targets, panelDatasource);
+  const groups = groupByDatasource(targets);
 
   const frames: DataFrame[] = [];
   let source: TrainQuerySource | undefined;
@@ -205,25 +204,26 @@ type DatasourceGroup<T> = {
 };
 
 /**
- * Targets grouped by the datasource that answers for them, in first-seen order. A target
- * with no ref of its own belongs to the panel's own datasource; it must never fall back to
- * the org default, which is what `getDataSourceSrv().get('')` would resolve to. An empty
- * key is what marks a group as untrainable.
+ * Targets grouped by the datasource that answers for them, in first-seen order. A target's
+ * own ref is the only identity there is: Grafana hands the panel's datasource down on every
+ * target it sends (observed live — a panel whose `targets[0]` omits `datasource` trains), so
+ * a bare target is untrainable rather than resolved against the org default, which is what
+ * `getDataSourceSrv().get('')` would return. An empty key is what marks a group as
+ * untrainable.
  */
 function groupByDatasource<T extends { datasource?: DataQuery['datasource'] }>(
-  targets: T[],
-  panelDatasource?: DataSourceRef
+  targets: T[]
 ): Map<string, DatasourceGroup<T>> {
   const groups = new Map<string, DatasourceGroup<T>>();
   for (const target of targets) {
-    // The uid the target's own ref names (or its legacy string ref), else the panel's.
-    // `refKey` keeps a type-only ref working instead of collapsing it onto the panel.
-    const key = datasourceUid(target.datasource, panelDatasource) || refKey(target.datasource);
+    // The uid the target's own ref names (or its legacy string ref).
+    // `refKey` keeps a type-only ref working instead of collapsing it onto an empty key.
+    const key = datasourceUid(target.datasource) || refKey(target.datasource);
     const group = groups.get(key);
     if (group) {
       group.targets.push(target);
     } else {
-      groups.set(key, { key, ref: target.datasource ?? panelDatasource, targets: [target] });
+      groups.set(key, { key, ref: target.datasource, targets: [target] });
     }
   }
   return groups;
@@ -242,7 +242,7 @@ export function trainRejectReason(
   window: TrainQueryWindow
 ): string | undefined {
   let reason: string | undefined;
-  for (const group of groupByDatasource(metricTargets(request?.targets ?? []), window.panelDatasource).values()) {
+  for (const group of groupByDatasource(metricTargets(request?.targets ?? [])).values()) {
     if (!group.key || group.ref == null) {
       // No datasource to run against, so the group can never return frames: the fit path
       // reports the empty training result rather than querying the org default.

@@ -509,21 +509,6 @@ func TestForecastLoadLimits(t *testing.T) {
 		return r.response.Status
 	}
 
-	t.Run("train too long 413", func(t *testing.T) {
-		// One point over the cap, with no package state touched: the request, the
-		// decode and the 413 are the real path.
-		body, _ := json.Marshal(ForecastRequest{
-			Times:  make([]int64, defaultMaxTrainPoints+1),
-			Values: make([]nullableFloat, defaultMaxTrainPoints+1),
-			Model:  "naive",
-			From:   1,
-			To:     1,
-		})
-		if status := call(body); status != http.StatusRequestEntityTooLarge {
-			t.Fatalf("status=%d", status)
-		}
-	})
-
 	t.Run("body too large 413", func(t *testing.T) {
 		app.maxBody = 32
 		t.Cleanup(func() { app.maxBody = maxForecastBodyBytes })

@@ -46,19 +46,14 @@ describe('abortableLastValue', () => {
 describe('postResource', () => {
   beforeEach(() => fetchMock.mockReset());
 
-  it('returns response.data', async () => {
-    fetchMock.mockReturnValue(of({ data: { times: [1], values: [2] } }));
-    await expect(postResource('/x', { a: 1 })).resolves.toEqual({ times: [1], values: [2] });
-    expect(fetchMock).toHaveBeenCalledWith({ url: '/x', method: 'POST', data: { a: 1 } });
-  });
-
   it('cancels the HTTP request when the load is aborted', async () => {
     const teardown = jest.fn();
     fetchMock.mockReturnValue(new Observable(() => teardown));
     const ac = new AbortController();
-    const p = postResource('/x', {}, ac.signal);
+    const p = postResource('/x', { a: 1 }, ac.signal);
     ac.abort();
     await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledWith({ url: '/x', method: 'POST', data: { a: 1 } });
     expect(teardown).toHaveBeenCalledTimes(1);
   });
 });

@@ -105,6 +105,33 @@ describe('loadOverlayForecasts', () => {
     expect(post).toHaveBeenCalledTimes(1);
   });
 
+  it('reports a visible series the training frames do not contain', async () => {
+    const made = (name: string) => {
+      const f = new MutableDataFrame();
+      f.addField({ name: 'Time', type: FieldType.time, values: [1, 2] });
+      f.addField({ name, type: FieldType.number, values: [1, 2] });
+      return f;
+    };
+    const queryTrain = jest.fn(async () => ({ frames: [made('a'), made('b')] }));
+    const post = jest
+      .fn<Promise<ForecastResponse>, [Record<string, unknown>]>()
+      .mockResolvedValueOnce({ needTrain: true });
+    const got = await loadOverlayForecasts({
+      visible,
+      fromMs: 3,
+      toMs: 4,
+      level: 0,
+      retrain: false,
+      fitBody: { model: 'naive' },
+      cacheKeyFor: async () => 'aa'.repeat(32),
+      queryTrain,
+      post,
+    });
+    // Two trained series with no name match: the panel must say why nothing was drawn.
+    expect(got.error).toBe(REASON_TRAIN_EMPTY);
+    expect(got.forecasts).toHaveLength(0);
+  });
+
   it('does not POST a train body longer than MAX_TRAIN_POINTS', async () => {
     const n = MAX_TRAIN_POINTS + 1;
     const long = new MutableDataFrame();

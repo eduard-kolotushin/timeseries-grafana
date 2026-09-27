@@ -46,6 +46,12 @@ jobs:
         run: GOOS=linux GOARCH=amd64 go build -o /tmp/gpx_forecast_linux_amd64 ./pkg
       - name: Build the linux migrator
         run: GOOS=linux GOARCH=amd64 go build -o /tmp/gpx_forecast_migrate_linux_amd64 ./cmd/migrate
+      # The mage build definition is the plugin-tools path (.config/AGENTS/instructions.md),
+      # while the Makefile is what ships. Nothing else compiles it: the Format step only
+      # gofmts it, and `go build` cannot link a file that is `package main` with no main
+      # function (mage generates one), so a broken Magefile.go would pass CI unnoticed.
+      - name: Type-check the mage build definition
+        run: go vet -tags mage .
       # The migration CLI is what a CD pipeline runs before Grafana starts. The
       # pg-gated Go tests already cover the from-scratch, legacy-schema and
       # concurrency paths; this proves the shipped binary's own DSN chain and

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -103,6 +104,7 @@ func TestComputeRetrain(t *testing.T) {
 		"retrainEnabled":  false,
 		"grafanaUrl":      "http://from-json:3000",
 		"retrainTimezone": "Europe/Moscow",
+		"snapshotTtl":     "48h",
 	})
 	for _, tc := range []struct {
 		name     string
@@ -116,6 +118,7 @@ func TestComputeRetrain(t *testing.T) {
 			want: retrainConfig{
 				Enabled: true, Tick: defaultRetrainTick, Lease: defaultRetrainLease,
 				Cron: defaultRetrainCron, Timezone: "", GrafanaURL: defaultGrafanaURL,
+				SnapshotTTL: defaultSnapshotTTL,
 			},
 		},
 		{
@@ -127,12 +130,14 @@ func TestComputeRetrain(t *testing.T) {
 				"FORECAST_RETRAIN_CRON":                   "*/2 * * * *",
 				"FORECAST_GRAFANA_URL":                    "http://from-env:3000",
 				"FORECAST_GRAFANA_TOKEN":                  "env-token",
+				"FORECAST_SNAPSHOT_TTL":                   "24h",
 				store.PluginEnvPrefixApp + "RETRAIN_CRON": "*/30 * * * *",
 			},
 			settings: backend.AppInstanceSettings{JSONData: jsonAll},
 			want: retrainConfig{
 				Enabled: false, Tick: 15 * time.Second, Lease: 90 * time.Second,
 				Cron: "*/2 * * * *", Timezone: "Europe/Moscow", GrafanaURL: "http://from-env:3000", Token: "env-token",
+				SnapshotTTL: 24 * time.Hour,
 			},
 		},
 		{
@@ -145,6 +150,7 @@ func TestComputeRetrain(t *testing.T) {
 			want: retrainConfig{
 				Enabled: true, Tick: 10 * time.Second, Lease: defaultRetrainLease,
 				Cron: "*/20 * * * *", GrafanaURL: "http://from-ini:3000",
+				SnapshotTTL: defaultSnapshotTTL,
 			},
 		},
 		{
@@ -153,6 +159,7 @@ func TestComputeRetrain(t *testing.T) {
 			want: retrainConfig{
 				Enabled: false, Tick: 45 * time.Second, Lease: 2 * time.Minute,
 				Cron: "*/10 * * * *", Timezone: "Europe/Moscow", GrafanaURL: "http://from-json:3000", Token: "secret",
+				SnapshotTTL: 48 * time.Hour,
 			},
 		},
 		{
@@ -160,10 +167,13 @@ func TestComputeRetrain(t *testing.T) {
 			env: map[string]string{
 				"FORECAST_RETRAIN_TICK":  "-5s",
 				"FORECAST_RETRAIN_LEASE": "not-a-duration",
+				// A window too short to trust is refused like the other bad values.
+				"FORECAST_SNAPSHOT_TTL": "30m",
 			},
 			want: retrainConfig{
 				Enabled: true, Tick: defaultRetrainTick, Lease: defaultRetrainLease,
 				Cron: defaultRetrainCron, GrafanaURL: defaultGrafanaURL,
+				SnapshotTTL: defaultSnapshotTTL,
 			},
 		},
 	} {
@@ -1069,6 +1079,91 @@ func TestAuthGuardStopsOnlyOnConsecutiveRefusals(t *testing.T) {
 			}
 			if stopped != tc.want {
 				t.Fatalf("stopped=%v want %v after %d ticks", stopped, tc.want, len(tc.ticks))
+			}
+		})
+	}
+}
+
+// TestTickFromErr pins what one attempt proves. Only a reply from Grafana proves
+// anything: 401/403 is a refusal, and every other reply — including a 500 or an
+// undecodable body — proves the request got past the wall. A transport failure
+// arrives as a bare *url.Error with no response, so it must not reset the refusal
+// count (a wrong FORECAST_GRAFANA_URL would look like working credentials) nor
+// advance it (a network blip would eventually disable a healthy scheduler).
+func TestTickFromErr(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want tickResult
+	}{
+		{
+			name: "an auth refusal is a refusal",
+			err:  fmt.Errorf("%w: status 401: Unauthorized", errGrafanaUnauthorized),
+			want: tickResult{denied: true},
+		},
+		{
+			name: "another status proves the request reached Grafana",
+			err:  errors.New("forecast: /api/ds/query status 500: internal error"),
+			want: tickResult{fetched: true},
+		},
+		{
+			name: "a dial failure proves nothing",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "http://127.0.0.1:3999/api/ds/query",
+				Err: errors.New("dial tcp 127.0.0.1:3999: connect: connection refused"),
+			},
+			want: tickResult{},
+		},
+		{
+			name: "a wrapped transport failure proves nothing either",
+			err: fmt.Errorf("forecast: fetch frames: %w", &url.Error{
+				Op:  "Post",
+				URL: "https://grafana.example.com/api/ds/query",
+				Err: errors.New("tls: failed to verify certificate"),
+			}),
+			want: tickResult{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tickFromErr(tc.err); got != tc.want {
+				t.Fatalf("tickFromErr(%v)=%+v want %+v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseSnapshotTTL: 0 is the switch that turns the sweep off, so unlike the
+// other duration settings it is never replaced by the default; a window below the
+// floor is refused so a mistyped value cannot start collecting live models.
+func TestParseSnapshotTTL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "absent keeps the default", in: "", want: defaultSnapshotTTL},
+		{name: "explicit window", in: "48h", want: 48 * time.Hour},
+		{name: "zero disables the sweep", in: "0", want: 0},
+		{name: "the floor is allowed", in: "1h", want: time.Hour},
+		{name: "below the floor is refused", in: "30m", wantErr: true},
+		{name: "nonsense is refused", in: "daily", wantErr: true},
+		{name: "negative is refused", in: "-72h", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSnapshotTTL(tc.in, defaultSnapshotTTL)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want an error, got %s", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("ttl=%s want %s", got, tc.want)
 			}
 		})
 	}

@@ -304,7 +304,13 @@ func (a *App) recordPanelSchedule(ctx context.Context, orgID int64, in ForecastR
 	// schedule an admin turned off. One row is read by key: listing the table would
 	// transfer and decode every worker baseline row to find it.
 	if row, ok, err := a.sched.Row(ctx, orgID, scopePanel, in.CacheKey); err != nil {
+		// A read this call could not complete is no licence to write the deployment
+		// defaults: an existing row's cron and enable state live only in that row,
+		// so falling through would silently re-enable a schedule an admin disabled
+		// and reset when it fires. The snapshot is already stored, so the fit the
+		// user is waiting on stands regardless.
 		log.DefaultLogger.Warn("schedule row", "err", err.Error())
+		return
 	} else if ok {
 		cronSpec, timezone, enabled = row.Cron, row.Timezone, row.Enabled
 	}

@@ -141,7 +141,19 @@ The schema is versioned, a pipeline can prepare it before Grafana starts, and ev
 - **PostgreSQL >= 13** (`gen_random_uuid()` is core from 13; both environments in this repo are 17); a ledger version newer than the binary is a warning, never an error
 - **Config**: no new setting. The migrator reads `FORECAST_STORE_*` / `GF_PLUGIN_*` exactly as the plugin does, and `--dsn` is a CLI flag only
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13 non-goals
+## v14 must-have
+
+A schedule row does not own a snapshot, and nothing may keep a model whose metric stopped being published.
+
+- **A snapshot is not owned by its row**: deleting a `panel` row leaves the model in place, and the next tick gives it a row back with the deployment default cron (a re-created row carries no `spec`, so the scheduler cannot claim it until a panel load merges its identity and a fit writes the spec). "Delete the schedule" therefore never silently costs a retrain's work
+- **Retention runs on the retrain ticker** (`FORECAST_SNAPSHOT_TTL`, default `72h` — three daily cycles —, `0` disables it, a value below `1h` is refused and the default kept), so `FORECAST_RETRAIN_ENABLED=false` turns retention off with the scheduler and no second process or cron is introduced. One transaction per tick, three statements in `pkg/plugin/retention.go`:
+  - a snapshot untouched for the window is deleted: neither a scheduled retrain nor a browser fit refreshed it, so the metric stopped being published
+  - a row idle for the whole window (`next_run_at` and `last_run_at` both older, or no `last_run_at` at all) with no snapshot behind it is deleted. That is also the rule for a `baseline` row, whose snapshot lives in the worker's own schema. A *failed* retrain keeps a recent `last_run_at` (the owner-guarded finish writes it), so a transient Druid or Grafana outage is never mistaken for a dead metric — and an admin's cron on a live panel whose snapshot is only ever refreshed by browser fits survives, because that snapshot is fresh
+  - a snapshot with no row (an admin deleted it, or an earlier release never wrote one) gets a `panel` row back with the deployment default cron, which is why the reconcile can never resurrect a claimable-but-unfetchable row
+- **Explicit removal**: `DELETE /schedules?scope=&key=&drop=row|model`. The default `row` keeps v12's behaviour (the row only, the model stays); `model` also deletes the snapshot and every row for that key, superseded siblings included, so the tick's reconcile cannot resurrect what a user removed. A `baseline` key's snapshot is not this process's to delete: the response says so, and the worker's own sweep collects it
+- **The worker collects its own**: `baselines.snapshots` is written only by `timeseries-baselines`, so that repo sweeps it (`BASELINE_SNAPSHOT_TTL`, the same default and the same "nothing refreshed it and its row is idle" rule). This process never reads or writes that table
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14 non-goals
 
 Do not add these without first updating this document:
 
@@ -159,6 +171,7 @@ Do not add these without first updating this document:
 - Shipping Grafana alert rules, contact points, or a job queue
 - A second migration tool (Flyway, goose, golang-migrate) or any schema-diff ORM in front of these files
 - An integer surrogate key on any table this plugin owns, and a Go-side uuid generator (the database's `gen_random_uuid()` is the only one)
+- Retention outside the retrain ticker: a second scheduler, a Grafana-side cron, a job queue, a separate collector process, or a table the worker owns. Deleting a snapshot is not a reason to stop a query either — the overlay's `needTrain` path already answers a missing snapshot
 
 ## Quality bar
 
@@ -172,4 +185,6 @@ Do not add these without first updating this document:
 - A schedule row belongs to one org: `forecast.retrain` keeps `(scope, org_id, key)` unique, `0002_retrain.sql` rewrites an older table to it in place, and a table left on the old key fails the schedule store instead of sharing rows between orgs
 - The scheduler claims and retrains only the org its Grafana credential belongs to; another org's row stays due for that org's own overlay load
 - Every primary key this plugin owns is a uuid (`gen_random_uuid()`), the natural key beside it is `UNIQUE`, and an applied migration file is never edited
+- Retention never loses a live model: a snapshot is collected only when nothing refreshed it within `FORECAST_SNAPSHOT_TTL`, and a row only when it is idle by its own clocks and has no snapshot behind it. `0` disables the sweep and a window below `1h` is refused rather than obeyed
+- A deleted schedule row does not delete the model: the sweep re-creates the row with the deployment default, and `drop=model` is the only way a caller removes the snapshot (a `baseline` key's snapshot belongs to the worker and is reported as such)
 - GitHub Actions on `main` runs `gofmt` over `./pkg ./cmd` and `Magefile.go`, `go test -race ./pkg/... ./cmd/...`, the linux backend and migrator builds, the migration CLI against the service Postgres, and frontend lint/typecheck/jest/webpack

@@ -54,6 +54,16 @@ export function deleteSchedule(scope: string, key: string): Promise<unknown> {
   return getBackendSrv().delete(`${SCHEDULE_RESOURCE}?${query}`);
 }
 
+/**
+ * `drop=model` removes the stored model too, not only its schedule row. For a baseline key
+ * the model lives in the baselines worker's schema, so the backend answers with a `note`
+ * saying the worker collects it instead.
+ */
+export function deleteScheduleModel(scope: string, key: string): Promise<{ note?: string }> {
+  const query = `scope=${encodeURIComponent(scope)}&key=${encodeURIComponent(key)}&drop=model`;
+  return getBackendSrv().delete(`${SCHEDULE_RESOURCE}?${query}`);
+}
+
 export function postScheduleDefault(def: { cron: string; timezone: string }): Promise<unknown> {
   return getBackendSrv().post(SCHEDULE_DEFAULT_RESOURCE, def);
 }

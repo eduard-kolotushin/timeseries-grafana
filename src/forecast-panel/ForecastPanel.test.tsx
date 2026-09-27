@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, render, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import {
   DataFrame,
   dateTime,
@@ -36,7 +36,8 @@ jest.mock('./trainQuery', () => ({
 jest.mock('@grafana/ui', () => ({
   useTheme2: () => require('@grafana/data').createTheme(),
   Alert: () => null,
-  Button: () => null,
+  Button: ({ children }: { children?: React.ReactNode }) =>
+    require('react').createElement('button', { type: 'button' }, children),
   TooltipPlugin: () => null,
   TimeSeries: ({ frames }: { frames: DataFrame[] }) => {
     mockDrawn.push(frames);
@@ -89,7 +90,11 @@ function historyFrame(range: TimeRange, name: string): DataFrame {
   return frame;
 }
 
-function props(range: TimeRange, series: DataFrame[]): PanelProps<ForecastOptions> {
+function props(
+  range: TimeRange,
+  series: DataFrame[],
+  overrides: Partial<ForecastOptions> = {}
+): PanelProps<ForecastOptions> {
   const request: DataQueryRequest = {
     requestId: 'r1',
     interval: '1m',
@@ -108,7 +113,7 @@ function props(range: TimeRange, series: DataFrame[]): PanelProps<ForecastOption
     data,
     timeRange: range,
     timeZone: 'utc',
-    options,
+    options: { ...options, ...overrides },
     transparent: false,
     width: 400,
     height: 300,
@@ -183,5 +188,45 @@ describe('ForecastPanel frames', () => {
       view.rerender(<ForecastPanel {...props(rangeA, [historyFrame(rangeA, 'cpu-a')])} />);
     });
     expect(drawnFieldNames()).toEqual(['cpu-a', 'cpu-a (forecast)']);
+  });
+
+  it('links the interval bands under the forecast and hides them from the legend', async () => {
+    mockPost.mockReturnValueOnce(pendingPost());
+    render(<ForecastPanel {...props(rangeA, [historyFrame(rangeA, 'cpu-a')], { showInterval: true })} />);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    settle?.({ times: [rangeA.to.valueOf() + 60_000], values: [42], lower: [40], upper: [44] });
+    await waitFor(() => expect(drawn()).toHaveLength(2));
+
+    const forecast = drawn()[1];
+    expect(forecast.fields.map((field) => field.name)).toEqual([
+      'Time',
+      'cpu-a (forecast)',
+      'cpu-a (forecast) lower',
+      'cpu-a (forecast) upper',
+    ]);
+    const [lo, hi] = forecast.fields.slice(2).map((field) => field.config.custom!);
+    // The upper band fills down to the lower one, and neither is a line of its own:
+    // they describe the forecast's uncertainty, so they stay out of legend and tooltip.
+    expect(hi.fillBelowTo).toBe('cpu-a (forecast) lower');
+    expect(hi.fillOpacity).toBe(20);
+    expect(lo.fillOpacity).toBe(0);
+    expect(lo.hideFrom).toEqual({ legend: true, tooltip: true, viz: false });
+    expect(hi.hideFrom).toEqual({ legend: true, tooltip: true, viz: false });
+  });
+
+  it('draws the forecast alone when the reply carries no interval', async () => {
+    mockPost.mockReturnValueOnce(pendingPost());
+    render(<ForecastPanel {...props(rangeA, [historyFrame(rangeA, 'cpu-a')])} />);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    settle?.({ times: [rangeA.to.valueOf() + 60_000], values: [42] });
+    await waitFor(() => expect(drawnFieldNames()).toEqual(['cpu-a', 'cpu-a (forecast)']));
+    expect(drawn()[1].fields).toHaveLength(2);
+  });
+
+  it('offers Retrain when there is nothing to draw', async () => {
+    render(<ForecastPanel {...props(rangeA, [])} />);
+    // The empty state is Grafana's own view plus the reason; the action must still be there.
+    expect(await screen.findByRole('button', { name: 'Retrain' })).toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
   });
 });

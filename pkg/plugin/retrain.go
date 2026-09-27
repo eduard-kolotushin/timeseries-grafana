@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -28,6 +30,15 @@ const (
 	defaultRetrainTick    = 30 * time.Second
 	defaultRetrainCron    = "0 3 * * *"
 	defaultGrafanaURL     = "http://127.0.0.1:3000"
+
+	// defaultSnapshotTTL is the retention window for fitted snapshots: three daily
+	// retrain cycles, so a healthy metric is never collected between two of them.
+	// FORECAST_SNAPSHOT_TTL overrides it; 0 turns the sweep off.
+	defaultSnapshotTTL = 72 * time.Hour
+	// snapshotTTLFloor is the shortest window an operator may configure. Below it
+	// the window would be shorter than the cadence it is measured against, so the
+	// setting is refused and the default kept rather than obeyed.
+	snapshotTTLFloor = time.Hour
 
 	// retrainClaimBatch bounds one tick's work: each claimed row costs one
 	// datasource query plus a fit, and the compute limiter is the tighter bound
@@ -74,6 +85,9 @@ type retrainConfig struct {
 	Timezone   string
 	GrafanaURL string
 	Token      string
+	// SnapshotTTL is how long a fitted snapshot survives with nothing refreshing
+	// it. Zero turns the sweep off; the default is three retrain cycles.
+	SnapshotTTL time.Duration
 }
 
 func computeRetrain(ctx context.Context, settings backend.AppInstanceSettings) retrainConfig {
@@ -98,15 +112,44 @@ func computeRetrain(ctx context.Context, settings backend.AppInstanceSettings) r
 	if url == "" {
 		url = defaultGrafanaURL
 	}
-	return retrainConfig{
-		Enabled:    parseBool(look.Get("FORECAST_RETRAIN_ENABLED", "RETRAIN_ENABLED", "retrain_enabled", "retrainEnabled"), defaultRetrainEnabled),
-		Tick:       parseDuration(look.Get("FORECAST_RETRAIN_TICK", "RETRAIN_TICK", "retrain_tick", "retrainTick"), defaultRetrainTick),
-		Lease:      parseDuration(look.Get("FORECAST_RETRAIN_LEASE", "RETRAIN_LEASE", "retrain_lease", "retrainLease"), defaultRetrainLease),
-		Cron:       cronSpec,
-		Timezone:   jsonField(jd, "retrainTimezone"),
-		GrafanaURL: url,
-		Token:      token,
+	snapshotTTL, err := parseSnapshotTTL(look.Get("FORECAST_SNAPSHOT_TTL", "SNAPSHOT_TTL", "snapshot_ttl", "snapshotTtl"), defaultSnapshotTTL)
+	if err != nil {
+		// A window too short to trust is refused, not obeyed: obeying it would start
+		// collecting live models, and a typo must not be able to do that silently.
+		slog.Warn("forecast: ignoring the configured snapshot retention window", "err", err.Error())
+		snapshotTTL = defaultSnapshotTTL
 	}
+	return retrainConfig{
+		Enabled:     parseBool(look.Get("FORECAST_RETRAIN_ENABLED", "RETRAIN_ENABLED", "retrain_enabled", "retrainEnabled"), defaultRetrainEnabled),
+		Tick:        parseDuration(look.Get("FORECAST_RETRAIN_TICK", "RETRAIN_TICK", "retrain_tick", "retrainTick"), defaultRetrainTick),
+		Lease:       parseDuration(look.Get("FORECAST_RETRAIN_LEASE", "RETRAIN_LEASE", "retrain_lease", "retrainLease"), defaultRetrainLease),
+		Cron:        cronSpec,
+		Timezone:    jsonField(jd, "retrainTimezone"),
+		GrafanaURL:  url,
+		Token:       token,
+		SnapshotTTL: snapshotTTL,
+	}
+}
+
+// parseSnapshotTTL reads the retention window. Unlike parseDuration, 0 is a value
+// and not a typo — it is how an operator switches the sweep off — and a window in
+// (0, snapshotTTLFloor) is refused instead of obeyed.
+func parseSnapshotTTL(s string, def time.Duration) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("forecast: snapshot ttl %q: %w", s, err)
+	}
+	switch {
+	case d == 0:
+		return 0, nil
+	case d < snapshotTTLFloor:
+		return 0, fmt.Errorf("forecast: snapshot ttl %s is below the %s minimum (0 disables the sweep)", d, snapshotTTLFloor)
+	}
+	return d, nil
 }
 
 // parseBool keeps the default for anything it cannot read, so a typo in
@@ -707,11 +750,19 @@ func (r tickResult) or(o tickResult) tickResult {
 }
 
 // tickFromErr classifies one retrain attempt for the ticker. Only an auth
-// refusal means the scheduler cannot work at all; every other outcome (including
-// a non-auth fetch error) proves the request reached Grafana.
+// refusal means the scheduler cannot work at all; every other outcome that came
+// back from Grafana (including a non-auth fetch error) proves the request reached
+// it. A transport failure proves neither: a dial, DNS or TLS error arrives as a
+// bare *url.Error with no response at all, so it must not reset the refusal count
+// (a wrong FORECAST_GRAFANA_URL would look like working credentials) nor advance
+// it (a network blip would eventually disable a healthy scheduler).
 func tickFromErr(err error) tickResult {
 	if errors.Is(err, errGrafanaUnauthorized) {
 		return tickResult{denied: true}
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return tickResult{}
 	}
 	return tickResult{fetched: true}
 }
@@ -771,6 +822,9 @@ func (a *App) runScheduler(ctx context.Context) {
 // lease that expired while a row was being retrained cannot release the claim a
 // newer owner holds.
 func (a *App) retrainDue(ctx context.Context) tickResult {
+	// Retention runs first and on every tick: it is local database work, so it still
+	// happens on a tick whose Grafana lookup fails.
+	a.sweepRetention(ctx)
 	owner := retrainOwner()
 	// One credential, one org: Grafana resolves the stored queries' datasourceUids
 	// inside the org the credential belongs to, so a claim that reached another

@@ -45,15 +45,19 @@ function datasourceUids(targets: unknown[]): string[] {
     if (!t || typeof t !== 'object') {
       continue;
     }
-    const ds = (t as { datasource?: { uid?: string } }).datasource;
-    if (ds?.uid) {
-      uids.add(ds.uid);
+    const ds = (t as { datasource?: unknown }).datasource;
+    const uid = datasourceUid(ds);
+    if (uid) {
+      uids.add(uid);
     }
   }
   return [...uids].sort();
 }
 
 function datasourceUid(ds: unknown): string {
+  if (typeof ds === 'string') {
+    return ds;
+  }
   if (!ds || typeof ds !== 'object') {
     return '';
   }

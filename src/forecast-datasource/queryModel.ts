@@ -66,21 +66,37 @@ export function innerSourceQuery(query: ForecastDataQuery): DataQuery {
   return { ...inner, refId } as DataQuery;
 }
 
+/**
+ * Replace sourceTargets with the given inner queries, all under one datasource. An array
+ * (not a single element) because the overlay fingerprints every visible metric target, so
+ * a two-target panel's key is only reachable when this holds both.
+ */
 export function withSourceTarget(
   query: ForecastDataQuery,
   ds: DataSourceRef,
-  inner: Record<string, unknown>
+  inners: Array<Record<string, unknown>>
 ): ForecastDataQuery {
   return {
     ...query,
-    sourceTargets: [{ ...inner, datasource: { uid: ds.uid, type: ds.type } }],
+    sourceTargets: inners.map((inner) => ({ ...inner, datasource: { uid: ds.uid, type: ds.type } })),
   };
 }
 
-/** Copy sibling A's datasource and inner query into sourceTargets. Does not copy model, train range, or series name. */
-export function copySourceFromSibling(query: ForecastDataQuery, sibling: DataQuery): ForecastDataQuery {
-  const ds = sibling.datasource;
-  const uid = typeof ds === 'string' ? ds : ds?.uid;
-  const type = typeof ds === 'string' ? undefined : ds?.type;
-  return withSourceTarget(query, { uid, type }, sibling as unknown as Record<string, unknown>);
+/**
+ * Copy the panel's metric siblings into sourceTargets. The overlay fingerprints every
+ * visible metric target, so the alerting query's key can only match when this holds them
+ * all in the same order, each under its own datasource. Does not copy model, train range,
+ * or series name.
+ */
+export function copySourceFromSibling(query: ForecastDataQuery, siblings: DataQuery[]): ForecastDataQuery {
+  return {
+    ...query,
+    sourceTargets: siblings.map((sibling) => ({
+      ...(sibling as unknown as Record<string, unknown>),
+      datasource:
+        typeof sibling.datasource === 'string'
+          ? { uid: sibling.datasource }
+          : { uid: sibling.datasource?.uid, type: sibling.datasource?.type },
+    })),
+  };
 }

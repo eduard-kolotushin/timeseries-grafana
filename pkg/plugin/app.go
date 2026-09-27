@@ -87,8 +87,25 @@ func (a *App) bodyLimit() int64 {
 	return maxForecastBodyBytes
 }
 
-// CheckHealth handles health checks sent from Grafana to the plugin.
-func (a *App) CheckHealth(_ context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
+// CheckHealth handles health checks sent from Grafana to the plugin. Every path
+// through this app either reads a snapshot or writes one, so the probe answers for
+// the store instead of unconditionally saying ok: a deployment with no DSN is
+// healthy by design (the overlay still trains), but one whose store is
+// unreachable — or whose schema the migrations could not provision — is not, and
+// used to be indistinguishable from a working plugin.
+func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
+	if a.store == nil {
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusOk,
+			Message: "ok: forecast store is not configured",
+		}, nil
+	}
+	if err := a.store.Ping(ctx); err != nil {
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: err.Error(),
+		}, nil
+	}
 	return &backend.CheckHealthResult{
 		Status:  backend.HealthStatusOk,
 		Message: "ok",

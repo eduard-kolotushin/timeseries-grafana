@@ -35,6 +35,39 @@ import { ForecastOptions, ForecastResponse } from './types';
 
 interface Props extends PanelProps<ForecastOptions> {}
 
+/**
+ * The `Using saved model` chip and the Retrain control. Rendered by both returns below so
+ * the Retrain action is available even when the panel has nothing to draw.
+ */
+function PanelHeader({
+  usedSaved,
+  error,
+  onRetrain,
+}: {
+  usedSaved: boolean;
+  error: string | null;
+  onRetrain: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 4,
+        right: 8,
+        zIndex: 1,
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+      }}
+    >
+      {usedSaved && !error && <span style={{ fontSize: 12, opacity: 0.8 }}>Using saved model</span>}
+      <Button size="sm" variant="secondary" fill="outline" type="button" onClick={onRetrain}>
+        Retrain
+      </Button>
+    </div>
+  );
+}
+
 export const ForecastPanel: React.FC<Props> = ({
   options,
   data,
@@ -211,7 +244,12 @@ export const ForecastPanel: React.FC<Props> = ({
       });
     }
 
-    load().finally(() => loadGate.current.finish(ac));
+    // A throw in `load`'s synchronous prologue (window resolution, train-reject, extraction)
+    // would otherwise be an unhandled rejection; the panel's own error path reports what it
+    // can, and the inflight slot is released either way.
+    load()
+      .catch(() => undefined)
+      .finally(() => loadGate.current.finish(ac));
     return () => {
       cancelled = true;
       // The click was not honored yet. A superseded load hands its retrain to the load
@@ -239,17 +277,23 @@ export const ForecastPanel: React.FC<Props> = ({
     [load, queryKey, graphableFrames, fieldConfig, replaceVariables, theme, timeZone]
   );
 
+  const retrainNow = () => {
+    queueRetrain(key);
+    setRetrainNonce((n) => n + 1);
+  };
+
   // Nothing to draw: Grafana's own empty state, with the reason the panel resolved above it.
   if (plotFrames.length === 0) {
     return (
-      <>
+      <div style={{ width, height, position: 'relative' }}>
+        <PanelHeader usedSaved={usedSaved} error={error} onRetrain={retrainNow} />
         {error && (
           <Alert title="Forecast failed" severity="error">
             {error}
           </Alert>
         )}
         <PanelDataErrorView fieldConfig={fieldConfig} panelId={id} data={data} needsTimeField needsNumberField />
-      </>
+      </div>
     );
   }
 
@@ -270,33 +314,7 @@ export const ForecastPanel: React.FC<Props> = ({
 
   return (
     <div style={{ width, height, position: 'relative' }}>
-      <div
-        style={{
-          position: 'absolute',
-          top: 4,
-          right: 8,
-          zIndex: 1,
-          display: 'flex',
-          gap: 8,
-          alignItems: 'center',
-        }}
-      >
-        {usedSaved && !error && (
-          <span style={{ fontSize: 12, opacity: 0.8 }}>Using saved model</span>
-        )}
-        <Button
-          size="sm"
-          variant="secondary"
-          fill="outline"
-          type="button"
-          onClick={() => {
-            queueRetrain(key);
-            setRetrainNonce((n) => n + 1);
-          }}
-        >
-          Retrain
-        </Button>
-      </div>
+      <PanelHeader usedSaved={usedSaved} error={error} onRetrain={retrainNow} />
       {error && (
         <Alert title="Forecast failed" severity="error">
           {error}

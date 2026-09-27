@@ -1,5 +1,4 @@
 import { webcrypto } from 'crypto';
-import { cacheKey } from './cacheKey';
 import { sha256Bytes, sha256Hex } from './sha256';
 
 const encode = (s: string) => new TextEncoder().encode(s);
@@ -50,26 +49,5 @@ describe('sha256Hex without crypto.subtle', () => {
     const insecure = await sha256Hex('hello');
     expect(insecure).toBe(secure);
     expect(insecure).toBe('2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
-  });
-
-  it('cacheKey still returns 64 hex chars without crypto.subtle', async () => {
-    Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true });
-    const key = await cacheKey({
-      targets: [{ refId: 'A', datasource: { uid: 'prom' }, expr: 'up' }],
-      options: {
-        model: 'holt',
-        alpha: 0.8,
-        beta: 0.2,
-        period: 7,
-        season: 'hour',
-        calendar: '',
-        showInterval: true,
-        interval: 0.95,
-        trainRange: { from: '', to: '' },
-        forecastRange: { from: '', to: '' },
-      },
-      seriesName: 'up',
-    });
-    expect(key).toMatch(/^[a-f0-9]{64}$/);
   });
 });

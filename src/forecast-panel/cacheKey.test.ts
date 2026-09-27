@@ -191,6 +191,28 @@ describe('cacheKey', () => {
     expect(key).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it('treats a legacy string datasource ref as an identity', async () => {
+    const stringRef = await cacheKey({
+      targets: [{ refId: 'A', datasource: 'prom', expr: 'up' }],
+      options: baseOptions,
+      seriesName: 'up',
+    });
+    const otherRef = await cacheKey({
+      targets: [{ refId: 'A', datasource: 'loki', expr: 'up' }],
+      options: baseOptions,
+      seriesName: 'up',
+    });
+    expect(stringRef).not.toBe(otherRef);
+    // Reading the string as a uid makes it the same identity as its object form.
+    expect(stringRef).toBe(
+      await cacheKey({
+        targets: [{ refId: 'A', datasource: { uid: 'prom' }, expr: 'up' }],
+        options: baseOptions,
+        seriesName: 'up',
+      })
+    );
+  });
+
   it('does not change when the overlay sends a trainSource', async () => {
     const base = {
       targets: [{ refId: 'A', datasource: { uid: 'druid' }, builder: { queryType: 'sql', query: 'SELECT 1' } }],

@@ -46,6 +46,26 @@ SELECT EXISTS (
 // the table still keys on (scope, key), so the process cannot store per-org rows.
 var errScheduleKey = errors.New("forecast store: forecast.retrain has no per-org unique key; it needs UNIQUE (scope, org_id, key), which the table owner must apply")
 
+// snapshotKeySQL is the same catalog probe for forecast.snapshots: the
+// (org_id, cache_key) uniqueness Put's ON CONFLICT target needs, or the primary
+// key of a table that predates the uuid surrogate. A readable but un-keyed table
+// would otherwise latch ready and answer every Put with SQLSTATE 42P10, an error
+// that names neither the migration nor the missing constraint.
+const snapshotKeySQL = `
+SELECT EXISTS (
+  SELECT 1
+  FROM pg_constraint c
+  JOIN pg_class t ON t.oid = c.conrelid
+  JOIN pg_namespace n ON n.oid = t.relnamespace
+  WHERE n.nspname = 'forecast' AND t.relname = 'snapshots' AND c.contype IN ('p', 'u')
+    AND array_length(c.conkey, 1) = 2
+    AND c.conkey @> ARRAY[(SELECT a.attnum FROM pg_attribute a WHERE a.attrelid = t.oid AND a.attname = 'cache_key')]
+)`
+
+// errSnapshotKey is the snapshot table's upgrade error: the migrations ran, but
+// the table still has no per-org key, so no snapshot can be stored.
+var errSnapshotKey = errors.New("forecast store: forecast.snapshots has no per-org unique key; it needs UNIQUE (org_id, cache_key), which the table owner must apply")
+
 // ensureRetryAfter throttles reconnect attempts while Postgres is unreachable so
 // a burst of overlay loads does not turn into a burst of failed dials.
 const ensureRetryAfter = 5 * time.Second
@@ -65,7 +85,13 @@ type pgxPool interface {
 // the migrations provision both, so a runtime user that may not CREATE can be missing
 // forecast.retrain while forecast.snapshots is fine — and that schedule failure
 // must not change the answer a snapshot call gets.
+//
+// The lock is per table for the same reason. store.Apply takes the migration
+// advisory lock, so one probe's attempt can block for as long as a concurrent
+// migrator holds it; a process-wide lock would queue every snapshot Get/Put behind
+// a schedule table that a burst of probes is retrying.
 type storeProbe struct {
+	mu      sync.Mutex
 	ready   bool
 	err     error
 	attempt time.Time
@@ -74,7 +100,6 @@ type storeProbe struct {
 type postgresStore struct {
 	pool pgxPool
 
-	mu    sync.Mutex
 	snap  storeProbe
 	sched storeProbe
 	now   func() time.Time
@@ -87,11 +112,19 @@ func (s *postgresStore) Close() {
 	s.pool.Close()
 }
 
+// Ping reports whether the snapshot table is usable, provisioning it if this is
+// the first successful use: it goes through ensure (connect + schema), not the
+// pool's own ping, so a reachable database whose schema is missing is not
+// reported healthy.
+func (s *postgresStore) Ping(ctx context.Context) error { return s.ensure(ctx) }
+
 // ensure pings Postgres and creates the schema on first successful use. It is
 // retried on later calls (after ensureRetryAfter) instead of failing the store
-// permanently when the database is unavailable at plugin start.
+// permanently when the database is unavailable at plugin start. Like the schedule
+// table it requires the per-org key shape, because a snapshots table without it
+// accepts no write at all.
 func (s *postgresStore) ensure(ctx context.Context) error {
-	return s.ensureTable(ctx, &s.snap, `SELECT 1 FROM forecast.snapshots LIMIT 1`, "")
+	return s.ensureTable(ctx, &s.snap, `SELECT 1 FROM forecast.snapshots LIMIT 1`, snapshotKeySQL, errSnapshotKey)
 }
 
 // ensureSchedules is the same contract for the schedule table. Readiness is tracked per
@@ -101,16 +134,17 @@ func (s *postgresStore) ensure(ctx context.Context) error {
 // snapshot table it also requires the per-org key shape, because a schedule row shared
 // between two orgs is a correctness bug rather than a missing feature.
 func (s *postgresStore) ensureSchedules(ctx context.Context) error {
-	return s.ensureTable(ctx, &s.sched, `SELECT 1 FROM forecast.retrain LIMIT 1`, scheduleKeySQL)
+	return s.ensureTable(ctx, &s.sched, `SELECT 1 FROM forecast.retrain LIMIT 1`, scheduleKeySQL, errScheduleKey)
 }
 
 // ensureTable provisions one table and records its readiness. shapeSQL, when set,
 // must answer true or this store stays unusable for that table: the migrations may
 // have been refused by a runtime user without ALTER, and a table with the old key
-// is worse than no schedules at all.
-func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, readySQL, shapeSQL string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// is worse than no schedules at all. shapeErr is what the caller reports when the
+// shape is wrong, so the message names the table's own missing key.
+func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, readySQL, shapeSQL string, shapeErr error) error {
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
 	if probe.ready {
 		return nil
 	}
@@ -132,6 +166,9 @@ func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, read
 			probe.err = err
 			return probe.err
 		}
+		// The table is usable, but the migration was refused: without this line
+		// "it applied" and "it never applied" are indistinguishable from outside.
+		slog.Warn("forecast schema not applied", "err", err.Error())
 	} else {
 		if len(res.Applied) > 0 {
 			slog.Info("forecast schema migrated", "applied", res.Applied)
@@ -147,7 +184,7 @@ func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, read
 			return probe.err
 		}
 		if !ok {
-			probe.err = errScheduleKey
+			probe.err = shapeErr
 			return probe.err
 		}
 	}

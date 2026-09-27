@@ -136,7 +136,7 @@ describe('copySourceFromSibling', () => {
       trainRange: { from: 'now-21d', to: 'now' },
       sourceTargets: [],
     });
-    const next = copySourceFromSibling(q, sibling);
+    const next = copySourceFromSibling(q, [sibling]);
     expect(next.model).toBe('baseline');
     expect(next.season).toBe('minute-week');
     expect(next.seriesName).toBe('keep');
@@ -153,7 +153,7 @@ describe('copySourceFromSibling', () => {
   it('fingerprint matches overlay for the same A after copy', () => {
     const copied = copySourceFromSibling(
       query({ sourceTargets: [], seriesName: 'up', model: 'holt', trainRange: overlayOptions.trainRange }),
-      target
+      [target]
     );
     expect(fingerprintPayload(cacheKeyInputFromQuery(copied))).toEqual(
       fingerprintPayload({
@@ -161,6 +161,17 @@ describe('copySourceFromSibling', () => {
         options: overlayOptions,
         seriesName: 'up',
       })
+    );
+  });
+
+  it('fingerprints every metric sibling, so a two-target panel’s key is reachable', () => {
+    const a = { refId: 'A', datasource: { uid: 'prom', type: 'prometheus' }, expr: 'up' };
+    const c = { refId: 'C', datasource: { uid: 'prom', type: 'prometheus' }, expr: 'up + 1' };
+    const copied = copySourceFromSibling(query({ sourceTargets: [] }), [a, c]);
+    expect(copied.sourceTargets).toEqual([a, c]);
+    // The overlay fingerprints `[A, C]`; a single stored A could never equal it.
+    expect(fingerprintPayload(cacheKeyInputFromQuery(copied))).toEqual(
+      fingerprintPayload({ targets: [a, c], options: overlayOptions, seriesName: 'up' })
     );
   });
 });

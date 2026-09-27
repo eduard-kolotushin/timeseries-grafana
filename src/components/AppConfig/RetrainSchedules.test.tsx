@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ScheduleRow } from '../../forecast-panel/scheduleApi';
 import { testIds } from '../testIds';
 import RetrainSchedules from './RetrainSchedules';
@@ -187,6 +187,50 @@ describe('RetrainSchedules', () => {
     fireEvent.click(await screen.findByLabelText('panel/panelhash enabled'));
     await waitFor(() => expect(mockPut).toHaveBeenCalledTimes(1));
     expect(mockPut.mock.calls[0][1]).toEqual({ ...panelRow, enabled: false });
+  });
+
+  it('shows the enabled toggle at once and reverts it when the save rejects', async () => {
+    let rejectPut: ((e: unknown) => void) | undefined;
+    mockPut.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectPut = reject;
+        })
+    );
+    renderSchedules([panelRow]);
+    const enabledInput = () => screen.getByLabelText('panel/panelhash enabled') as HTMLInputElement;
+    await waitFor(() => expect(enabledInput().checked).toBe(true));
+
+    fireEvent.click(enabledInput());
+    // The choice is visible before the PUT answers.
+    expect(enabledInput().checked).toBe(false);
+
+    await act(async () => {
+      rejectPut?.({ status: 403, data: 'forecast: admin required\n' });
+    });
+    await waitFor(() => expect(enabledInput().checked).toBe(true));
+  });
+
+  it('deletes the stored model for a panel row', async () => {
+    mockDelete.mockResolvedValue({ message: 'ok' });
+    mockGet.mockResolvedValue([panelRow]);
+    render(<RetrainSchedules />);
+    await screen.findByLabelText('panel/panelhash cron');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete stored model' }));
+    await waitFor(() => expect(mockDelete).toHaveBeenCalledTimes(1));
+    expect(mockDelete.mock.calls[0][0]).toContain('scope=panel&key=panelhash&drop=model');
+  });
+
+  it('surfaces the note when a baseline model is removed by its worker', async () => {
+    mockDelete.mockResolvedValue({ message: 'ok', note: 'the worker collects that model' });
+    mockGet.mockResolvedValue([baselineRow]);
+    render(<RetrainSchedules />);
+    await screen.findByLabelText('baseline/baselinehash cron');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete stored model' }));
+    expect(await screen.findByText('the worker collects that model')).toBeInTheDocument();
+    expect(mockDelete.mock.calls[0][0]).toContain('scope=baseline&key=baselinehash&drop=model');
   });
 
   it('surfaces a 403 from a failed save', async () => {

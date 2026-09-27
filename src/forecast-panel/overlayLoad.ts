@@ -120,6 +120,8 @@ export async function loadOverlayForecasts(args: OverlayLoadArgs): Promise<Overl
   for (const points of need) {
     const fit = trainingForFit(points, trained);
     if (!fit) {
+      // The training frame has no series for this one; say so rather than draw it with no reason.
+      overlayError = overlayError ?? REASON_TRAIN_EMPTY;
       continue;
     }
     if (fit.times.length > MAX_TRAIN_POINTS || fit.values.length > MAX_TRAIN_POINTS) {

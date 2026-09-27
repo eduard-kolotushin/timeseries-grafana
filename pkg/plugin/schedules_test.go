@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -316,6 +317,273 @@ func schedulesApp(t *testing.T, sched ScheduleStore) *App {
 	return app
 }
 
+// TestScheduleDropParameter: `drop` says how far a delete goes. The default keeps
+// v12's contract (the row, not the model), an unknown value is refused before
+// anything is deleted, and a baseline key's model is not this process's to remove —
+// the row goes and the response says where the model lives.
+func TestScheduleDropParameter(t *testing.T) {
+	ctx := context.Background()
+	sched := newMemSchedules()
+	for _, key := range []string{"panel-a", "panel-b"} {
+		sched.seed(ScheduleRow{OrgID: 1, Scope: scopePanel, Key: key, Cron: "0 3 * * *", Timezone: "UTC", Enabled: true})
+	}
+	sched.seed(ScheduleRow{OrgID: 0, Scope: scopeBaseline, Key: "ready", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true})
+	app := schedulesApp(t, sched)
+
+	// The refusals come first, while both rows are still there: an invalid parameter
+	// must not delete anything on its way to a 400.
+	for _, tc := range []struct {
+		name string
+		path string
+		pCtx backend.PluginContext
+		want int
+	}{
+		{
+			name: "an unknown value is refused",
+			path: "schedules?scope=panel&key=panel-a&drop=everything",
+			pCtx: adminCtx(1),
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "a viewer cannot drop a model",
+			path: "schedules?scope=panel&key=panel-a&drop=model",
+			pCtx: viewerCtx(1),
+			want: http.StatusForbidden,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := callRoute(t, app, tc.pCtx, http.MethodDelete, tc.path, nil)
+			if status != tc.want {
+				t.Fatalf("status=%d want %d body=%s", status, tc.want, body)
+			}
+			if _, ok, err := sched.Row(ctx, 1, scopePanel, "panel-a"); err != nil || !ok {
+				t.Fatalf("a refused delete removed the row: ok=%v err=%v", ok, err)
+			}
+		})
+	}
+
+	// The default deletes the row and keeps the model: the model is what the panel's
+	// cacheKey resolves to, so stopping the unattended retrain must not throw it away.
+	status, body := callRoute(t, app, adminCtx(1), http.MethodDelete, "schedules?scope=panel&key=panel-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if _, ok, err := sched.Row(ctx, 1, scopePanel, "panel-a"); err != nil || ok {
+		t.Fatalf("the row survived: ok=%v err=%v", ok, err)
+	}
+	// `drop=row` is the same request spelled out.
+	status, body = callRoute(t, app, adminCtx(1), http.MethodDelete, "schedules?scope=panel&key=panel-b&drop=row", nil)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if _, ok, err := sched.Row(ctx, 1, scopePanel, "panel-b"); err != nil || ok {
+		t.Fatalf("the row survived: ok=%v err=%v", ok, err)
+	}
+
+	// A baseline key: the row goes, and the response says the model is the worker's.
+	status, body = callRoute(t, app, adminCtx(1), http.MethodDelete, "schedules?scope=baseline&key=ready&drop=model", nil)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if !strings.Contains(string(body), "baselines worker") {
+		t.Fatalf("the response does not say where the model is: %s", body)
+	}
+	if _, ok, err := sched.Row(ctx, 0, scopeBaseline, "ready"); err != nil || ok {
+		t.Fatalf("the baseline row survived: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestPostgresDropModelRoute is the model half of `drop=model` against a real
+// database: the snapshot and the row go together, so the tick's reconcile cannot
+// hand a row back to a model the caller removed — while the default still leaves
+// the model in place (v12's contract) and lets the reconcile restore the row.
+func TestPostgresDropModelRoute(t *testing.T) {
+	clearRetrainEnv(t)
+	clearStoreEnv(t)
+	ctx := context.Background()
+	s := scratchPostgresStore(t, "forecast_drop_model")
+	app, err := newApp(ctx, backend.AppInstanceSettings{}, s, s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	const orgID int64 = 14
+	key := strings.Repeat("a", 64)
+	seed := func() {
+		t.Helper()
+		putSnapshot(t, ctx, s, orgID, key)
+		if err := s.Upsert(ctx, orgID, ScheduleRow{
+			Scope: scopePanel, Key: key, Cron: "*/7 * * * *", Timezone: "UTC", Enabled: true,
+			Spec: json.RawMessage(`{"queries":[{"refId":"A"}]}`), NextRunAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seed()
+	status, body := callRoute(t, app, adminCtx(orgID), http.MethodDelete, "schedules?scope=panel&key="+key+"&drop=model", nil)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if _, ok, err := s.Get(ctx, orgID, key); err != nil || ok {
+		t.Fatalf("the model survived drop=model: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := s.Row(ctx, orgID, scopePanel, key); err != nil || ok {
+		t.Fatalf("the row survived drop=model: ok=%v err=%v", ok, err)
+	}
+	if res := sweep(t, ctx, s); res != (sweepResult{}) {
+		t.Fatalf("the sweep resurrected the removed model: %+v", res)
+	}
+
+	seed()
+	status, body = callRoute(t, app, adminCtx(orgID), http.MethodDelete, "schedules?scope=panel&key="+key, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if _, ok, err := s.Get(ctx, orgID, key); err != nil || !ok {
+		t.Fatalf("drop=row removed the model: ok=%v err=%v", ok, err)
+	}
+	if res := sweep(t, ctx, s); res.Recreated != 1 {
+		t.Fatalf("drop=row left the model orphaned: %+v", res)
+	}
+	row, ok, err := s.Row(ctx, orgID, scopePanel, key)
+	if err != nil || !ok {
+		t.Fatalf("the sweep did not give the row back: ok=%v err=%v", ok, err)
+	}
+	if len(row.Spec) != 0 || row.Cron != "0 3 * * *" {
+		t.Fatalf("the re-created row is not the unclaimable default: %+v", row)
+	}
+}
+
+// TestScheduleRoutesBodyCap: a schedule DTO is a few hundred bytes, so both routes
+// refuse a body above the cap — the same reason and status /forecast answers, on the
+// routes that carry a body of their own.
+func TestScheduleRoutesBodyCap(t *testing.T) {
+	app := schedulesApp(t, newMemSchedules())
+	body := []byte(`{"scope":"panel","key":"k","cron":"0 3 * * *","pad":"` +
+		strings.Repeat("x", maxScheduleBodyBytes) + `"}`)
+	for _, tc := range []struct {
+		name, method, path string
+	}{
+		{name: "PUT a schedule", method: http.MethodPut, path: "schedules"},
+		{name: "POST the default", method: http.MethodPost, path: "schedules/default"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, got := callRoute(t, app, adminCtx(1), tc.method, tc.path, body)
+			if status != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status=%d body=%s", status, got)
+			}
+			if !strings.Contains(string(got), errBodyTooLarge.Error()) {
+				t.Fatalf("body=%q want the cap's own reason", got)
+			}
+		})
+	}
+}
+
+// rowErrorSchedules fails only the single-row read, so a fit's fallback behaviour
+// can be exercised while the rest of the schedule store keeps working.
+type rowErrorSchedules struct {
+	ScheduleStore
+	err     error
+	upserts int
+}
+
+func (s *rowErrorSchedules) Row(context.Context, int64, string, string) (ScheduleRow, bool, error) {
+	return ScheduleRow{}, false, s.err
+}
+
+func (s *rowErrorSchedules) Upsert(ctx context.Context, orgID int64, row ScheduleRow) error {
+	s.upserts++
+	return s.ScheduleStore.Upsert(ctx, orgID, row)
+}
+
+// TestClampCellText: one cap covers every cell-sized string the schedule response
+// carries, counted in runes so a multi-byte field is not cut mid-character.
+func TestClampCellText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "short", in: "CPU", want: "CPU"},
+		{name: "exactly the cap", in: strings.Repeat("x", maxQuerySummary), want: strings.Repeat("x", maxQuerySummary)},
+		{name: "one over the cap", in: strings.Repeat("x", maxQuerySummary+1), want: strings.Repeat("x", maxQuerySummary-1) + "…"},
+		{name: "multi-byte counts in runes", in: strings.Repeat("ж", maxQuerySummary), want: strings.Repeat("ж", maxQuerySummary)},
+		{name: "multi-byte over the cap", in: strings.Repeat("ж", maxQuerySummary+1), want: strings.Repeat("ж", maxQuerySummary-1) + "…"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampCellText(tc.in)
+			if got != tc.want {
+				t.Fatalf("in=%q got=%q want=%q", tc.name, got, tc.want)
+			}
+			if n := len([]rune(got)); n > maxQuerySummary {
+				t.Fatalf("clamped to %d runes", n)
+			}
+		})
+	}
+}
+
+// TestForecastFitSurvivesAScheduleRowError: a fit that could not read its row must
+// not write the deployment defaults over it. An admin's cron and enable state
+// exist only in that row, so falling through would silently re-enable a schedule
+// an admin disabled and reset when it fires. The snapshot the user asked for is
+// stored either way, so the fit itself still reports ok.
+func TestForecastFitSurvivesAScheduleRowError(t *testing.T) {
+	clearRetrainEnv(t)
+	clearStoreEnv(t)
+	ctx := context.Background()
+	key := strings.Repeat("34", 32)
+	sched := newMemSchedules()
+	sched.seed(ScheduleRow{
+		OrgID: 5, Scope: scopePanel, Key: key, Cron: "*/2 * * * *", Timezone: "Europe/Moscow",
+		Enabled: false, Spec: json.RawMessage(`{"queries":[{"refId":"A"}]}`),
+	})
+	broken := &rowErrorSchedules{ScheduleStore: sched, err: errors.New("forecast store: connection reset by peer")}
+	snaps := newMemoryStore()
+	app, err := newApp(ctx, backend.AppInstanceSettings{}, snaps, broken, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	body, _ := json.Marshal(ForecastRequest{
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "naive", From: 4000, To: 5000, CacheKey: key,
+		TrainSource: &TrainSource{
+			DatasourceUID: "ds-uid", Queries: json.RawMessage(`[{"refId":"A"}]`),
+			From: 1, To: 2, SeriesName: "s",
+		},
+	})
+	var r mockCallResourceResponseSender
+	if err := app.CallResource(ctx, &backend.CallResourceRequest{
+		PluginContext: backend.PluginContext{OrgID: 5},
+		Method:        http.MethodPost,
+		Path:          "forecast",
+		Body:          body,
+	}, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.response.Status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", r.response.Status, r.response.Body)
+	}
+	if broken.upserts != 0 {
+		t.Fatalf("a failed schedule read rewrote the row (%d writes)", broken.upserts)
+	}
+	row, ok, err := sched.Row(ctx, 5, scopePanel, key)
+	if err != nil || !ok {
+		t.Fatalf("row: ok=%v err=%v", ok, err)
+	}
+	if row.Cron != "*/2 * * * *" || row.Timezone != "Europe/Moscow" || row.Enabled {
+		t.Fatalf("the fit rewrote the admin's row: %+v", row)
+	}
+	if _, ok, err := snaps.Get(ctx, 5, key); err != nil || !ok {
+		t.Fatalf("the fit was not stored: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestScheduleRoutesAdminOnly(t *testing.T) {
 	app := schedulesApp(t, newMemSchedules())
 	for _, tc := range []struct {
@@ -448,10 +716,17 @@ func TestScheduleListIncludesWorkerBaselineRows(t *testing.T) {
 // and it must never become a back door for the stored query objects.
 func TestScheduleListSourceSummary(t *testing.T) {
 	long := strings.Repeat("x", 300)
+	// capped is the expected clamp, spelled out rather than taken from the code
+	// under test (clampCellText has its own table).
+	capped := func(s string) string {
+		r := []rune(s)
+		return string(r[:maxQuerySummary-1]) + "…"
+	}
 	for _, tc := range []struct {
 		name     string
 		row      ScheduleRow
 		want     *scheduleSourceDTO
+		wantLast string
 		wantGone []string
 	}{
 		{
@@ -496,6 +771,22 @@ func TestScheduleListSourceSummary(t *testing.T) {
 				Spec: json.RawMessage(`{"querySummary":"` + long + `"}`)},
 			want: &scheduleSourceDTO{QuerySummary: strings.Repeat("x", maxQuerySummary-1) + "…"},
 		},
+		{
+			// Every cell-sized string of the spec is capped, not just the summary: a
+			// panel title can be as long as the client that stored it wants.
+			name: "a long panel title is capped",
+			row: ScheduleRow{OrgID: 1, Scope: scopePanel, Key: "panel-f", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+				Spec: json.RawMessage(`{"panelTitle":"` + long + `","seriesName":"up"}`)},
+			want: &scheduleSourceDTO{PanelTitle: capped(long), SeriesName: "up"},
+		},
+		{
+			// lastStatus is an error message, and an error message can embed a series
+			// name as long as its datasource allows: the response caps it too.
+			name: "a stored error message is capped",
+			row: ScheduleRow{OrgID: 1, Scope: scopePanel, Key: "panel-g", Cron: "0 3 * * *", Timezone: "UTC", Enabled: true,
+				LastStatus: "error: " + long},
+			wantLast: capped("error: " + long),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sched := newMemSchedules()
@@ -532,6 +823,13 @@ func TestScheduleListSourceSummary(t *testing.T) {
 			}
 			if got.HasSpec != (len(tc.row.Spec) > 0) {
 				t.Fatalf("hasSpec=%v spec=%s", got.HasSpec, tc.row.Spec)
+			}
+			wantLast := tc.wantLast
+			if wantLast == "" {
+				wantLast = tc.row.LastStatus
+			}
+			if got.LastStatus != wantLast {
+				t.Fatalf("lastStatus=%q want %q", got.LastStatus, wantLast)
 			}
 			for _, gone := range tc.wantGone {
 				if strings.Contains(string(body), gone) {

@@ -167,6 +167,28 @@ func TestRunAppliesAndReports(t *testing.T) {
 	}
 }
 
+// TestRunDSNFlagWins: --dsn is what a pipeline passes, so it must beat the ambient
+// env that configures the plugin — an unreachable env DSN must not be the one used.
+func TestRunDSNFlagWins(t *testing.T) {
+	_, dsn, cleanup := scratchDatabase(t, "migrate_cli_flag")
+	defer cleanup()
+	getenv := func(key string) string {
+		if key == "FORECAST_STORE_URL" {
+			return unreachable
+		}
+		return ""
+	}
+	code, stdout, stderr := runFor(getenv, "--dsn", dsn, "--timeout", "30s")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	for _, want := range []string{"applied 0001_snapshots", "applied 0002_retrain"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout %q lacks %q", stdout, want)
+		}
+	}
+}
+
 // scratchDatabase drops and recreates a database and returns the admin DSN, the
 // scratch DSN and a cleanup, so this test cannot race pkg/plugin's pg-gated tests
 // on the shared service database.

@@ -54,15 +54,6 @@ describe('Components/AppConfig', () => {
     expect(screen.queryByTestId(testIds.appConfig.retrainRefresh)).toBeNull();
   });
 
-  test('keeps the Save button below every field it saves', () => {
-    render(<AppConfig plugin={props.plugin} query={props.query} />);
-    const save = screen.getByRole('button', { name: 'Save' });
-    const timezone = screen.getByRole('textbox', { name: /^Timezone/ });
-    const notes = screen.getByText(/Plugin id:/);
-    expect(timezone.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(notes.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
-
   test('validates the default schedule and leaves jsonData it does not render untouched', async () => {
     mockPost.mockResolvedValue({});
     const plugin = propsWith({

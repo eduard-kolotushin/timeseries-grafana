@@ -10,8 +10,6 @@ export interface TrainTimeRange {
 
 export interface ForecastOptions {
   model: ForecastModel;
-  /** @deprecated Point-count horizon; ignored once `forecastRange` ships. */
-  horizon?: number;
   alpha: number;
   beta: number;
   period: number;

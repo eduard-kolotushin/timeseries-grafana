@@ -49,9 +49,14 @@ func connectStores(ctx context.Context, dsn string) (SnapshotStore, ScheduleStor
 }
 
 // SnapshotStore persists fitted snapshots. A nil store means persist is off.
+//
+// Ping is the health probe: it reports whether this store can actually be used
+// (connection and schema), not merely that it was configured. Health checks call
+// it; the query paths do not.
 type SnapshotStore interface {
 	Get(ctx context.Context, orgID int64, key string) (forecast.Snapshot, bool, error)
 	Put(ctx context.Context, orgID int64, key string, snap forecast.Snapshot) error
+	Ping(ctx context.Context) error
 }
 
 type memKey struct {
@@ -82,6 +87,9 @@ func (s *memoryStore) Put(_ context.Context, orgID int64, key string, snap forec
 	return nil
 }
 
+// Ping is always healthy: an in-memory store has nothing to reach.
+func (s *memoryStore) Ping(context.Context) error { return nil }
+
 type errStore struct{ err error }
 
 func (s errStore) Get(context.Context, int64, string) (forecast.Snapshot, bool, error) {
@@ -91,6 +99,10 @@ func (s errStore) Get(context.Context, int64, string) (forecast.Snapshot, bool, 
 func (s errStore) Put(context.Context, int64, string, forecast.Snapshot) error {
 	return s.err
 }
+
+// Ping reports the error that replaced the real store, so a health check names
+// the DSN that could not be opened rather than a generic failure.
+func (s errStore) Ping(context.Context) error { return s.err }
 
 type cacheEntry struct {
 	snap     forecast.Snapshot
@@ -203,3 +215,6 @@ func (s *cachedStore) Put(ctx context.Context, orgID int64, key string, snap for
 	s.remember(k, snap)
 	return nil
 }
+
+// Ping asks the inner store: readiness is about the database, not this cache.
+func (s *cachedStore) Ping(ctx context.Context) error { return s.inner.Ping(ctx) }

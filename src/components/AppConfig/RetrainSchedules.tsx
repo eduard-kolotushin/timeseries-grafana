@@ -5,6 +5,7 @@ import {
   Badge,
   Button,
   ClipboardButton,
+  ConfirmButton,
   Field,
   FieldSet,
   FilterInput,
@@ -20,6 +21,7 @@ import { config } from '@grafana/runtime';
 import { reasonFromUnknown } from '../../forecast-panel/reasons';
 import {
   deleteSchedule,
+  deleteScheduleModel,
   listSchedules,
   putSchedule,
   ScheduleRow,
@@ -130,6 +132,7 @@ export const RetrainSchedules = () => {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [scope, setScope] = useState<ScopeFilter>('all');
   const [enabled, setEnabled] = useState<EnabledFilter>('all');
@@ -174,10 +177,31 @@ export const RetrainSchedules = () => {
   }, []);
 
   const commit = useCallback(
-    async (row: ScheduleRow) => {
+    async (row: ScheduleRow, revert?: Partial<ScheduleRow>) => {
       setBusy(rowId(row));
       try {
         await putSchedule(row);
+        setError(null);
+        refresh();
+      } catch (e) {
+        setError(reasonFromUnknown(e));
+        // The optimistic patch moved the row on screen; put the server state back.
+        if (revert) {
+          patch(row, revert);
+        }
+      } finally {
+        setBusy(null);
+      }
+    },
+    [refresh, patch]
+  );
+
+  const remove = useCallback(
+    async (row: ScheduleRow) => {
+      setBusy(rowId(row));
+      try {
+        await deleteSchedule(row.scope, row.key);
+        setNote(null);
         setError(null);
         refresh();
       } catch (e) {
@@ -189,11 +213,12 @@ export const RetrainSchedules = () => {
     [refresh]
   );
 
-  const remove = useCallback(
+  const removeModel = useCallback(
     async (row: ScheduleRow) => {
       setBusy(rowId(row));
       try {
-        await deleteSchedule(row.scope, row.key);
+        const resp = await deleteScheduleModel(row.scope, row.key);
+        setNote(typeof resp?.note === 'string' ? resp.note : null);
         setError(null);
         refresh();
       } catch (e) {
@@ -338,7 +363,12 @@ export const RetrainSchedules = () => {
           <Switch
             aria-label={`${rowId(row.original)} enabled`}
             value={row.original.enabled}
-            onChange={(e) => void commit({ ...row.original, enabled: e.currentTarget.checked })}
+            onChange={(e) => {
+              const enabled = e.currentTarget.checked;
+              // Show the choice at once; `commit` puts it back if the PUT rejects.
+              patch(row.original, { enabled });
+              void commit({ ...row.original, enabled }, { enabled: row.original.enabled });
+            }}
           />
         ),
       },
@@ -365,11 +395,20 @@ export const RetrainSchedules = () => {
             >
               Delete
             </Button>
+            <ConfirmButton
+              size="sm"
+              confirmVariant="destructive"
+              disabled={busy === rowId(row.original)}
+              confirmText="Delete stored model"
+              onConfirm={() => void removeModel(row.original)}
+            >
+              Delete model
+            </ConfirmButton>
           </Stack>
         ),
       },
     ],
-    [busy, commit, patch, remove, styles]
+    [busy, commit, patch, remove, removeModel, styles]
   );
 
   return (
@@ -399,6 +438,11 @@ export const RetrainSchedules = () => {
               {error}
             </Alert>
           </div>
+        )}
+        {note && (
+          <Alert title="Model removal" severity="info">
+            {note}
+          </Alert>
         )}
         <Stack direction="row" gap={2} wrap="wrap" alignItems="flex-end">
           <Field label="Search">

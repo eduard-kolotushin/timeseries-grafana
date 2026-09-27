@@ -74,6 +74,8 @@ Connection lifecycle: `openPostgresStore` only parses the DSN (pgxpool connects 
 
 Per-process cache: each `gpx_forecast` process (overlay app, alerting datasource, one per Grafana replica) keeps a read-through cache of at most 256 snapshots with a 30 s TTL. `Put` writes through and refreshes the local entry; after the TTL a `Get` re-reads Postgres, so a Retrain on the overlay is visible to alert evaluation within 30 s without a restart, and resident memory stays bounded (a minute-of-week baseline is ~20k floats as JSON).
 
+Retention (v14): the retrain ticker also collects what nothing refreshes, in one transaction per tick. A snapshot untouched for `FORECAST_SNAPSHOT_TTL` (default `72h`, three daily cycles; `0` disables the sweep, a value below `1h` is refused) is deleted. A `forecast.retrain` row idle for the whole window — `next_run_at` and `last_run_at` both older, or no `last_run_at` at all — with no snapshot behind it is deleted; that is also how a `baseline` row is collected, since the worker's snapshots live in another schema. A snapshot with no row gets a `panel` row back with the deployment default cron, so deleting a schedule never silently costs a retrain's work. `DELETE /schedules?scope=&key=&drop=model` is the explicit removal; a `baseline` key's snapshot is the worker's to collect, and the response says so.
+
 ## Schema and migrations
 
 The schema lives in versioned SQL files, not in Go: `pkg/store/migrations/0001_snapshots.sql` and `0002_retrain.sql`, embedded with `go:embed` and applied by the engine in `pkg/store`.

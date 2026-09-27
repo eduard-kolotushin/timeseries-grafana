@@ -218,36 +218,37 @@ describe('a target with no datasource of its own', () => {
   const rewriteWindow = { fromMs, toMs, intervalMs: 60_000 };
   const req = (targets: unknown[]): DataQueryRequest =>
     ({ targets, intervalMs: 60_000 } as unknown as DataQueryRequest);
-  const panelDs = { uid: 'panel-ds', type: 'prometheus' };
   const bare = { refId: 'A', expr: 'up' };
   const own = { refId: 'A', datasource: { uid: 'prom', type: 'prometheus' }, expr: 'up' };
 
   beforeEach(() => mockGet.mockReset());
 
-  // `getDataSourceSrv().get('')` is the org default, which is not where the panel's
-  // series comes from: a target that names no datasource trains from the panel's own.
-  const cases: Array<[string, unknown[], typeof panelDs | undefined, string | undefined]> = [
-    ['keeps a target that names its own datasource', [own], undefined, 'prom'],
-    ["trains from the panel's datasource when the target names none", [bare], panelDs, 'panel-ds'],
-    ['has nothing to train from when neither names one', [bare], undefined, undefined],
-  ];
-
-  it.each(cases)('%s → %s', async (_name, targets, panel, wantUid) => {
+  // Grafana hands the panel's datasource down on every target it sends — observed live
+  // on 2026-09-27: a panel whose `targets[0]` omits `datasource` trained from it — so the
+  // target's own ref is the only identity a group has.
+  it('trains from the ref the target carries', async () => {
     const prom = datasource([frame('up')]);
     mockGet.mockResolvedValue(prom.ds);
 
-    const result = await queryTrainingFrames(req(targets), { ...rewriteWindow, panelDatasource: panel });
+    const result = await queryTrainingFrames(req([own]), rewriteWindow);
 
-    if (!wantUid) {
-      expect(mockGet).not.toHaveBeenCalled();
-      expect(result.frames).toBeNull();
-      expect(result.source).toBeUndefined();
-      expect(trainRejectReason(req(targets), { ...rewriteWindow, panelDatasource: panel })).toBe(REASON_TRAIN_EMPTY);
-      return;
-    }
-    expect(mockGet.mock.calls[0][0]).toEqual(wantUid === 'prom' ? own.datasource : panelDs);
-    expect(result.source?.datasourceUid).toBe(wantUid);
-    expect(trainRejectReason(req(targets), { ...rewriteWindow, panelDatasource: panel })).toBeUndefined();
+    expect(mockGet.mock.calls[0][0]).toEqual(own.datasource);
+    expect(result.source?.datasourceUid).toBe('prom');
+    expect(trainRejectReason(req([own]), rewriteWindow)).toBeUndefined();
+  });
+
+  it('has nothing to train from when the target names no datasource', async () => {
+    const prom = datasource([frame('up')]);
+    mockGet.mockResolvedValue(prom.ds);
+
+    const result = await queryTrainingFrames(req([bare]), rewriteWindow);
+
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(result.frames).toBeNull();
+    expect(result.source).toBeUndefined();
+    // The org default is not where the panel's series comes from, so this stays a reason
+    // rather than a query against `getDataSourceSrv().get('')`.
+    expect(trainRejectReason(req([bare]), rewriteWindow)).toBe(REASON_TRAIN_EMPTY);
   });
 
   it('still trains the groups that do name a datasource', async () => {

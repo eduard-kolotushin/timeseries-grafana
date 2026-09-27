@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,6 +17,7 @@ var (
 	errScopeKeyRequired = errors.New("forecast: scope and key required")
 	errInvalidScope     = errors.New("forecast: invalid scope")
 	errBaselineUnknown  = errors.New("forecast: no such baseline schedule; the baselines worker creates those rows, so an admin may only edit an existing one")
+	errInvalidDrop      = errors.New("forecast: invalid drop: want row or model")
 )
 
 // maxScheduleBodyBytes caps the schedule routes' bodies. Their DTOs are a few
@@ -59,13 +61,27 @@ type scheduleSourceDTO struct {
 	Lookback      string `json:"lookback,omitempty"`
 }
 
-// maxQuerySummary protects the list response from whatever a client stored: the
-// summary labels a table cell, it is not a place to park a query.
+// maxQuerySummary bounds every cell-sized string the schedule response carries:
+// the summary labels a table cell, it is not a place to park a query, and the
+// spec's other identity fields are no different (clampCellText).
 const maxQuerySummary = 200
+
+// clampCellText bounds one cell-sized string. The identity fields of a stored
+// spec and a row's last status (an error message that can embed a series name as
+// long as its datasource allows) all reach a table cell or a list response, so a
+// client that stored a megabyte there must not make every GET /schedules carry it.
+func clampCellText(s string) string {
+	r := []rune(s)
+	if len(r) <= maxQuerySummary {
+		return s
+	}
+	return string(r[:maxQuerySummary-1]) + "…"
+}
 
 // scheduleSourceFromSpec reads only the identification keys of a stored spec.
 // Unlike parseRetrainSpec it must never fail a listing: a malformed or absent spec
 // (a baseline row has NULL) costs that row its Source cell, not the whole table.
+// Every field is clamped, so a hostile or merely huge stored value stays cell-sized.
 func scheduleSourceFromSpec(raw []byte) *scheduleSourceDTO {
 	if len(raw) == 0 {
 		return nil
@@ -77,9 +93,12 @@ func scheduleSourceFromSpec(raw []byte) *scheduleSourceDTO {
 	if src == (scheduleSourceDTO{}) {
 		return nil
 	}
-	if r := []rune(src.QuerySummary); len(r) > maxQuerySummary {
-		src.QuerySummary = string(r[:maxQuerySummary-1]) + "…"
-	}
+	src.DashboardUID = clampCellText(src.DashboardUID)
+	src.PanelTitle = clampCellText(src.PanelTitle)
+	src.DatasourceUID = clampCellText(src.DatasourceUID)
+	src.SeriesName = clampCellText(src.SeriesName)
+	src.QuerySummary = clampCellText(src.QuerySummary)
+	src.Lookback = clampCellText(src.Lookback)
 	return &src
 }
 
@@ -91,7 +110,7 @@ func toScheduleDTO(row ScheduleRow) scheduleDTO {
 		Cron:       row.Cron,
 		Timezone:   row.Timezone,
 		Enabled:    &enabled,
-		LastStatus: row.LastStatus,
+		LastStatus: clampCellText(row.LastStatus),
 		HasSpec:    len(row.Spec) > 0,
 		Source:     scheduleSourceFromSpec(row.Spec),
 	}
@@ -260,10 +279,24 @@ func (a *App) putSchedule(w http.ResponseWriter, req *http.Request, orgID int64)
 	})
 }
 
+// modelDropper is the store half of `drop=model`. It is an optional interface
+// rather than a ScheduleStore method because only the Postgres store can drop a
+// model, and a store that cannot must say so instead of reporting a success it did
+// not have.
+type modelDropper interface {
+	DropModel(ctx context.Context, orgID int64, key string) error
+}
+
 // deleteSchedule removes one row. Panel rows are this org's; a baseline row is
 // fleet-wide (org 0) and the worker re-creates it on its next tick if the hash is
 // still reporting, so deleting a retired hash's row sticks and deleting a live
 // one is harmless.
+//
+// `drop` says how far the deletion goes. The default (`row`) is v12's contract: the
+// row is when a panel refits, the model is what its cacheKey resolves to, and an
+// admin who only wants to stop the unattended retrain keeps the model. `model`
+// removes both, because the sweep's reconcile would otherwise give a row back to a
+// snapshot the caller is trying to be rid of.
 func (a *App) deleteSchedule(w http.ResponseWriter, req *http.Request, orgID int64) {
 	query := req.URL.Query()
 	scope, key := query.Get("scope"), query.Get("key")
@@ -275,11 +308,41 @@ func (a *App) deleteSchedule(w http.ResponseWriter, req *http.Request, orgID int
 		http.Error(w, errInvalidScope.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := a.sched.Delete(req.Context(), orgID, scope, key); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	switch drop := query.Get("drop"); drop {
+	case "", "row":
+		if err := a.sched.Delete(req.Context(), orgID, scope, key); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]string{"message": "ok"})
+	case "model":
+		if scope == scopeBaseline {
+			// The model behind a baseline key is the worker's: it lives in
+			// baselines.snapshots, a schema this process never touches, and the
+			// worker's own sweep collects it. The row goes either way.
+			if err := a.sched.Delete(req.Context(), orgID, scope, key); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]string{
+				"message": "ok",
+				"note":    "the model behind a baseline key lives in the baselines worker's schema and is collected there",
+			})
+			return
+		}
+		dropper, ok := a.sched.(modelDropper)
+		if !ok {
+			http.Error(w, errNoStore.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if err := dropper.DropModel(req.Context(), orgID, key); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]string{"message": "ok"})
+	default:
+		http.Error(w, errInvalidDrop.Error(), http.StatusBadRequest)
 	}
-	writeJSON(w, map[string]string{"message": "ok"})
 }
 
 // handleScheduleDefault validates the org's default schedule before the

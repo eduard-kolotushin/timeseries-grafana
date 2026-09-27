@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,12 +48,15 @@ func TestPostgresStoreLazyConnect(t *testing.T) {
 	}
 }
 
-// fakePool answers the statements ensureTable issues, without a Postgres.
+// fakePool answers the statements ensureTable issues, without a Postgres. It is
+// safe for concurrent use, which is what lets a test run both tables' readiness
+// attempts at once.
 type fakePool struct {
+	mu      sync.Mutex
 	pingErr error
 	execErr func(sql string) error
 	rowErr  error
-	// shape is what the schedule primary-key probe answers.
+	// shape is what the primary-key probes answer.
 	shape      bool
 	statements []string
 }
@@ -60,13 +64,23 @@ type fakePool struct {
 func (p *fakePool) Ping(context.Context) error { return p.pingErr }
 
 func (p *fakePool) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	p.mu.Lock()
 	p.statements = append(p.statements, sql)
+	p.mu.Unlock()
+	// The hook runs outside the lock: a test uses it to hold one statement for as
+	// long as another table's traffic needs to get through.
 	if p.execErr != nil {
 		if err := p.execErr(sql); err != nil {
 			return pgconn.CommandTag{}, err
 		}
 	}
 	return pgconn.NewCommandTag("CREATE TABLE"), nil
+}
+
+func (p *fakePool) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.statements)
 }
 
 func (p *fakePool) Query(context.Context, string, ...any) (pgx.Rows, error) {
@@ -140,7 +154,9 @@ func TestScheduleDDLFailureLeavesSnapshotsServing(t *testing.T) {
 	db := &fakePool{
 		execErr: func(sql string) error {
 			// A runtime user without CREATE: the DDL is refused, the reads are not.
-			if strings.HasPrefix(strings.TrimSpace(sql), "CREATE") {
+			// The hook matches on the migration files' statements, which the engine
+			// sends as one multi-statement Exec.
+			if strings.Contains(sql, "CREATE") {
 				return errors.New("ERROR: permission denied for schema forecast (SQLSTATE 42501)")
 			}
 			return nil
@@ -149,36 +165,103 @@ func TestScheduleDDLFailureLeavesSnapshotsServing(t *testing.T) {
 	clock := time.Unix(1_000_000, 0)
 	s := &postgresStore{pool: db, now: func() time.Time { return clock }}
 
-	// The table exists and already carries the per-org key: a locked-down runtime user
+	// Both tables exist and already carry their keys: a locked-down runtime user
 	// that may not CREATE is fine, which is the upgrade path of a deployed plugin.
 	db.shape = true
 	if err := s.ensureSchedules(ctx); err != nil {
 		t.Fatalf("a readable, migrated table must be usable without CREATE: %v", err)
 	}
+	if _, _, err := s.Get(ctx, 1, strings.Repeat("d", 64)); err != nil {
+		t.Fatalf("the snapshot table must be usable without CREATE too: %v", err)
+	}
+
+	// A table without its per-org key must fail loudly rather than answer as if it
+	// had one: for schedules that is sharing a row between orgs, for snapshots it is
+	// a Put that can never succeed (and whose SQLSTATE names neither the migration
+	// nor the missing constraint).
 	db.shape = false
 	s.sched = storeProbe{}
 	if err := s.ensureSchedules(ctx); err == nil {
 		t.Fatal("a table without the per-org key must fail loudly, not share rows between orgs")
 	}
-	if _, ok, err := s.Get(ctx, 1, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"); err != nil || ok {
-		t.Fatalf("a schedule DDL failure changed the snapshot path: ok=%v err=%v", ok, err)
+	s.snap = storeProbe{}
+	if _, _, err := s.Get(ctx, 1, strings.Repeat("d", 64)); !errors.Is(err, errSnapshotKey) {
+		t.Fatalf("an un-keyed snapshot table must fail with errSnapshotKey, got %v", err)
+	}
+	if s.snap.ready {
+		t.Fatal("the snapshot table latched ready without its (org_id, cache_key) key")
 	}
 
 	// The per-table retry state still throttles the failing DDL, and retries it
 	// after the window instead of latching the table as ready.
-	attempts := len(db.statements)
+	attempts := db.count()
 	if err := s.ensureSchedules(ctx); err == nil {
 		t.Fatal("the schedule path must keep reporting the failure")
 	}
-	if len(db.statements) != attempts {
-		t.Fatalf("the failing DDL was retried inside the backoff window (%d statements)", len(db.statements))
+	if db.count() != attempts {
+		t.Fatalf("the failing DDL was retried inside the backoff window (%d statements)", db.count())
 	}
 	clock = clock.Add(ensureRetryAfter)
 	if err := s.ensureSchedules(ctx); err == nil {
 		t.Fatal("the schedule path must not latch ready while the key is wrong")
 	}
-	if len(db.statements) == attempts {
+	if db.count() == attempts {
 		t.Fatal("the DDL was never retried after the backoff")
+	}
+}
+
+// TestScheduleProbeDoesNotBlockSnapshots: each table's readiness attempt holds its
+// own lock. The first attempt here stands in for a probe waiting on
+// pg_advisory_xact_lock (a migrator holds it), and a snapshot read must still get
+// through while that attempt is wedged — a process-wide lock queued every snapshot
+// Get/Put behind a schedule table a burst of probes was retrying.
+func TestScheduleProbeDoesNotBlockSnapshots(t *testing.T) {
+	ctx := context.Background()
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	db := &fakePool{
+		shape: true,
+		execErr: func(sql string) error {
+			if !strings.Contains(sql, "pg_advisory_xact_lock") {
+				return nil
+			}
+			var first bool
+			once.Do(func() { first = true })
+			if !first {
+				return nil
+			}
+			close(blocked)
+			<-release
+			return nil
+		},
+	}
+	s := &postgresStore{pool: db, now: time.Now}
+	schedDone := make(chan error, 1)
+	go func() { schedDone <- s.ensureSchedules(ctx) }()
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the schedule probe never reached the advisory lock")
+	}
+
+	snapDone := make(chan error, 1)
+	go func() {
+		_, _, err := s.Get(ctx, 1, strings.Repeat("e", 64))
+		snapDone <- err
+	}()
+	select {
+	case err := <-snapDone:
+		if err != nil {
+			t.Fatalf("snapshot read while the schedule probe waited: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a snapshot read queued behind the schedule probe's migration attempt")
+	}
+
+	close(release)
+	if err := <-schedDone; err != nil {
+		t.Fatalf("schedule probe: %v", err)
 	}
 }
 
@@ -251,19 +334,140 @@ func hasRow(rows []ScheduleRow, scope, key string) bool {
 
 // specOfKey reads one row's stored spec, so a merge can be compared byte for byte
 // (jsonb round-trips key order, which an equality on the merged value would miss).
+// It goes through Row and not List on purpose: List projects the spec down to the
+// identity keys the response can carry, which is not what these tests compare.
 func specOfKey(t *testing.T, ctx context.Context, s *postgresStore, orgID int64, key string) string {
 	t.Helper()
-	rows, err := s.List(ctx, orgID)
+	row, ok, err := s.Row(ctx, orgID, scopePanel, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range rows {
-		if row.Scope == scopePanel && row.Key == key {
-			return string(row.Spec)
+	if !ok {
+		t.Fatalf("no panel row for %s", key)
+	}
+	return string(row.Spec)
+}
+
+// TestPostgresDueIgnoresSuperseded: a retired key must never be answered as due.
+// panelClaimSQL already refuses to claim such a row; the probe predicate has to
+// agree, or a stale tab refits the retired key and then supersedes the panel's
+// current row, freezing the live panel's snapshot until its next load.
+func TestPostgresDueIgnoresSuperseded(t *testing.T) {
+	dsn := os.Getenv("FORECAST_TEST_PG")
+	if dsn == "" {
+		t.Skip("FORECAST_TEST_PG not set")
+	}
+	ctx := context.Background()
+	s, err := openPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	orgID := int64(987101)
+	key := "test-due-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	t.Cleanup(func() { _ = s.Delete(context.Background(), orgID, scopePanel, key) })
+	if err := s.Upsert(ctx, orgID, ScheduleRow{
+		Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Enabled: true,
+		Spec:      json.RawMessage(`{"queries":[{"refId":"A"}],"model":"baseline"}`),
+		NextRunAt: time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.Due(ctx, orgID, key, time.Now())
+	if err != nil || !due {
+		t.Fatalf("a row past its next run must be due: due=%v err=%v", due, err)
+	}
+
+	// Upsert never writes superseded_at (a browser retrain must not be able to
+	// un-retire a row), so only Supersede and a direct write set it.
+	if _, err := s.pool.Exec(ctx, `
+UPDATE forecast.retrain SET superseded_at = now() WHERE scope = 'panel' AND org_id = $1 AND key = $2
+`, orgID, key); err != nil {
+		t.Fatal(err)
+	}
+	due, err = s.Due(ctx, orgID, key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if due {
+		t.Fatal("a superseded row was answered as due: it would be refit and un-retire itself")
+	}
+	claimed, err := s.Claim(ctx, orgID, "due-owner", time.Minute, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range claimed {
+		if row.Key == key {
+			t.Fatalf("a superseded row was claimed: %+v", row)
 		}
 	}
-	t.Fatalf("no panel row for %s", key)
-	return ""
+}
+
+// TestPostgresListProjectsIdentity: the list is an admin page, so it must carry
+// the identity a row is recognised by and none of the query objects the panel
+// stored — while Row, which the scheduler parses, keeps the whole spec.
+func TestPostgresListProjectsIdentity(t *testing.T) {
+	dsn := os.Getenv("FORECAST_TEST_PG")
+	if dsn == "" {
+		t.Skip("FORECAST_TEST_PG not set")
+	}
+	ctx := context.Background()
+	s, err := openPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	orgID := int64(987102)
+	key := "test-list-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	t.Cleanup(func() { _ = s.Delete(context.Background(), orgID, scopePanel, key) })
+	if err := s.Upsert(ctx, orgID, ScheduleRow{
+		Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Enabled: true,
+		Spec: json.RawMessage(`{"datasourceUid":"prom","queries":[{"refId":"A","expr":"up","intervalMs":60000}],` +
+			`"from":1700000000000,"to":1700100000000,"seriesName":"up","lookback":"21d","model":"baseline",` +
+			`"panelId":7,"panelTitle":"CPU","dashboardUid":"dash-1","querySummary":"PromQL: up"}`),
+		NextRunAt: time.Now().Add(time.Hour).UTC().Truncate(time.Millisecond),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var listed ScheduleRow
+	for _, row := range panelRows(mustList(t, ctx, s, orgID)) {
+		if row.Key == key {
+			listed = row
+		}
+	}
+	if len(listed.Spec) == 0 {
+		t.Fatalf("the listed row lost its spec")
+	}
+	var projected map[string]any
+	if err := json.Unmarshal(listed.Spec, &projected); err != nil {
+		t.Fatalf("listed spec is not an object: %s", listed.Spec)
+	}
+	if _, ok := projected["queries"]; ok {
+		t.Fatalf("the list transferred the stored query objects: %s", listed.Spec)
+	}
+	dto := toScheduleDTO(listed)
+	if !dto.HasSpec {
+		t.Fatalf("a row with a spec must report hasSpec: %+v", dto)
+	}
+	want := scheduleSourceDTO{
+		DashboardUID: "dash-1", PanelID: 7, PanelTitle: "CPU",
+		DatasourceUID: "prom", SeriesName: "up", QuerySummary: "PromQL: up", Lookback: "21d",
+	}
+	if dto.Source == nil || *dto.Source != want {
+		t.Fatalf("source=%+v want %+v", dto.Source, want)
+	}
+
+	// The scheduler's own read is untouched: it parses the entire spec.
+	full, ok, err := s.Row(ctx, orgID, scopePanel, key)
+	if err != nil || !ok {
+		t.Fatalf("row: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(string(full.Spec), `"queries"`) {
+		t.Fatalf("Row lost the query objects: %s", full.Spec)
+	}
 }
 
 // TestPostgresScheduleOrgKey pins the per-org primary key against a real Postgres.
