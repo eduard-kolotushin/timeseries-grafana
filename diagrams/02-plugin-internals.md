@@ -13,7 +13,7 @@ Grafana загружает один app-плагин с вложенной па�
 | Вложенный источник | `eduardkolotushin-forecast-datasource` | `QueryData` для alerting: Restore по `cacheKey`, промах — ошибка |
 | Ресурсы | `POST /forecast`, `GET\|PUT\|DELETE /schedules`, `POST /schedules/default`, `GET ping` | `/schedules*` требуют прав Admin, остальное без ограничений |
 | Планировщик | `retrain.go`: тик 30 с, батч 4, аренда 6 мин (производная: батч × таймаут fetch + таймаут fetch + 1 мин) | `Claim` → `/api/ds/query` → `fitRequest` → `Put` → `Finish` |
-| Расписания | `forecast.retrain`, PK `(scope, org_id, key)` | Спека панели = `trainSource` + модель; `spec` наружу не отдаётся — отдаётся производный `source` |
+| Расписания | `forecast.retrain`, uuid PK `id`, `UNIQUE (scope, org_id, key)` | Спека панели = `trainSource` + модель; `spec` наружу не отдаётся — отдаётся производный `source` |
 | Лимиты | `workLimiter` (4 по умолчанию), `MAX_TRAIN_POINTS` 100k, окно вывода 1e6 точек, тело 16 MiB, `trainSource` 1 MiB, JSON одного запроса 64 KiB (путь `QueryData`) | 429 при занятых слотах, 413 при превышении лимитов; только CPU-работа под семафором |
 | Снимок | `SnapshotStore` = TTL-кэш над `forecast.snapshots` (pgx) | JSONB с областью организации; в процессе не более 256 записей, TTL 30 с |
 | Бинарник бэкенда | `gpx_forecast` | `pkg/main.go` → `plugin.NewApp` или `plugin.NewDatasource` |

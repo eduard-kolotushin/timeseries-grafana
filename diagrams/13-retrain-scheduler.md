@@ -30,7 +30,7 @@
 
 Отказ авторизации: три тика подряд с 401/403 (`/api/ds/query` или `/api/org`) отключают планировщик до перезапуска — с одной записью Error в логе. Отказы должны идти подряд, поэтому редкий сбой не глушит рабочий планировщик. Проверка стоит только на пути планировщика — на запросы панели она не влияет.
 
-Столбцы строки: `scope`, `key`, `org_id`, `cron`, `timezone`, `enabled`, `spec` (JSONB: `trainSource` + модель), `next_run_at`, `last_run_at`, `last_status`, `claimed_by`, `claimed_until`, `updated_at`; PK `(scope, org_id, key)`.
+Столбцы строки: `id` (uuid PK), `scope`, `key`, `org_id`, `cron`, `timezone`, `enabled`, `spec` (JSONB: `trainSource` + модель), `next_run_at`, `last_run_at`, `last_status`, `claimed_by`, `claimed_until`, `updated_at`; естественный ключ — `UNIQUE (scope, org_id, key)` рядом с uuid-первичным ключом.
 
 ```mermaid
 flowchart TD

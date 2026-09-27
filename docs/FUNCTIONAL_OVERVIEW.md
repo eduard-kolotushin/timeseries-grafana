@@ -475,7 +475,7 @@ it.
 **Negative — Compose:** deleting the org-2 row through the org-1 API is not possible (it is not listed); the
 fixture had to be removed directly in Postgres, which *is* the boundary being described.
 
-**Kubernetes:** one org in play; the same `org_id` column and the same PK `(scope, org_id, key)`.
+**Kubernetes:** one org in play; the same `org_id` column and the same `UNIQUE (scope, org_id, key)` beside the uuid primary key.
 
 ### F19. Train-query rewrite per datasource type
 
@@ -509,7 +509,7 @@ all retrained to `ok`).
 | **Who can use** | **Operator** (deployment configuration; the store has no UI fields — F11). |
 | **How configured** | In order: process env `FORECAST_STORE_URL`/`FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `…_DATASOURCE_*` / `GrafanaCfg` (`[plugin.eduardkolotushin-forecast-app]`, `[plugin.eduardkolotushin-forecast-datasource]`), then provisioned jsonData / `secureJsonData`. |
 | **Input params** | `storeUrl` (one DSN, jsonData camel; env/ini spell it `FORECAST_STORE_URL` / `store_url`), or field-wise `storeHost`, `storePort`, `storeDatabase`, `storeUser`, `storeSslMode`, `storePassword`. A URL short-circuits the fields at the same level. |
-| **Expected result** | With a store: snapshots in `forecast.snapshots (org_id, cache_key, snapshot jsonb, updated_at)` and schedules usable. Without: `/schedules` is 503 and every probe answers `needTrain`. |
+| **Expected result** | With a store: snapshots in `forecast.snapshots (id uuid pk, org_id, cache_key, snapshot jsonb, updated_at)` and schedules usable. Without: `/schedules` is 503 and every probe answers `needTrain`. |
 
 **Positive — Compose:** the store comes from provisioning, not from a page:
 `timeseries-grafana-sandbox/provisioning/plugins/apps.yaml`
@@ -787,12 +787,13 @@ inherits that).
 
 The two processes meet at exactly two places, both in the overlay Postgres:
 
-- **`forecast.snapshots (org_id, cache_key, snapshot, updated_at)`** — the fitted state, keyed by the 64-hex
-  `cacheKey` the panel computes. Observed live: `pg_column_size(snapshot)` `236` (a two-point API fit) up to
+- **`forecast.snapshots (id uuid pk, org_id, cache_key, snapshot, updated_at)`** — the fitted state, keyed by the 64-hex
+  `cacheKey` the panel computes (`UNIQUE (org_id, cache_key)`; the uuid `id` is the surrogate primary key every table
+  here carries since v13). Observed live: `pg_column_size(snapshot)` `236` (a two-point API fit) up to
   `447908` (a panel's minute-of-week fit); the column is `jsonb`, and the panel's `trainSource`/`provenance`
   fields are **not** part of the fingerprint — a Mixed panel held the same key as the metric-only run.
-- **`forecast.retrain (scope, org_id, key, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status, claimed_by, claimed_until, superseded_at, updated_at)`**,
-  primary key `(scope, org_id, key)` — the queue. `panel` rows are written by the plugin (with `spec` holding the
+- **`forecast.retrain (id, scope, org_id, key, cron, timezone, enabled, spec, next_run_at, last_run_at, last_status, claimed_by, claimed_until, superseded_at, updated_at)`**,
+  uuid primary key `id`, `UNIQUE (scope, org_id, key)` — the queue. `panel` rows are written by the plugin (with `spec` holding the
   queries, window and identity), `baseline` rows by the worker (with no `spec`), and each side claims only what it
   owns: the plugin its own org's `panel` rows, the worker the fleet-wide (`org_id = 0`) `baseline` rows.
   `superseded_at` is the plugin's retire marker (see [Scaling and HA](#scaling-and-ha) and the audit's finding F46 in `audit/AUDIT.md`): the worker reads
