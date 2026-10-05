@@ -2,7 +2,7 @@
 
 ## Layout
 
-Grafana app plugin (frontend in `src/`, backend in `pkg/`):
+Grafana app plugin (frontend in `src/`, backend in `pkg/`); the rows are the load-bearing paths, not an exhaustive file list:
 
 | Path | Responsibility |
 | --- | --- |
@@ -22,6 +22,12 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`):
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules; fit path records `trainSource` and upserts the `panel` schedule row |
 | `pkg/plugin/limits.go` | Train-length / body caps, the pre-decode per-element budget, the one-window `maxForecastPoints` cap and the Fit / ForecastRange inflight semaphore |
 | `pkg/plugin/store.go` | SnapshotStore interface; bounded TTL read-through cache over pgx `forecast.snapshots` |
+| `pkg/plugin/store_postgres.go` | pgx `SnapshotStore` / `ScheduleStore` over schema `forecast` |
+| `pkg/plugin/app.go` | App backend instance: store-aware `CheckHealth`, dispose of the scheduler and the pool |
+| `pkg/plugin/retention.go` | v14 retention sweep, run on the retrain ticker |
+| `pkg/store/` | Embedded versioned migration engine (`go:embed migrations/*.sql`) |
+| `pkg/store/migrations/` | `0001_snapshots.sql`, `0002_retrain.sql` — the schema authority |
+| `cmd/migrate/` | `gpx_forecast_migrate`: CI/CD entry point that applies the migrations |
 | `pkg/plugin/schedule.go` | `ScheduleStore` over `forecast.retrain` (list / read one row / upsert / delete / due / claim / finish / identify) |
 | `pkg/plugin/retrain.go` | Unattended retrain scheduler: ticker, claim, `/api/ds/query` frame fetch, fit, `Put`, `Finish` |
 | `pkg/plugin/schedules.go` | `/schedules` resource handlers and the Admin gate |
