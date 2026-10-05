@@ -3,7 +3,7 @@ module github.com/eduard-kolotushin/timeseries-grafana
 go 1.26.5
 
 require (
-	github.com/eduard-kolotushin/timeseries v0.1.1
+	github.com/eduard-kolotushin/timeseries v0.2.0
 	github.com/eduard-kolotushin/timeseries-forecast v0.5.3
 	github.com/grafana/grafana-plugin-sdk-go v0.296.1
 	github.com/jackc/pgx/v5 v5.10.0
