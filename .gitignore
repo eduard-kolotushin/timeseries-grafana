@@ -45,7 +45,12 @@ ci/
 # Editor
 .idea
 
+# Go binaries built on a Windows host land here (make targets write dist/)
+*.exe
+
+# ESLint cache
 .eslintcache
+
 RETRAIN_SNAPSHOTS_SCALING_PLAN.md
 diagrams_backup_ru
 audit/
