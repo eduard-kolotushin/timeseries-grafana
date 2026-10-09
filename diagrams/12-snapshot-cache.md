@@ -26,13 +26,13 @@ flowchart TD
 
 ## Кэш снимков в процессе
 
-`SnapshotStore` = `cachedStore` над `postgresStore`. Каждый процесс `gpx_forecast` (app, Forecast datasource — по одному на реплику Grafana) держит собственный кэш: не более 256 записей, TTL 30 с. `Put` пишет в Postgres и обновляет локальную запись; `Get` после истечения TTL перечитывает Postgres. Поэтому Retrain с оверлея становится виден запросам alerting через ≤ 30 с без перезапуска, а память ограничена (minute-of-week ≈ 20k float в JSON).
+`SnapshotStore` = `cachedStore` над `postgresStore`. Каждый процесс `gpx_forecast` (app, Forecast datasource — по одному на реплику Grafana; в remote-режиме ещё и каждая реплика `gpx_forecast_compute`) держит собственный кэш: не более 256 записей, TTL 30 с. `Put` пишет в Postgres и обновляет локальную запись; `Get` после истечения TTL перечитывает Postgres. Поэтому Retrain с оверлея становится виден запросам alerting через ≤ 30 с без перезапуска, а память ограничена (minute-of-week ≈ 20k float в JSON). Кэш именно процессный: Retrain, выполненный одной репликой compute-сервиса, доходит до другой его реплики тоже в пределах TTL.
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Panel as Оверлей (процесс app)
-  participant CA as cachedStore app
+  participant Panel as Оверлей или реплика compute
+  participant CA as cachedStore писателя
   participant PG as forecast.snapshots
   participant CD as cachedStore datasource
   participant Alert as Alerting QueryData
@@ -51,14 +51,14 @@ sequenceDiagram
 
 ## Подключение к Postgres
 
-`openPostgresStore` только разбирает DSN (pgxpool подключается лениво). Первый `Get`/`Put` выполняет `Ping` и `CREATE SCHEMA/TABLE IF NOT EXISTS`; если DDL запрещён, но `SELECT 1 FROM forecast.snapshots` проходит — store считается готовым. Пока Postgres недоступен, каждый вызов возвращает ошибку (HTTP 500 / `REASON_BACKEND`), новая попытка — не чаще раза в 5 с. Плагин, запустившийся раньше базы, начнёт сохранять снимки, как только база станет доступна.
+`openPostgresStore` только разбирает DSN (pgxpool подключается лениво). Первый `Get`/`Put` выполняет `Ping` и применяет **неприменённые файлы миграций** (`0001_snapshots.sql`, `0002_retrain.sql`, `0003_retrain_attempts.sql`): один файл — одна транзакция, вход под `pg_advisory_xact_lock`, запись в `forecast.schema_migrations`, поэтому провалившийся файл не оставляет ни DDL, ни строки в ledger, а CI/CD-утилита `gpx_forecast_migrate` и реплика Grafana не гоняются друг с другом. Готовность и откат считаются **по таблице**: `forecast.snapshots` и `forecast.retrain` независимы — миграции создают обе, но runtime-пользователь без права `CREATE`/`ALTER` может получить одну и не получить другую, и тогда недоступна ровно одна. Пока Postgres недоступен, каждый вызов возвращает ошибку (HTTP 500 / `REASON_BACKEND`), новая попытка — не чаще раза в 5 с на таблицу. Плагин, запустившийся раньше базы, начнёт сохранять снимки, как только база станет доступна. Отдельный случай — таблица есть, но не той версии: без колонки `attempts` или на старом двухколоночном ключе расписания вызовы получают внятную ошибку с указанием применить миграции, а не тихую запись не туда.
 
 ```mermaid
 stateDiagram-v2
   [*] --> Parsed: openPostgresStore (DSN ok)
-  Parsed --> Ready: первый Get/Put: Ping + DDL ok
-  Parsed --> Failing: Ping или DDL не удался
-  Failing --> Failing: вызов раньше 5 с — та же ошибка без redial
+  Parsed --> Ready: первый Get/Put: Ping + миграции (файлы и ledger)
+  Parsed --> Failing: Ping или миграция не удалась и таблица не читается
+  Failing --> Failing: вызов раньше 5 с — та же ошибка без redial, счёт отдельно на таблицу
   Failing --> Ready: повтор через ≥ 5 с успешен
   Ready --> Ready: Get/Put напрямую
 ```

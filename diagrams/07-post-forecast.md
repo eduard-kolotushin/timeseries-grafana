@@ -4,6 +4,8 @@ URL фронтенда: `/api/plugins/eduardkolotushin-forecast-app/resources/fo
 
 Grafana проксирует этот вызов в процесс плагина как `CallResource` → mux `/forecast` → `dispatchForecast`.
 
+В remote-режиме (`FORECAST_COMPUTE_URL` задан) в этом же месте стоит развилка: тело **не** разбирается здесь, запрос уходит в `gpx_forecast_compute` (`POST <url>/forecast`) с `Content-Type: application/json`, `Authorization: Bearer <compute_token>` и `X-Forecast-Org` организации из контекста плагина, а статус, `Content-Type` и тело ответа возвращаются как есть. Исходящий запрос собирается с нуля, поэтому подделанный вызывающим заголовок или орг до сервиса не доходят. Обе проверки размера ниже остаются в плагине и выполняются **до** пересылки, а собственный лимитер плагина ограничивает уже пересылки (32 слота по умолчанию): недоступный сервис — HTTP 502 `forecast: compute service unreachable: …`, и тихой локальной подгонки не бывает.
+
 Лимиты проверяются до разбора JSON: тело больше 16 MiB → HTTP 413; `times`/`values` длиннее `MAX_TRAIN_POINTS` (100k) → 413. Если семафор `workLimiter` (4 слота по умолчанию, `FORECAST_MAX_INFLIGHT`) занят → HTTP 429 сразу, без очереди. Под семафором выполняется только CPU-работа: `Fit`, `SnapshotOf`, `Restore`, `ForecastRange`. `store.Get` и `store.Put` — снаружи, чтобы медленный Postgres не съедал слоты.
 
 Пустой `cacheKey` — старое поведение: `times` обязательны, снимок не сохраняется.
@@ -26,7 +28,15 @@ Fit: если `times` есть — под семафором выполняют�
 flowchart TD
   REQ["JSON ForecastRequest"] --> Size{"тело больше 16 MiB?"}
   Size -->|да| E413["HTTP 413"]
-  Size -->|нет| Dec["json.Decode"]
+  Size -->|нет| Big{"тело больше легального обучающего ряда?"}
+  Big -->|да| E413
+  Big -->|нет| Remote{"FORECAST_COMPUTE_URL задан?"}
+  Remote -->|да| Sem0{"слот лимитера прокси?"}
+  Sem0 -->|нет| E429["HTTP 429 busy"]
+  Sem0 -->|да| Fwd["POST url/forecast с Bearer и X-Forecast-Org: статус, Content-Type и тело как есть"]
+  Fwd -->|ошибка соединения| E502["HTTP 502 compute service unreachable"]
+  Fwd --> Out2["ответ сервиса как есть"]
+  Remote -->|нет| Dec["json.Decode"]
   Dec --> Bad{"cacheKey не hex 64?"}
   Bad -->|да| E400k["HTTP 400 invalid cacheKey"]
   Bad -->|нет| Len{"times длиннее MAX_TRAIN_POINTS?"}

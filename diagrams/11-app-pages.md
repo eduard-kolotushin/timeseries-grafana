@@ -2,7 +2,9 @@
 
 Страницы три: лендинг (только текст), Configuration (только retrain-расписание) и Retrain schedules (таблица `forecast.retrain`, права Admin). Оверлей `/forecast` с них не вызывается. `GET /ping` существует (`{"message":"ok"}`), но панель его не использует.
 
-Configuration сохраняет только default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`) через `POST /api/plugins/.../settings`; DSN снимков задаётся деплоем (env `FORECAST_STORE_*` / `GF_PLUGIN_*` / ini / provisioned jsonData) — полей стора на странице нет.
+Configuration сохраняет только default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`) через `POST /api/plugins/.../settings`; DSN снимков задаётся деплоем (env `FORECAST_STORE_*` / `GF_PLUGIN_*` / ini / provisioned jsonData) — полей стора на странице нет. Режим обучения — тоже конфигурация деплоя, а не поле страницы: `FORECAST_COMPUTE_URL` / `compute_token` приходят из env, ini или provisioned jsonData (`computeUrl` / `computeToken`), и страницы их не показывают и не меняют.
+
+`CheckHealth` — единственное место, где расхождение режимов видно в UI: в inline это проверка стора, в remote к ней добавляется `GET <compute_url>/healthz` с таймаутом 2 с, и недоступный сервис даёт `HealthStatusError` с его URL в тексте. Сам `/healthz` отвечает грубо (`{"status":"ok"}` / `{"status":"error"}`) и без токена — его дёргает ещё и kubelet-проба, которая токен передать не может.
 
 Retrain schedules (`?page=schedules`) читает `GET /schedules` и правит строки через `PUT` / `DELETE /schedules`. `POST /schedules/default` эта страница не вызывает: его вызывает Configuration, чтобы проверить cron перед сохранением в `jsonData`. Всё это требует прав Admin. Таблица показывает `scope` (`panel` или `baseline`), Source, ключ с возможностью копирования, cron, timezone, enabled, следующий и последний запуски, `last_status`. Поиск идёт по ключу, заголовку панели, имени ряда и сводке запроса.
 
