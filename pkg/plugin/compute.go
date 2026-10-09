@@ -223,7 +223,9 @@ func ServeCompute(ctx context.Context, addr string) error {
 }
 
 // serveHTTP serves until ctx is cancelled, then shuts the listener down so an
-// in-flight fit finishes rather than being cut mid-write.
+// in-flight fit finishes rather than being cut mid-write. A listener that cannot
+// bind (port in use, permission) returns its error at once instead of waiting for
+// a cancellation that will never come.
 func serveHTTP(ctx context.Context, addr string, h http.Handler) error {
 	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	done := make(chan struct{})
@@ -235,7 +237,11 @@ func serveHTTP(ctx context.Context, addr string, h http.Handler) error {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 	err := srv.ListenAndServe()
-	<-done
+	if ctx.Err() != nil {
+		// The shutdown path is running: wait for it, so the caller's cleanup does
+		// not race a listener that is still draining.
+		<-done
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

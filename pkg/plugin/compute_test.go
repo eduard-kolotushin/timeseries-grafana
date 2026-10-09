@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -262,6 +263,32 @@ func TestServeComputeStartsAndStopsIgnoringAComputeURL(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("ServeCompute did not stop on context cancellation")
+	}
+}
+
+// TestServeComputeReportsABindFailureInsteadOfWaiting: a listener that cannot bind
+// (port in use) must return its error at once. The shutdown goroutine waits for a
+// cancellation that will never come on that path, so waiting for it would hang the
+// process instead of letting cmd/compute exit non-zero.
+func TestServeComputeReportsABindFailure(t *testing.T) {
+	clearComputeEnv(t)
+	t.Setenv("FORECAST_COMPUTE_TOKEN", "sandbox-token")
+	clearStoreEnv(t)
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- ServeCompute(context.Background(), occupied.Addr().String()) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("ServeCompute returned nil on an occupied address")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeCompute waited for a cancellation that could not come")
 	}
 }
 
