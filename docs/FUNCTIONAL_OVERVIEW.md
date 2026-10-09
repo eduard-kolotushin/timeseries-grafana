@@ -941,7 +941,7 @@ source and are **not** backed by a live observation in this run:
 | `DRUID_MAX_INFLIGHT` saturation | `timeseries-baselines/druid.go`, `timeseries-baselines/limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
 | `FORECAST_MAX_INFLIGHT` env/ini precedence | `pkg/plugin/limits.go` | Only the jsonData path was used (the Compose env does not set it). |
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
-| The **plugin** scheduler's lease reclaim, `Extend` skip and tick counters under a mid-fit kill | `pkg/plugin/retrain.go` (`retrainOne`), `pkg/plugin/schedule.go` | Pass 7 measured the identical protocol live on the worker side (Pass 7's SIGKILL/SIGTERM run) and pinned it in `TestPostgresReclaimsAnExpiredLease`, `TestRetrainOneClaimLostSkipsTheRow` and `TestRetryDelay`, but the Compose Grafana was down, so no `gpx_forecast` process was killed mid-retrain this pass. |
+| A **mid-fit kill** of the plugin scheduler (its `Extend`-lost skip and backoff applied to a real `gpx_forecast` process) | `pkg/plugin/retrain.go` (`retrainOne`), `pkg/plugin/schedule.go` | Pass 7 measured the protocol live on the worker side (its SIGKILL/SIGTERM run) and, on the plugin side, measured the healthy path end to end in a real Grafana — `retrain tick claimed=3 failed=0 ok=3` with per-row `attempts=0` — but no `gpx_forecast` process was killed mid-retrain; the reclaim, the claim-lost skip and the backoff curve are pinned by `TestPostgresReclaimsAnExpiredLease`, `TestRetrainOneClaimLostSkipsTheRow` and `TestRetryDelay`. |
 | A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |
 
 ## Discrepancies found
@@ -1412,3 +1412,15 @@ after the refresh: `retrain tick claimed=2 retrained=2 failed=0`, both `baseline
 `next_run_at 18:25:00` and `attempts 0`, `baselines.snapshots` refreshed at `18:23:45`, two consecutive ticks
 `published=2`, Druid serving `live`/`ready` at horizon `18:55:00Z`, and the panel's own two queries replayed
 through `POST /api/ds/query` answered `A: 358 points`, `B: 3 points` (`last_ts 1791572100000` = `18:55:00Z`).
+
+**The plugin scheduler's own path, measured live (after the refresh above).** Grafana's log carried the healthy
+path on the rebuilt backend: three `msg=retrain … scope=panel status=ok attempts=0 dur≈250ms` lines and one
+`msg="retrain tick" claimed=3 failed=0 ok=3`, with all three `panel` rows left `ok`, `attempts 0` and
+`next_run_at` at the deployment cron slot — so the claim, the per-row `Extend` to `FORECAST_RETRAIN_LEASE`, the
+oldest-case `Finish(attempts=0)` and the tick counters all ran against Postgres in a real `gpx_forecast`. One
+operational subtlety this exposed, worth knowing when a stack is restarted: the ticker is started by the first RPC
+that instantiates the app (`pkg/plugin/app.go`), so between a container restart and the next plugin request
+(a dashboard load, a probe, or any `/resources/*` call) no cron retrain happens even though rows are due — the
+overlay's `needTrain` path is what covers a user who is looking at a panel. The `/resources/schedules` call used
+to check this also proves the schedule store was healthy on the new build (`hasSpec true` with a derived
+`source`), which is the state `errScheduleAttempts` exists to refuse.
