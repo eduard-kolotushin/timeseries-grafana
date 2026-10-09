@@ -975,15 +975,15 @@ real time series, and Grafana reached through its LoadBalancer at `http://localh
 | **A 300-request burst** | warm cluster, 300 unchecked concurrent panel POSTs | 300 × 200 in 1.34 s (p50 1.03 s); with a fresh TCP connection per request 299 × 200 + 1 × 429 `forecast: busy` in 1.7 s; and immediately after a rollout of both Deployments 300 × 200 in 1.32 s. A controlled ladder (C = 4/16/32/64) answered everything, p50 6–201 ms |
 | **An oversize body** | 8.4 MB body through the LoadBalancer | 413 `forecast: request body too large for a legal training series`, and the store held neither a snapshot nor a schedule row for that key — the compute service never saw it |
 | **A URL-less datasource install** | `helm upgrade --set druidUrl= prometheusUrl= opensearchUrl=` | Before the chart fix: Grafana CrashLoopBackOff with `Datasource provisioning error: read /etc/grafana/provisioning/datasources/druid.yaml: is a directory` (an `optional: true` mount of a ConfigMap that does not exist is an empty *directory*). After it: Grafana 1/1 and all five provisioning files exist, the three URL-less ones 30-byte `datasources: []` |
+| **CPU-limited compute pods** | the chart's `compute.resources.limits.cpu: 200m` (Compose `cpus: "0.2"` for parity) | A 100k-point fit went from ~20 ms unlimited to **575–650 ms** on the cluster (273–424 ms in Compose at 0.2 CPU), and a 120-request storm's rejection share rose from ~54% to **78–79%** — the service is throttled instead of competing with Grafana, the datasources and the store for the node |
+| **A due retrain meeting a full limiter** (`errBusy`) | one fit slot per pod, `FORECAST_RETRAIN_TICK=5s`, 400 100k-point fits sustained across the row's fit moment | `retrain … "status":"error: forecast: busy"` **twice** for the same row, each with `attempts: 0` and no `(attempt N)` suffix, 6 s apart — the tick, not the lease-length backoff — and then `ok` with `attempts=0` on the next cron slot. Four storms against an *unlimited* compute had never produced it: a ~20 ms fit rarely occupies a slot at the retrain's fit instant, so the CPU limit is what made this path observable |
 
-Not observed, narrowed: **`errBusy` on a due retrain.** Three storms against a one-slot compute limiter (50-wide
-and 100-wide bursts of 100k-point fits, the slow row forced due repeatedly) each saw the retrain's fit find the
-slot free and finish `ok`; a fit is ~20 ms and the limiter rejects rather than queues, so that instant is hard to
-hit on purpose. The mechanism is measured from the other side — a saturated compute answers `429 forecast: busy`
-promptly, which is precisely what the retrain path consumes — and the policy (attempts unchanged, retried on the
-next tick, no backoff) is pinned by `TestRetrainOne`'s `errBusy` case. Also not observed: a real multi-panel
-dashboard's concurrent forwards (these storms were scripted panel-shaped POSTs), and the mid-fit kill of a
-*worker* (that is `timeseries-baselines`).
+Not observed, narrowed: a real multi-panel dashboard's concurrent forwards (these storms were scripted
+panel-shaped POSTs); the mid-fit kill of a *worker* (that is `timeseries-baselines`); and the handful of
+client-side failures under the heaviest storms — 11 of 700 and 4 of 400 requests ended without an HTTP response
+(`curl` code `000`) while 2.9 MB bodies were in flight, with no plugin log line, no store row and no compute
+activity to attribute them to, i.e. they died before reaching the handler. Every request that did reach it was
+answered (200 or 429).
 
 ## Verified live, not verified live
 
@@ -1000,7 +1000,6 @@ source and are **not** backed by a live observation in this run:
 | `DRUID_MAX_INFLIGHT` saturation | `timeseries-baselines/druid.go`, `timeseries-baselines/limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
 | `FORECAST_MAX_INFLIGHT` env/ini precedence | `pkg/plugin/limits.go` | The jsonData **value** path is now measured (`maxInflight: 2` in the app jsonData gave exactly 2 in flight and 62 × `429 forecast: busy` in a 64-wide burst); the env and ini spellings remain unexercised, since neither environment sets them. |
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
-| **`errBusy` on a due retrain** (the row never ran, so it burns no attempt and is retried on the next tick) | `pkg/plugin/retrain.go` (`retrainOne`), `pkg/plugin/compute.go` | Attempted three times against a one-slot compute limiter under a storm (the Kubernetes table above) and the retrain's fit always found the slot free — a fit is ~20 ms and the limiter rejects instead of queueing, so that instant is hard to force. The policy is pinned by `TestRetrainOne`'s `errBusy` case, and the `429 forecast: busy` this path consumes is measured live. |
 | A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |
 | Grafana dialing a **remote** plugin gRPC address (the SDK standalone client-mode path behind [ARCHITECTURE](ARCHITECTURE.md)'s "Why an HTTP service and not a remote plugin backend") | `grafana-plugin-sdk-go` `internal/standalone` + `backend/serve.go` (`ClientModeEnabled`, `RunDummyPluginLocator`) | The SDK side is source-read: `GF_PLUGIN_GRPC_ADDRESS_<PLUGIN_ID>` (or `standalone.txt`/`pid.txt` beside the plugin binary) makes a spawned plugin print the `1\|2\|tcp\|<address>\|grpc` locator for that address instead of its own. Whether Grafana core accepts a non-local address from that line was **not** exercised — the v16 design deliberately does not use the path, so nothing in this run depended on it. |
 
