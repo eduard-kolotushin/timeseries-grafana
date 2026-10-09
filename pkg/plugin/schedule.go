@@ -42,6 +42,12 @@ type ScheduleRow struct {
 	NextRunAt  time.Time
 	LastRunAt  time.Time
 	LastStatus string
+	// Attempts is how many consecutive retrains of this row have failed. A
+	// successful retrain writes it back to 0, a failed one to attempts+1, and the
+	// scheduler spaces the retry by it (see retryDelay). It is also rendered into
+	// LastStatus as "(attempt N)", so a chronic failure is visible through
+	// GET /schedules without a new API field.
+	Attempts int
 	// SupersededAt is when this row stopped being the panel's current one: the
 	// panel trained a different cache key, so this row is left in the list for its
 	// history but is never claimed again. Zero means it is still current.
@@ -62,7 +68,12 @@ type ScheduleStore interface {
 	Delete(ctx context.Context, orgID int64, scope, key string) error
 	Due(ctx context.Context, orgID int64, key string, now time.Time) (bool, error)
 	Claim(ctx context.Context, orgID int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error)
-	Finish(ctx context.Context, owner string, orgID int64, scope, key string, next time.Time, status string) error
+	Finish(ctx context.Context, owner string, orgID int64, scope, key string, next time.Time, status string, attempts int) error
+	// Extend pushes a held claim's lease out to now+lease and reports whether the
+	// caller still owns it. A false answer is not an error: a retrain that
+	// outlived its lease has already been handed to a newer owner, and the caller
+	// must skip the row (no fit, no finish) rather than compete with them.
+	Extend(ctx context.Context, owner string, orgID int64, scope, key string, lease time.Duration) (bool, error)
 	// Identify merges a panel's identity into an existing row's spec. It never
 	// creates a row: only a fit knows the query objects a claimable row needs.
 	Identify(ctx context.Context, orgID int64, key string, prov PanelProvenance) error
@@ -157,7 +168,7 @@ UPDATE forecast.retrain r
 SET claimed_by = $2, claimed_until = now() + $3::interval, updated_at = now()
 FROM due
 WHERE r.scope = due.scope AND r.org_id = due.org_id AND r.key = due.key
-RETURNING r.scope, r.key, r.org_id, r.cron, r.timezone, r.spec
+RETURNING r.scope, r.key, r.org_id, r.cron, r.timezone, r.spec, r.attempts
 `
 
 // supersedeSQL retires a panel's older rows. The identity is read out of the
@@ -384,7 +395,7 @@ func (s *postgresStore) Claim(ctx context.Context, orgID int64, owner string, le
 	out := make([]ScheduleRow, 0, limit)
 	for rows.Next() {
 		var row ScheduleRow
-		if err := rows.Scan(&row.Scope, &row.Key, &row.OrgID, &row.Cron, &row.Timezone, &row.Spec); err != nil {
+		if err := rows.Scan(&row.Scope, &row.Key, &row.OrgID, &row.Cron, &row.Timezone, &row.Spec, &row.Attempts); err != nil {
 			return nil, err
 		}
 		out = append(out, row)
@@ -402,17 +413,21 @@ func (s *postgresStore) Claim(ctx context.Context, orgID int64, owner string, le
 // the claim it took (retrainOne), so requiring the owner costs nothing and the
 // "nobody holds it" case cannot arise from a live retrain.
 //
+// attempts is written in the same statement as next and status, because it is part
+// of that history: a success stores 0, a failure stores the claim's previous count
+// played back as +1, and the scheduler derives the retry delay from it.
+//
 // The worker's Done is the mirror of this statement for scope='baseline'.
-func (s *postgresStore) Finish(ctx context.Context, owner string, orgID int64, scope, key string, next time.Time, status string) error {
+func (s *postgresStore) Finish(ctx context.Context, owner string, orgID int64, scope, key string, next time.Time, status string, attempts int) error {
 	if err := s.ensureSchedules(ctx); err != nil {
 		return err
 	}
 	tag, err := s.pool.Exec(ctx, `
 UPDATE forecast.retrain
-SET next_run_at = $4, last_run_at = now(), last_status = $5,
+SET next_run_at = $4, last_run_at = now(), last_status = $5, attempts = $7,
     claimed_by = NULL, claimed_until = NULL, updated_at = now()
 WHERE scope = $1 AND org_id = $2 AND key = $3 AND claimed_by = $6
-`, scope, orgID, key, next.UTC(), status, owner)
+`, scope, orgID, key, next.UTC(), status, owner, attempts)
 	if err != nil {
 		return err
 	}
@@ -420,6 +435,30 @@ WHERE scope = $1 AND org_id = $2 AND key = $3 AND claimed_by = $6
 		log.DefaultLogger.Debug("retrain claim lost", "scope", scope, "key", key, "owner", owner)
 	}
 	return nil
+}
+
+// Extend pushes the caller's lease out to now+lease and reports whether the caller
+// still owns the row. retrainOne calls it immediately before a row's work, so the
+// work is never claimed by a second process while it runs — the failure mode is
+// duplicate training of the same series at the moment the fleet is already loaded.
+//
+// Like Finish it is owner-guarded, and for the same reason: only the claim holder
+// may move the lease. Zero rows updated means the claim was handed to a newer
+// owner, which the caller treats as "skip this row", not as an error — the row is
+// that owner's now.
+func (s *postgresStore) Extend(ctx context.Context, owner string, orgID int64, scope, key string, lease time.Duration) (bool, error) {
+	if err := s.ensureSchedules(ctx); err != nil {
+		return false, err
+	}
+	tag, err := s.pool.Exec(ctx, `
+UPDATE forecast.retrain
+SET claimed_until = now() + $5::interval, updated_at = now()
+WHERE scope = $1 AND org_id = $2 AND key = $3 AND claimed_by = $4
+`, scope, orgID, key, owner, intervalSeconds(lease))
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // errScheduleStore stands in when the pool cannot be built, so the scheduler
@@ -444,8 +483,12 @@ func (s errScheduleStore) Claim(context.Context, int64, string, time.Duration, i
 	return nil, s.err
 }
 
-func (s errScheduleStore) Finish(context.Context, string, int64, string, string, time.Time, string) error {
+func (s errScheduleStore) Finish(context.Context, string, int64, string, string, time.Time, string, int) error {
 	return s.err
+}
+
+func (s errScheduleStore) Extend(context.Context, string, int64, string, string, time.Duration) (bool, error) {
+	return false, s.err
 }
 
 func (s errScheduleStore) Identify(context.Context, int64, string, PanelProvenance) error {

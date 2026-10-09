@@ -17,6 +17,7 @@ Grafana expands `${FORECAST_STORE_*}` in `.ini` files. Your pipeline can also re
 | `retrain_enabled` | `FORECAST_RETRAIN_ENABLED` |
 | `retrain_tick` | `FORECAST_RETRAIN_TICK` |
 | `retrain_lease` | `FORECAST_RETRAIN_LEASE` |
+| `retrain_retry_max` | `FORECAST_RETRAIN_RETRY_MAX` |
 | `retrain_cron` | `FORECAST_RETRAIN_CRON` |
 | `grafana_url` | `FORECAST_GRAFANA_URL` |
 | `grafana_token` | `FORECAST_GRAFANA_TOKEN` |

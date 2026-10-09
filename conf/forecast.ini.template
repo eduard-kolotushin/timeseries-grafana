@@ -29,6 +29,9 @@ max_inflight = ${FORECAST_MAX_INFLIGHT}
 retrain_enabled = ${FORECAST_RETRAIN_ENABLED}
 retrain_tick = ${FORECAST_RETRAIN_TICK}
 retrain_lease = ${FORECAST_RETRAIN_LEASE}
+; Cap on the exponential retry backoff for a failed row (default 1h; a value that
+; does not exceed retrain_lease is refused and the default kept).
+retrain_retry_max = ${FORECAST_RETRAIN_RETRY_MAX}
 retrain_cron = ${FORECAST_RETRAIN_CRON}
 grafana_url = ${FORECAST_GRAFANA_URL}
 ; Viewer service-account token for /api/ds/query when anonymous auth is off.

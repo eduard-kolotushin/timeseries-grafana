@@ -153,7 +153,17 @@ A schedule row does not own a snapshot, and nothing may keep a model whose metri
 - **Explicit removal**: `DELETE /schedules?scope=&key=&drop=row|model`. The default `row` keeps v12's behaviour (the row only, the model stays); `model` also deletes the snapshot and every row for that key, superseded siblings included, so the tick's reconcile cannot resurrect what a user removed. A `baseline` key's snapshot is not this process's to delete: the response says so, and the worker's own sweep collects it
 - **The worker collects its own**: `baselines.snapshots` is written only by `timeseries-baselines`, so that repo sweeps it (`SNAPSHOT_TTL`, the same default and the same "nothing refreshed it and its row is idle" rule). This process never reads or writes that table
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14 non-goals
+## v15 must-have
+
+Retrain reliability: a row that fails, or that is interrupted by a restart, is never lost, is never retrained twice at once, and never retries in a storm.
+
+- **At-least-once, never abandoned.** A due row is retrained by exactly one claim holder, and bookkeeping never advances a claim past its lease: an unfinished claim (crash, restart, network partition) is re-admitted to any instance once `claimed_until < now()` and the row is still due, and the claim predicate never requires a particular owner. No due row is lost while one instance lives
+- **The lease covers the work it protects.** Immediately before a row's work starts, its claim is extended to `now() + FORECAST_RETRAIN_LEASE` and the work runs under a deadline equal to that lease, so a fit cannot outlive its claim (and be retrained concurrently by another replica, duplicating the same heavy queries) nor be cut short. An extension that matches zero rows means the claim was handed to a newer owner: that row is dropped without fitting it and without finishing it, so the new owner's `next_run_at`/`last_status` are never overwritten
+- **Retries are bounded in rate, never given up.** A failed retrain increments a persisted `attempts` count on the row and is due again after `min(base × 2^(attempts-1), cap)`, base `FORECAST_RETRAIN_LEASE` and cap `FORECAST_RETRAIN_RETRY_MAX` (default `1h`; refused and the default kept when it is not longer than the lease). A success resets the count to `0` and schedules the next cron slot, so a permanently broken row settles at one retry per hour instead of one per lease forever, and its attempt count is carried in `last_status` (`error: … (attempt N)`) and the logs. A busy compute slot (`errBusy`) burns no attempt: the row never ran. There is no dead-letter queue and no disable-after-N-failures — an Admin disables or deletes the row through `/schedules`, and `needTrain` still refreshes a panel whose row the scheduler cannot retrain
+- **The backlog is observable.** Every tick that claimed something logs the rows claimed, retrained and failed, so an operator can watch the queue drain — or fail to
+- **A row's lease is the only thing that expires**: `GET /schedules` and the Retrain schedules page are unchanged (the attempt count already rides `lastStatus`), and a migration failure keeps the existing per-table fallback, so a `forecast.retrain` without the `attempts` column fails the schedule store loudly (the message names `gpx_forecast_migrate`) instead of silently claiming nothing
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15 non-goals
 
 Do not add these without first updating this document:
 
@@ -172,6 +182,7 @@ Do not add these without first updating this document:
 - A second migration tool (Flyway, goose, golang-migrate) or any schema-diff ORM in front of these files
 - An integer surrogate key on any table this plugin owns, and a Go-side uuid generator (the database's `gen_random_uuid()` is the only one)
 - Retention outside the retrain ticker: a second scheduler, a Grafana-side cron, a job queue, a separate collector process, or a table the worker owns. Deleting a snapshot is not a reason to stop a query either — the overlay's `needTrain` path already answers a missing snapshot
+- A dead-letter queue, a disable-after-N-failures path, or a retry backoff that is not the capped exponential one above. A permanently broken row is retried at the cap until an Admin disables or deletes it, and its attempt count stays in `last_status` rather than becoming a new `GET /schedules` field
 
 ## Quality bar
 

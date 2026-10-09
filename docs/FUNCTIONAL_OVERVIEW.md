@@ -438,9 +438,9 @@ keys (`2e827911…`, `f8046f42…`, `7713db25…`), which is the cross-environme
 | --- | --- |
 | **Function** | Refit stored panel snapshots on their cron with no browser open: resolve the row's window, fetch frames from Grafana's own `/api/ds/query`, fit, store. |
 | **Who can use** | **Operator** (it runs by itself once the app is configured). |
-| **How configured** | jsonData `retrainCron` (default `0 3 * * *`; both environments use `*/5 * * * *`) and `grafanaUrl` (default `http://127.0.0.1:3000`); the token comes from `FORECAST_GRAFANA_TOKEN`, the ini section, or `secureJsonData.grafanaToken`. The ticker itself is `FORECAST_RETRAIN_ENABLED` (default `true`, the same precedence chain) with `FORECAST_RETRAIN_TICK` (default `30s`) and `FORECAST_RETRAIN_LEASE` (derived from the claim batch and the fetch timeout — 6m today). |
+| **How configured** | jsonData `retrainCron` (default `0 3 * * *`; both environments use `*/5 * * * *`) and `grafanaUrl` (default `http://127.0.0.1:3000`); the token comes from `FORECAST_GRAFANA_TOKEN`, the ini section, or `secureJsonData.grafanaToken`. The ticker itself is `FORECAST_RETRAIN_ENABLED` (default `true`, the same precedence chain) with `FORECAST_RETRAIN_TICK` (default `30s`), `FORECAST_RETRAIN_LEASE` (derived from the claim batch and the fetch timeout — 6m today) and `FORECAST_RETRAIN_RETRY_MAX` (the retry backoff's cap, default `1h`; a value that does not exceed the lease is refused with the default kept). |
 | **Input params** | Per row: `cron`, `timezone`, `enabled`; per spec: the stored queries and window. A window the picker expressed relatively — Auto, a legacy duration, or a Quick range such as `now-7d`/`now` — is stored as `relative: true` with `lookbackMs` and re-resolved at claim time, so a cron retrain follows the clock; a calendar/absolute pick, a window that does not end at `now`, and a rounded bound stay absolute and replay verbatim. |
-| **Expected result** | `next_run_at` advances, `last_run_at`/`last_status` are written, `forecast.snapshots.updated_at` moves; a failure records `last_status = "error: …"` and never fails a user query. Every tick also **collects** what nothing refreshes (v14): a snapshot untouched for `FORECAST_SNAPSHOT_TTL` (default `72h`; `0` disables the sweep, a value below `1h` is refused and the default kept) is deleted, a row idle for the whole window with no snapshot behind it goes with it (a row another replica has claimed is not idle — neither `next_run_at` nor `last_run_at` moves while a claim is in flight — so a sweep cannot delete a row mid-fit and have the reconcile hand back the deployment default in place of an admin's cron), and a snapshot without a row gets the deployment default schedule back — which is what keeps *deleting a schedule row* from deleting the model (F5). `FORECAST_RETRAIN_ENABLED=false` turns the sweep off with the ticker; a sweep failure is a log line, never a failed query. |
+| **Expected result** | A row's claim is **extended to `FORECAST_RETRAIN_LEASE` right before its work** and the work runs under that deadline, so a fit cannot outlive its claim; an extension that matches zero rows means another replica took the row, and it is skipped without fitting or finishing. `next_run_at` advances, `last_run_at`/`last_status` are written, `forecast.snapshots.updated_at` moves; a failure records `last_status = "error: … (attempt N)"` and is due again after `min(lease × 2^(N-1), FORECAST_RETRAIN_RETRY_MAX)`, with `N` reset to 0 by a success and left alone by a busy compute slot (`errBusy`), which only costs a tick. Every asked-for tick logs `msg="retrain tick" claimed=… ok=… failed=…`, and no tick ever fails a user query. Every tick also **collects** what nothing refreshes (v14): a snapshot untouched for `FORECAST_SNAPSHOT_TTL` (default `72h`; `0` disables the sweep, a value below `1h` is refused and the default kept) is deleted, a row idle for the whole window with no snapshot behind it goes with it (a row another replica has claimed is not idle — neither `next_run_at` nor `last_run_at` moves while a claim is in flight — so a sweep cannot delete a row mid-fit and have the reconcile hand back the deployment default in place of an admin's cron), and a snapshot without a row gets the deployment default schedule back — which is what keeps *deleting a schedule row* from deleting the model (F5). `FORECAST_RETRAIN_ENABLED=false` turns the sweep off with the ticker; a sweep failure is a log line, never a failed query. |
 
 **Positive — Compose:** `$PG "SELECT scope,key,last_run_at,last_status,next_run_at FROM forecast.retrain ORDER BY next_run_at"`
 showed the panel rows advancing on the `*/5` cron with `last_status ok` (`…10:55:24Z`, then `…11:00:32Z`), and
@@ -665,9 +665,9 @@ the plugin had created the table — the documented ownership boundary, not a cr
 | --- | --- |
 | **Function** | Lease due rows so any number of workers can share the queue without a coordinator. |
 | **Who can use** | **Operator**. |
-| **How configured** | `TRAIN_CONCURRENCY` (2), retry interval (lease), `SHARD_MEMBERSHIP=store`. |
-| **Input params** | None; the claim takes the oldest due rows with `FOR UPDATE SKIP LOCKED` and stamps `claimed_by`/`claimed_until`. |
-| **Expected result** | `last_status`/`last_run_at`/`next_run_at` move on success; a failure records `error: …` and is retried sooner than the cron. |
+| **How configured** | `TRAIN_CONCURRENCY` (2), `RETRAIN_RETRY` (the retry backoff's base, 5m), `RETRAIN_LEASE` (the claim's work lease, derived as `max(RETRAIN_RETRY, ceil(LOOKBACK / DRUID_MAX_RANGE) × DRUID_TIMEOUT + 1m)` — 15m at the sandbox shape), `RETRAIN_RETRY_MAX` (the backoff's cap, default 1h, refused at startup unless it exceeds `RETRAIN_RETRY`), `SHARD_MEMBERSHIP=store`. |
+| **Input params** | None; the claim takes the oldest due rows with `FOR UPDATE SKIP LOCKED` and stamps `claimed_by`/`claimed_until`. Each claim is then re-extended to `RETRAIN_LEASE` right before its fit, so a fit that takes longer than a tick is still covered. |
+| **Expected result** | `last_status`/`last_run_at`/`next_run_at` move on success, with `attempts` reset to 0; a failure records `error: … (attempt N)` and is due again after `min(RETRAIN_RETRY × 2^(N-1), RETRAIN_RETRY_MAX)` — sooner than the cron for a fresh failure, at the cap for a chronic one. An expired lease re-admits the row to any survivor (the row is still due, because a claim never moves `next_run_at`), an extension that matches zero rows means a survivor owns it and is skipped with no Druid request and no finish, and the tick logs `msg="retrain tick" claimed=… retrained=… failed=…`. |
 
 **Positive — Compose:** `$PG "UPDATE forecast.retrain SET next_run_at=now() WHERE scope='baseline' AND key='ready'"`
 then one tick → `last_status ok`, `last_run_at` set, `next_run_at` at the next cron slot,
@@ -792,7 +792,7 @@ a `DEFAULT_RETRAIN_CRON` error, `SCAN_RANGE must be at least LOOKBACK + 2*INTERV
 | **Who can use** | **Operator** (a probe would be the caller — there is none). |
 | **How configured** | Nothing to configure; the binary opens no listener. |
 | **Input params** | — |
-| **Expected result** | No published port, no listener in the network namespace, exit code 0 on `stop`. |
+| **Expected result** | No published port, no listener in the network namespace, exit code 0 on `stop`, and the claims this tick still holds are **released** on the way out (`next_run_at = now`, `last_status = 'error: interrupted'`, `attempts` untouched) so a rolling restart hands the queue back instead of parking up to `TRAIN_CONCURRENCY` rows per worker for a whole lease. |
 
 **Positive — Compose:** `docker compose config` reports no `ports`/`expose` for the worker; inside the network,
 `nc -z -w2 <worker-ip> 8080` returned rc=1 (nothing listening) against a control host where it returned rc=0;
@@ -941,6 +941,7 @@ source and are **not** backed by a live observation in this run:
 | `DRUID_MAX_INFLIGHT` saturation | `timeseries-baselines/druid.go`, `timeseries-baselines/limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
 | `FORECAST_MAX_INFLIGHT` env/ini precedence | `pkg/plugin/limits.go` | Only the jsonData path was used (the Compose env does not set it). |
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
+| The **plugin** scheduler's lease reclaim, `Extend` skip and tick counters under a mid-fit kill | `pkg/plugin/retrain.go` (`retrainOne`), `pkg/plugin/schedule.go` | Pass 7 measured the identical protocol live on the worker side (Pass 7's SIGKILL/SIGTERM run) and pinned it in `TestPostgresReclaimsAnExpiredLease`, `TestRetrainOneClaimLostSkipsTheRow` and `TestRetryDelay`, but the Compose Grafana was down, so no `gpx_forecast` process was killed mid-retrain this pass. |
 | A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |
 
 ## Discrepancies found
@@ -1335,3 +1336,57 @@ moved from the pass-6 pin (`fcdb8f2d…` → `eb07112c…`, `df0642b9…` → `6
 byte-identical because the review changed only `src/forecast-panel` and `pkg/`, which is what the change set
 predicts and a check that the image really is this source.
 
+
+### Pass 7 (2026-10-09) — retrain reliability (v15 / worker v6), measured on Compose with two real worker processes
+
+Pass 7 verified the reliability contract (`docs/INTENTIONS.md` v15 in this repo, v6 in `timeseries-baselines`)
+against the working tree, on the Compose stack's `overlay-postgres` and its Druid. The schema half was measured on a
+database this pass created and dropped (`mcheck`): `FORECAST_STORE_URL=…/mcheck go run ./cmd/migrate` printed
+`applied 0001_snapshots`, `applied 0002_retrain`, `applied 0003_retrain_attempts`; a second run printed
+`nothing to apply (3 known, 3 applied)`; `select version, name from forecast.schema_migrations` listed the three
+rows and `\d forecast.retrain` showed `attempts | integer | not null | 0`. Against a database whose ledger was
+already complete the same statement was a no-op, which is the upgrade path of a deployment that ran the CLI before
+this pass existed.
+
+**The worker's half was measured with two real processes and a real SIGKILL.** The linux worker was built from the
+tree (18,210,613 B) and run twice with `docker compose run` as `smoke-w1` / `smoke-w2` (`INTERVAL=10s`,
+`RETRAIN_LEASE=40s`, `RETRAIN_RETRY=20s`, `RETRAIN_RETRY_MAX=5m`, `DRUID_MAX_RPS=1`, the rest from the Compose
+service). Druid `metrics` held `ready` and `live` at 21,600 points each (`2026-09-24T18:02Z` → `2026-10-09T18:01Z`,
+i.e. 15 days) and `short` at 4,320. On the first tick **both** `baseline` rows were claimed by `172.19.0.12`
+(`smoke-w1`) with `claimed_until` 40 s out — the extension the contract adds — and `attempts 0` in flight. Killing
+that container with `docker kill` (no signal handler, so only the lease can recover it) at `18:03:24` produced, in
+the survivor's own logs:
+
+```
+18:04:17.407 ERROR msg=retrain metric_hash=live  err="step between the last two points is 2m0s, want 1m" attempts=1
+18:04:18.406 ERROR msg=retrain metric_hash=ready err="step between the last two points is 2m0s, want 1m" attempts=1
+18:04:18.409 INFO  msg="retrain tick" shard=172.19.0.13 claimed=2 retrained=0 failed=2
+18:04:46.451 INFO  msg="retrain tick" shard=172.19.0.13 claimed=2 retrained=2 failed=0
+```
+
+— the two rows the dead worker held were re-claimed by `172.19.0.13` after the 40 s lease (the survivor was
+ticking slowly because each tick spends ~30 s on its own fits), the first attempt recorded `attempts=1` and spaced
+its retry by the base delay, and the second retrained both: `last_status ok`, `attempts` back to **0**,
+`next_run_at 18:05:00` (the Compose `*/5 * * * *` cron) and `baselines.snapshots.updated_at` `18:04:45` / `18:04:46`.
+The dead peer's heartbeat expiry moved the survivor's view from `peers=2 owned=2` to `peers=1 owned=3`, and the
+retrain happened anyway — the claim is fleet-wide, exactly as v6 states.
+
+**SIGTERM hands the claims back.** Stopped mid-fit (`docker stop smoke-w2`, the holder of both rows, `18:05:20`),
+the cancelled tick logged `level=ERROR msg="retrain finish" metric_hash=… err="context canceled"` for both rows
+(a failed finish deliberately does **not** unhold), and the shutdown release then wrote the row state
+`claimed_by` NULL, `last_status error: interrupted`, `next_run_at` = the stop second (already due when read 4 s
+later) with `attempts` still **0** — a rolling restart costs no lease-length wait, and a deployment is not counted
+as the row's failure. Both smoke containers were removed afterwards.
+
+**The plugin's half is covered by its gated tests, not by a live Grafana this pass.** With `FORECAST_TEST_PG` set,
+`go test ./pkg/... ./cmd/...` ran with **0 skips** and the worker's suite likewise (`BASELINE_TEST_PG`), including
+`TestPostgresReclaimsAnExpiredLease` (plugin) and `TestPostgresClaimReclaimsAnExpiredLease` (worker): a live lease
+holds the fleet out, an expired one is re-claimed, `Extend`/`Finish` by the stale owner match zero rows, and the
+survivor's finish is the one that lands with its own attempt count. `TestRetrainOneClaimLostSkipsTheRow` and
+`TestPublisherSkipsARowWhoseClaimMovedOn` pin the skip (no fetch, no fit, no finish), `TestPublisherShutdownReleasesHeldClaims`
+the release, and `TestRetryDelay` / `TestWorkLease` the curve and the derivation
+(`max(RETRAIN_RETRY, ceil(LOOKBACK / DRUID_MAX_RANGE) × DRUID_TIMEOUT + 1m)` = 15 m at the sandbox shape and 6 m in
+the plugin). The assertions were shown to bite: a flat `retryDelay`, an un-reset attempt counter and an
+owner-unguarded `Extend` each failed their test in both repos before being reverted. **Not measured live this
+pass:** the plugin scheduler's own kill/reclaim (it needs a Grafana process and `/api/org`, and the Compose Grafana
+was down), and the Kubernetes path.

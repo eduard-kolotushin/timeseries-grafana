@@ -57,7 +57,10 @@ type fakePool struct {
 	execErr func(sql string) error
 	rowErr  error
 	// shape is what the primary-key probes answer.
-	shape      bool
+	shape bool
+	// shapeFor, when set, answers per statement instead of shape, so a test can make
+	// one schema guard pass and another fail (the schedule table has two).
+	shapeFor   func(sql string) bool
 	statements []string
 }
 
@@ -87,8 +90,12 @@ func (p *fakePool) Query(context.Context, string, ...any) (pgx.Rows, error) {
 	return nil, errors.New("fakePool has no rows")
 }
 
-func (p *fakePool) QueryRow(context.Context, string, ...any) pgx.Row {
-	return fakeRow{err: p.rowErr, shape: p.shape}
+func (p *fakePool) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
+	shape := p.shape
+	if p.shapeFor != nil {
+		shape = p.shapeFor(sql)
+	}
+	return fakeRow{err: p.rowErr, shape: shape}
 }
 
 func (p *fakePool) Begin(context.Context) (pgx.Tx, error) { return fakeTx{p: p}, nil }
@@ -207,6 +214,27 @@ func TestScheduleDDLFailureLeavesSnapshotsServing(t *testing.T) {
 	}
 	if db.count() == attempts {
 		t.Fatal("the DDL was never retried after the backoff")
+	}
+}
+
+// TestScheduleTableWithoutAttemptsIsRefused: a claim writes the row's attempts and
+// the retry backoff reads it, so a table the migrations could not reach (a runtime
+// user without ALTER, a deployment that never ran the migrator) must be refused by
+// name instead of latching ready and failing every tick's claim with SQLSTATE 42703
+// — an error that names neither the migration nor the missing column.
+func TestScheduleTableWithoutAttemptsIsRefused(t *testing.T) {
+	ctx := context.Background()
+	db := &fakePool{
+		shape: true,
+		// The key probe passes, the attempts probe does not.
+		shapeFor: func(sql string) bool { return !strings.Contains(sql, "'attempts'") },
+	}
+	s := &postgresStore{pool: db, now: time.Now}
+	if err := s.ensureSchedules(ctx); !errors.Is(err, errScheduleAttempts) {
+		t.Fatalf("err=%v want errScheduleAttempts", err)
+	}
+	if s.sched.ready {
+		t.Fatal("the schedule table latched ready without its attempts column")
 	}
 }
 
@@ -541,7 +569,7 @@ func TestPostgresScheduleOrgKey(t *testing.T) {
 		}
 	}
 	// The other org's claim did not lease this org's row away.
-	if err := s.Finish(ctx, "org-key-owner", orgs[1], scopePanel, key, time.Now().Add(time.Hour), "ok"); err != nil {
+	if err := s.Finish(ctx, "org-key-owner", orgs[1], scopePanel, key, time.Now().Add(time.Hour), "ok", 0); err != nil {
 		t.Fatal(err)
 	}
 	row, ok, err := s.Row(ctx, orgs[0], scopePanel, key)
@@ -743,7 +771,7 @@ func TestPostgresSchedule(t *testing.T) {
 	// A stale owner — a retrain that outlived its lease — must not release this
 	// claim or move this row's next run: those belong to whoever holds the lease.
 	stale := next.Add(time.Hour)
-	if err := s.Finish(ctx, "test-owner-2", orgID, scopePanel, key, stale, "error: stale"); err != nil {
+	if err := s.Finish(ctx, "test-owner-2", orgID, scopePanel, key, stale, "error: stale", 1); err != nil {
 		t.Fatal(err)
 	}
 	if rows, err := s.List(ctx, orgID); err != nil {
@@ -767,7 +795,7 @@ func TestPostgresSchedule(t *testing.T) {
 		}
 	}
 
-	if err := s.Finish(ctx, "test-owner", orgID, scopePanel, key, next, "ok"); err != nil {
+	if err := s.Finish(ctx, "test-owner", orgID, scopePanel, key, next, "ok", 0); err != nil {
 		t.Fatal(err)
 	}
 	if due, err := s.Due(ctx, orgID, key, time.Now()); err != nil || due {
@@ -787,7 +815,7 @@ func TestPostgresSchedule(t *testing.T) {
 	// A released claim is not an invitation: an owner that no longer holds one must
 	// not write its outcome, or a retrain that outlived its lease would overwrite the
 	// next run and status another process already recorded for this row.
-	if err := s.Finish(ctx, "test-owner-2", orgID, scopePanel, key, stale, "error: stale"); err != nil {
+	if err := s.Finish(ctx, "test-owner-2", orgID, scopePanel, key, stale, "error: stale", 1); err != nil {
 		t.Fatal(err)
 	}
 	if rows, err := s.List(ctx, orgID); err != nil {
@@ -1084,5 +1112,94 @@ WHERE conrelid = 'forecast.snapshots'::regclass AND contype IN ('p', 'u')
 	}
 	if s.snap.ready {
 		t.Fatal("the store latched ready on a table with no (org_id, cache_key) key")
+	}
+}
+
+// TestPostgresReclaimsAnExpiredLease is the dead-worker case the reliability
+// contract exists for: a process claims a due row, dies mid-retrain and never
+// finishes it. Nothing else moves the row — a claim never touches next_run_at — so
+// once claimed_until passes, the claim predicate re-admits it to any other process
+// and a survivor retrains it. No handshake, no peer knowledge, no coordinator. The
+// stale owner can then neither extend the claim nor write its outcome over the
+// survivor's, which is what keeps a slow (not dead) process from double-training.
+func TestPostgresReclaimsAnExpiredLease(t *testing.T) {
+	ctx := context.Background()
+	s := scratchPostgresStore(t, "forecast_lease_reclaim")
+
+	const orgID = int64(4242)
+	key := "lease-reclaim-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := s.Upsert(ctx, orgID, ScheduleRow{
+		Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Enabled: true,
+		Spec:      json.RawMessage(`{"queries":[{"refId":"A"}],"model":"baseline"}`),
+		NextRunAt: time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claim := func(owner string) bool {
+		rows, err := s.Claim(ctx, orgID, owner, time.Minute, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if row.Key == key {
+				return true
+			}
+		}
+		return false
+	}
+	if !claim("dead-worker") {
+		t.Fatal("the due row was not claimed")
+	}
+	// A live lease holds every other process out, so reclaim is not early.
+	if claim("survivor") {
+		t.Fatal("a live lease was claimed twice")
+	}
+	// The crash leaves claimed_by and claimed_until exactly as they were; only the
+	// lease has to expire. This UPDATE stands in for the clock passing.
+	if _, err := s.pool.Exec(ctx, `
+UPDATE forecast.retrain SET claimed_until = now() - interval '1 second'
+WHERE scope = $1 AND org_id = $2 AND key = $3`, scopePanel, orgID, key); err != nil {
+		t.Fatal(err)
+	}
+	if !claim("survivor") {
+		t.Fatal("an expired lease was not re-claimed: the dead worker stranded the row")
+	}
+	// The dead process is no longer an owner: it may neither extend the claim nor write
+	// its outcome — next run, status or attempt count — over the survivor's.
+	if ok, err := s.Extend(ctx, "dead-worker", orgID, scopePanel, key, time.Hour); err != nil || ok {
+		t.Fatalf("a stale owner extended the claim: ok=%v err=%v", ok, err)
+	}
+	next := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Millisecond)
+	if err := s.Finish(ctx, "dead-worker", orgID, scopePanel, key, next, "error: dead", 7); err != nil {
+		t.Fatal(err)
+	}
+	var (
+		attempts int
+		status   string
+		gotNext  time.Time
+	)
+	if err := s.pool.QueryRow(ctx, `
+SELECT attempts, coalesce(last_status, ''), coalesce(next_run_at, now())
+FROM forecast.retrain WHERE scope = $1 AND org_id = $2 AND key = $3`, scopePanel, orgID, key).
+		Scan(&attempts, &status, &gotNext); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || status == "error: dead" || gotNext.Equal(next) {
+		t.Fatalf("a stale owner wrote its outcome: attempts=%d status=%q next=%s", attempts, status, gotNext)
+	}
+	// The survivor still owns it: its extension succeeds and its finish is the one that
+	// lands, with the attempt count it reports.
+	if ok, err := s.Extend(ctx, "survivor", orgID, scopePanel, key, time.Hour); err != nil || !ok {
+		t.Fatalf("the owner could not extend its own claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "survivor", orgID, scopePanel, key, next, "error: upstream down (attempt 1)", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT attempts, last_status FROM forecast.retrain WHERE scope = $1 AND org_id = $2 AND key = $3`, scopePanel, orgID, key).
+		Scan(&attempts, &status); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || !strings.Contains(status, "attempt 1") {
+		t.Fatalf("the owner's finish did not record the attempt: attempts=%d status=%q", attempts, status)
 	}
 }

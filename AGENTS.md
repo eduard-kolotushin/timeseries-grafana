@@ -28,7 +28,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Nested datasource `QueryData` Restores snapshots; alerting uses Grafana `refId`s (metric vs forecast / interval)
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
 - No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots and schedules; `POST /api/ds/query` on Grafana's own API is not a datasource client
-- Stay within v1–v14 unless `docs/INTENTIONS.md` is updated first
+- Stay within v1–v15 unless `docs/INTENTIONS.md` is updated first
 
 ## v1 in scope
 
@@ -86,7 +86,11 @@ Versioned schema migrations, and a uuid primary key on every table this plugin o
 
 Snapshot retention and schedule reconciliation, swept in one transaction on the retrain ticker (`pkg/plugin/retention.go`, so `FORECAST_RETRAIN_ENABLED=false` turns it off too). A schedule row does not own a snapshot: deleting a row leaves the model and the next tick re-creates the row with the deployment default cron. A snapshot nothing refreshed within `FORECAST_SNAPSHOT_TTL` (default `72h`, `0` disables, a value below `1h` is refused and the default kept) is deleted, and so is a row idle for the whole window with no snapshot behind it (which is also the `baseline` rule; `baselines.snapshots` belongs to `timeseries-baselines`, which sweeps it under `SNAPSHOT_TTL`). `DELETE /schedules?scope=&key=&drop=row|model` removes the row only (default) or the model with every row for that key, superseded siblings included.
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14 out of scope
+## v15 in scope
+
+Retrain reliability on `forecast.retrain`: a failed or interrupted `panel` retrain is never lost, never retrained twice at once, and never retried in a storm. The claim is extended to `FORECAST_RETRAIN_LEASE` immediately before a row's work and the work is bounded by that lease, so a fit that would outlive its claim is dropped instead of duplicated; an extension matching zero rows means the claim was handed over, so that row is skipped without fitting or finishing it. A failed retrain increments a persisted `attempts` column (migration `0003_retrain_attempts.sql`) and is due again after `min(FORECAST_RETRAIN_LEASE × 2^(attempts-1), FORECAST_RETRAIN_RETRY_MAX)` — the new cap defaults to `1h` and a value not longer than the lease is refused and the default kept; a success resets the count and schedules the next cron slot, and `errBusy` burns no attempt. The row's attempt count rides `last_status` (`error: … (attempt N)`) — no new `GET /schedules` field, no dead-letter queue, no disable-after-N — and each tick logs claimed/retrained/failed counts. A `forecast.retrain` without `attempts` fails the schedule store loudly, naming `gpx_forecast_migrate`, rather than silently claiming nothing.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15 out of scope
 
 Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages beyond the landing, Configuration, and Retrain schedules pages, baseline publisher process, a job queue, a second migration tool (Flyway, goose, golang-migrate) or a schema-diff ORM, an integer surrogate key on any table this plugin owns, retention outside the retrain ticker (a second scheduler, a Grafana-side cron, a separate collector process, or a table the worker owns).
 

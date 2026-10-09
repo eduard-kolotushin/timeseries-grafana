@@ -46,6 +46,26 @@ SELECT EXISTS (
 // the table still keys on (scope, key), so the process cannot store per-org rows.
 var errScheduleKey = errors.New("forecast store: forecast.retrain has no per-org unique key; it needs UNIQUE (scope, org_id, key), which the table owner must apply")
 
+// scheduleAttemptsSQL reports whether forecast.retrain carries the attempts column
+// the retry backoff writes. The migrations add it; a runtime user that may not
+// ALTER, or a deployment that never ran gpx_forecast_migrate, leaves the queue
+// readable but unwritable for the backoff, and a claim would then fail on every
+// tick with SQLSTATE 42703 — an error that names neither the migration nor the
+// missing column — so the store must refuse the table instead.
+const scheduleAttemptsSQL = `
+SELECT EXISTS (
+  SELECT 1
+  FROM pg_attribute a
+  JOIN pg_class t ON t.oid = a.attrelid
+  JOIN pg_namespace n ON n.oid = t.relnamespace
+  WHERE n.nspname = 'forecast' AND t.relname = 'retrain'
+    AND a.attname = 'attempts' AND a.attnum > 0 AND NOT a.attisdropped
+)`
+
+// errScheduleAttempts is the attempts column's upgrade error: the table is keyed
+// correctly, but a claim would still fail on every tick.
+var errScheduleAttempts = errors.New("forecast store: forecast.retrain has no attempts column; the table owner must apply the migrations (gpx_forecast_migrate)")
+
 // snapshotKeySQL is the same catalog probe for forecast.snapshots: the
 // (org_id, cache_key) uniqueness Put's ON CONFLICT target needs, or the primary
 // key of a table that predates the uuid surrogate. A readable but un-keyed table
@@ -125,25 +145,38 @@ func (s *postgresStore) Ping(ctx context.Context) error { return s.ensure(ctx) }
 // table it requires the per-org key shape, because a snapshots table without it
 // accepts no write at all.
 func (s *postgresStore) ensure(ctx context.Context) error {
-	return s.ensureTable(ctx, &s.snap, `SELECT 1 FROM forecast.snapshots LIMIT 1`, snapshotKeySQL, errSnapshotKey)
+	return s.ensureTable(ctx, &s.snap, `SELECT 1 FROM forecast.snapshots LIMIT 1`, schemaGuard{snapshotKeySQL, errSnapshotKey})
 }
 
 // ensureSchedules is the same contract for the schedule table. Readiness is tracked per
 // table: a deployment that cannot CREATE and upgrades with forecast.retrain missing must
 // keep serving snapshots (and keep retrying the DDL) instead of latching ready and
 // answering every schedule call with a permanent relation-does-not-exist. Unlike the
-// snapshot table it also requires the per-org key shape, because a schedule row shared
-// between two orgs is a correctness bug rather than a missing feature.
+// snapshot table it requires two shapes, because a claimable schedule table needs both
+// the per-org key (a row shared between two orgs is a correctness bug) and the attempts
+// column (a claim writes it, and the retry backoff reads it).
 func (s *postgresStore) ensureSchedules(ctx context.Context) error {
-	return s.ensureTable(ctx, &s.sched, `SELECT 1 FROM forecast.retrain LIMIT 1`, scheduleKeySQL, errScheduleKey)
+	return s.ensureTable(ctx, &s.sched, `SELECT 1 FROM forecast.retrain LIMIT 1`,
+		schemaGuard{scheduleKeySQL, errScheduleKey},
+		schemaGuard{scheduleAttemptsSQL, errScheduleAttempts},
+	)
 }
 
-// ensureTable provisions one table and records its readiness. shapeSQL, when set,
-// must answer true or this store stays unusable for that table: the migrations may
-// have been refused by a runtime user without ALTER, and a table with the old key
-// is worse than no schedules at all. shapeErr is what the caller reports when the
-// shape is wrong, so the message names the table's own missing key.
-func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, readySQL, shapeSQL string, shapeErr error) error {
+// schemaGuard is one shape requirement of a table: a catalog query that must answer
+// true, and the error the store reports when it does not. Each guard's error names
+// its own missing key or column, so a table that is readable but unusable says why.
+type schemaGuard struct {
+	sql string
+	err error
+}
+
+// ensureTable provisions one table and records its readiness. Every guard must
+// answer true or this store stays unusable for that table: the migrations may have
+// been refused by a runtime user without ALTER, and a table with the old key (or
+// without a column a claim writes) is worse than no schedules at all. The probe
+// runs after the migration attempt, so a first run that applies the files passes it
+// on the same call.
+func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, readySQL string, guards ...schemaGuard) error {
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
 	if probe.ready {
@@ -178,14 +211,17 @@ func (s *postgresStore) ensureTable(ctx context.Context, probe *storeProbe, read
 			slog.Warn("forecast schema is newer than this binary", "versions", res.Unknown)
 		}
 	}
-	if shapeSQL != "" {
+	for _, guard := range guards {
+		if guard.sql == "" {
+			continue
+		}
 		var ok bool
-		if err := s.pool.QueryRow(ctx, shapeSQL).Scan(&ok); err != nil {
+		if err := s.pool.QueryRow(ctx, guard.sql).Scan(&ok); err != nil {
 			probe.err = fmt.Errorf("forecast store: %w", err)
 			return probe.err
 		}
 		if !ok {
-			probe.err = shapeErr
+			probe.err = guard.err
 			return probe.err
 		}
 	}

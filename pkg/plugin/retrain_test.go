@@ -117,7 +117,8 @@ func TestComputeRetrain(t *testing.T) {
 			name: "defaults",
 			want: retrainConfig{
 				Enabled: true, Tick: defaultRetrainTick, Lease: defaultRetrainLease,
-				Cron: defaultRetrainCron, Timezone: "", GrafanaURL: defaultGrafanaURL,
+				RetryMax: defaultRetrainRetryMax,
+				Cron:     defaultRetrainCron, Timezone: "", GrafanaURL: defaultGrafanaURL,
 				SnapshotTTL: defaultSnapshotTTL,
 			},
 		},
@@ -131,11 +132,12 @@ func TestComputeRetrain(t *testing.T) {
 				"FORECAST_GRAFANA_URL":                    "http://from-env:3000",
 				"FORECAST_GRAFANA_TOKEN":                  "env-token",
 				"FORECAST_SNAPSHOT_TTL":                   "24h",
+				"FORECAST_RETRAIN_RETRY_MAX":              "3h",
 				store.PluginEnvPrefixApp + "RETRAIN_CRON": "*/30 * * * *",
 			},
 			settings: backend.AppInstanceSettings{JSONData: jsonAll},
 			want: retrainConfig{
-				Enabled: false, Tick: 15 * time.Second, Lease: 90 * time.Second,
+				Enabled: false, Tick: 15 * time.Second, Lease: 90 * time.Second, RetryMax: 3 * time.Hour,
 				Cron: "*/2 * * * *", Timezone: "Europe/Moscow", GrafanaURL: "http://from-env:3000", Token: "env-token",
 				SnapshotTTL: 24 * time.Hour,
 			},
@@ -148,7 +150,7 @@ func TestComputeRetrain(t *testing.T) {
 				"grafana_url":  "http://from-ini:3000",
 			},
 			want: retrainConfig{
-				Enabled: true, Tick: 10 * time.Second, Lease: defaultRetrainLease,
+				Enabled: true, Tick: 10 * time.Second, Lease: defaultRetrainLease, RetryMax: defaultRetrainRetryMax,
 				Cron: "*/20 * * * *", GrafanaURL: "http://from-ini:3000",
 				SnapshotTTL: defaultSnapshotTTL,
 			},
@@ -157,7 +159,7 @@ func TestComputeRetrain(t *testing.T) {
 			name:     "jsonData last, secure token",
 			settings: backend.AppInstanceSettings{JSONData: jsonAll, DecryptedSecureJSONData: map[string]string{"grafanaToken": "secret"}},
 			want: retrainConfig{
-				Enabled: false, Tick: 45 * time.Second, Lease: 2 * time.Minute,
+				Enabled: false, Tick: 45 * time.Second, Lease: 2 * time.Minute, RetryMax: defaultRetrainRetryMax,
 				Cron: "*/10 * * * *", Timezone: "Europe/Moscow", GrafanaURL: "http://from-json:3000", Token: "secret",
 				SnapshotTTL: 48 * time.Hour,
 			},
@@ -169,9 +171,38 @@ func TestComputeRetrain(t *testing.T) {
 				"FORECAST_RETRAIN_LEASE": "not-a-duration",
 				// A window too short to trust is refused like the other bad values.
 				"FORECAST_SNAPSHOT_TTL": "30m",
+				// A cap that does not exceed the lease is refused too: it would turn
+				// the backoff into a fixed delay.
+				"FORECAST_RETRAIN_RETRY_MAX": "1m",
 			},
 			want: retrainConfig{
 				Enabled: true, Tick: defaultRetrainTick, Lease: defaultRetrainLease,
+				RetryMax: defaultRetrainRetryMax,
+				Cron:     defaultRetrainCron, GrafanaURL: defaultGrafanaURL,
+				SnapshotTTL: defaultSnapshotTTL,
+			},
+		},
+		{
+			name: "a retry cap longer than the lease is kept",
+			env: map[string]string{
+				"FORECAST_RETRAIN_LEASE":     "2m",
+				"FORECAST_RETRAIN_RETRY_MAX": "45m",
+			},
+			want: retrainConfig{
+				Enabled: true, Tick: defaultRetrainTick, Lease: 2 * time.Minute, RetryMax: 45 * time.Minute,
+				Cron: defaultRetrainCron, GrafanaURL: defaultGrafanaURL,
+				SnapshotTTL: defaultSnapshotTTL,
+			},
+		},
+		{
+			name: "a lease above the default cap doubles it",
+			env: map[string]string{
+				// The default cap is 1h; a two-hour lease would put the cap below the
+				// base the delay doubles from, so the cap follows the lease instead.
+				"FORECAST_RETRAIN_LEASE": "2h",
+			},
+			want: retrainConfig{
+				Enabled: true, Tick: defaultRetrainTick, Lease: 2 * time.Hour, RetryMax: 4 * time.Hour,
 				Cron: defaultRetrainCron, GrafanaURL: defaultGrafanaURL,
 				SnapshotTTL: defaultSnapshotTTL,
 			},
@@ -777,18 +808,26 @@ func TestRetrainOne(t *testing.T) {
 			store:   store,
 			sched:   sched,
 			poster:  poster,
-			retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, Tick: time.Second},
+			retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, RetryMax: time.Hour, Tick: time.Second},
 			limit:   lim,
 		}, store, sched
 	}
 
 	t.Run("ok writes a snapshot and the next run", func(t *testing.T) {
 		app, store, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, newWorkLimiter(1))
+		row := newRow()
+		// A row with failures behind it: a success must reset the counter, or the row
+		// would keep backing off even after it started working again.
+		row.Attempts = 4
+		sched.hold(row, retrainOwner(), time.Minute)
 		before := time.Now()
-		app.retrainOne(ctx, retrainOwner(), newRow())
+		app.retrainOne(ctx, retrainOwner(), row)
 		finishes := sched.finished()
 		if len(finishes) != 1 {
 			t.Fatalf("finishes=%+v", finishes)
+		}
+		if finishes[0].Attempts != 0 {
+			t.Fatalf("a success left attempts=%d, want the counter reset", finishes[0].Attempts)
 		}
 		if finishes[0].Status != "ok" || finishes[0].Scope != scopePanel || finishes[0].Key != key {
 			t.Fatalf("finish=%+v", finishes[0])
@@ -818,6 +857,7 @@ func TestRetrainOne(t *testing.T) {
 				t.Fatal(err)
 			}
 			row.Spec = raw
+			sched.hold(row, retrainOwner(), time.Minute)
 			app.retrainOne(ctx, retrainOwner(), row)
 			snap, ok, err := store.Get(ctx, 7, key)
 			if err != nil || !ok {
@@ -836,14 +876,19 @@ func TestRetrainOne(t *testing.T) {
 
 	t.Run("fetch failure records the error and retries after the lease", func(t *testing.T) {
 		app, store, sched := newRetrainApp(&fakePoster{err: errors.New("upstream down")}, newWorkLimiter(1))
+		row := newRow()
+		sched.hold(row, retrainOwner(), time.Minute)
 		before := time.Now()
-		app.retrainOne(ctx, retrainOwner(), newRow())
+		app.retrainOne(ctx, retrainOwner(), row)
 		finishes := sched.finished()
 		if len(finishes) != 1 {
 			t.Fatalf("finishes=%+v", finishes)
 		}
-		if finishes[0].Status != "error: upstream down" {
+		if finishes[0].Status != "error: upstream down (attempt 1)" {
 			t.Fatalf("status=%q", finishes[0].Status)
+		}
+		if finishes[0].Attempts != 1 {
+			t.Fatalf("attempts=%d want 1", finishes[0].Attempts)
 		}
 		if !finishes[0].Next.After(before) {
 			t.Fatalf("next=%s is not in the future", finishes[0].Next)
@@ -861,8 +906,10 @@ func TestRetrainOne(t *testing.T) {
 		}
 		defer release()
 		app, _, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, lim)
+		row := newRow()
+		sched.hold(row, retrainOwner(), time.Minute)
 		before := time.Now()
-		app.retrainOne(ctx, retrainOwner(), newRow())
+		app.retrainOne(ctx, retrainOwner(), row)
 		finishes := sched.finished()
 		if len(finishes) != 1 || !strings.Contains(finishes[0].Status, errBusy.Error()) {
 			t.Fatalf("finishes=%+v", finishes)
@@ -876,6 +923,7 @@ func TestRetrainOne(t *testing.T) {
 		app, _, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, newWorkLimiter(1))
 		row := newRow()
 		row.Spec = json.RawMessage(`{"model":"baseline"}`)
+		sched.hold(row, retrainOwner(), time.Minute)
 		app.retrainOne(ctx, retrainOwner(), row)
 		finishes := sched.finished()
 		if len(finishes) != 1 || !strings.HasPrefix(finishes[0].Status, "error:") {
@@ -887,6 +935,7 @@ func TestRetrainOne(t *testing.T) {
 		app, _, sched := newRetrainApp(&fakePoster{points: 6, step: time.Minute}, newWorkLimiter(1))
 		row := newRow()
 		row.Scope = scopeBaseline
+		sched.hold(row, retrainOwner(), time.Minute)
 		app.retrainOne(ctx, retrainOwner(), row)
 		finishes := sched.finished()
 		if len(finishes) != 1 || !strings.HasPrefix(finishes[0].Status, "error:") {
@@ -974,7 +1023,7 @@ func TestRetrainDueClaimsAndSkipsLeasedRows(t *testing.T) {
 		store, sched := newMemoryStore(), newMemSchedules()
 		return &App{
 			store: store, sched: sched, poster: poster,
-			retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, Tick: time.Second},
+			retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, RetryMax: time.Hour, Tick: time.Second},
 			limit:   newWorkLimiter(1),
 		}, store, sched
 	}()
@@ -1313,10 +1362,11 @@ func TestRetrainWindowCapRefusesTheFit(t *testing.T) {
 	store, sched := newMemoryStore(), newMemSchedules()
 	app := &App{
 		store: store, sched: sched, poster: &grafanaPoster{url: server.URL, client: server.Client()},
-		retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, Tick: time.Second},
+		retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, RetryMax: time.Hour, Tick: time.Second},
 		limit:   newWorkLimiter(1),
 	}
 	row := ScheduleRow{OrgID: 7, Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Spec: spec}
+	sched.hold(row, retrainOwner(), time.Minute)
 
 	if err := app.trainFromSpec(ctx, row); !errors.Is(err, errWindowTooManyPoints) {
 		t.Fatalf("err=%v", err)
@@ -1397,10 +1447,11 @@ func TestRetrainReplyBounds(t *testing.T) {
 			store, sched := newMemoryStore(), newMemSchedules()
 			app := &App{
 				store: store, sched: sched, poster: tc.poster,
-				retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, Tick: time.Second},
+				retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, RetryMax: time.Hour, Tick: time.Second},
 				limit:   newWorkLimiter(1),
 			}
 			row := ScheduleRow{OrgID: 7, Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Spec: testTrainSpec()}
+			sched.hold(row, retrainOwner(), time.Minute)
 			err := app.trainFromSpec(ctx, row)
 			if err == nil || !strings.Contains(err.Error(), tc.wantPhrase) {
 				t.Fatalf("err=%v want %q", err, tc.wantPhrase)
@@ -1418,5 +1469,75 @@ func TestRetrainReplyBounds(t *testing.T) {
 				t.Fatalf("snapshot published: ok=%v err=%v", ok, err)
 			}
 		})
+	}
+}
+
+// TestRetryDelay pins the backoff curve: the base doubled once per further attempt,
+// clamped at the cap, so a broken row settles at one retry per cap instead of one per
+// base forever. The degenerate inputs matter as much as the curve: a missing attempt
+// count behaves like a first failure, and an overflow at a very high count lands on
+// the cap rather than on a zero (or negative) delay, which would make the row due
+// immediately and turn the backoff into a hot loop.
+func TestRetryDelay(t *testing.T) {
+	const (
+		base = time.Minute
+		max  = time.Hour
+	)
+	for _, tc := range []struct {
+		name    string
+		base    time.Duration
+		max     time.Duration
+		attempt int
+		want    time.Duration
+	}{
+		{name: "first failure is the base", base: base, max: max, attempt: 1, want: base},
+		{name: "second failure doubles", base: base, max: max, attempt: 2, want: 2 * base},
+		{name: "third failure doubles again", base: base, max: max, attempt: 3, want: 4 * base},
+		{name: "the cap clamps", base: base, max: max, attempt: 7, want: max},
+		{name: "a missing attempt count behaves like the first", base: base, max: max, attempt: 0, want: base},
+		{name: "a negative attempt count behaves like the first", base: base, max: max, attempt: -3, want: base},
+		{name: "an overflow lands on the cap", base: time.Duration(1) << 62, max: time.Duration(1)<<62 - 1, attempt: 3, want: time.Duration(1)<<62 - 1},
+		{name: "a cap below the base still wins", base: time.Hour, max: time.Minute, attempt: 1, want: time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryDelay(tc.base, tc.max, tc.attempt); got != tc.want {
+				t.Fatalf("retryDelay(%s, %s, %d) = %s, want %s", tc.base, tc.max, tc.attempt, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetrainOneClaimLostSkipsTheRow: extending the claim is what makes a retrain
+// safe, and a false answer means another process took the row while this one was
+// waiting. The row must then be skipped outright — no fetch, no fit, no finish that
+// would overwrite the new owner's next run, status and attempt count — because a
+// duplicate fit is the exact load amplification the extension exists to prevent.
+func TestRetrainOneClaimLostSkipsTheRow(t *testing.T) {
+	const key = "7777777777777777777777777777777777777777777777777777777777777777"
+	ctx := context.Background()
+	poster := &fakePoster{points: 6, step: time.Minute}
+	store, sched := newMemoryStore(), newMemSchedules()
+	app := &App{
+		store: store, sched: sched, poster: poster,
+		retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, RetryMax: time.Hour, Tick: time.Second},
+		limit:   newWorkLimiter(1),
+	}
+	row := ScheduleRow{OrgID: 7, Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Spec: testTrainSpec()}
+	// The claim belongs to someone else: the state a survivor finds when the process
+	// that claimed the row crashed and this one is a tick late.
+	sched.hold(row, "someone-else", time.Minute)
+
+	out := app.retrainOne(ctx, retrainOwner(), row)
+	if poster.calls != 0 {
+		t.Fatalf("fetched %d times for a row this owner no longer holds", poster.calls)
+	}
+	if finishes := sched.finished(); len(finishes) != 0 {
+		t.Fatalf("finished a lost claim: %+v", finishes)
+	}
+	if _, ok, err := store.Get(ctx, 7, key); err != nil || ok {
+		t.Fatalf("published a snapshot for a lost claim: ok=%v err=%v", ok, err)
+	}
+	if out.ok != 0 || out.failed != 0 {
+		t.Fatalf("a skipped row is neither ok nor failed: %+v", out)
 	}
 }

@@ -55,6 +55,14 @@ const (
 	// lets a second replica steal a row that is still being retrained — both would
 	// then store a snapshot under the same key and publish duplicate work.
 	defaultRetrainLease = retrainClaimBatch*frameFetchTimeout + frameFetchTimeout + time.Minute
+	// defaultRetrainRetryMax caps the exponential retry backoff: a failed retrain
+	// is due again after lease*2^(attempts-1), clamped here. Without a cap a
+	// permanently broken row (a datasource that no longer answers, a series that
+	// was deleted) would be retried at the base delay forever, and a burst that
+	// failed many rows at once would re-enqueue all of them on the same cadence,
+	// competing with the legitimate backlog instead of backing off. The lease is
+	// the retry base, so a cap at or below it is refused and this default kept.
+	defaultRetrainRetryMax = time.Hour
 	// maxDSQueryReplyBytes caps one decoder buffer. A bounded train window
 	// (~20k points per series) is far below it; the cap only exists so a
 	// misconfigured datasource cannot exhaust plugin memory.
@@ -78,9 +86,12 @@ var errGrafanaUnauthorized = errors.New("forecast: grafana refused the scheduler
 // the process env are interchangeable. Timezone is jsonData-only: it is the
 // Configuration page's own field and has no env or ini spelling.
 type retrainConfig struct {
-	Enabled    bool
-	Tick       time.Duration
-	Lease      time.Duration
+	Enabled bool
+	Tick    time.Duration
+	Lease   time.Duration
+	// RetryMax caps the exponential retry backoff (see retryDelay). It is always
+	// longer than Lease: a value that is not is refused and the default kept.
+	RetryMax   time.Duration
 	Cron       string
 	Timezone   string
 	GrafanaURL string
@@ -119,16 +130,75 @@ func computeRetrain(ctx context.Context, settings backend.AppInstanceSettings) r
 		slog.Warn("forecast: ignoring the configured snapshot retention window", "err", err.Error())
 		snapshotTTL = defaultSnapshotTTL
 	}
+	lease := parseDuration(look.Get("FORECAST_RETRAIN_LEASE", "RETRAIN_LEASE", "retrain_lease", "retrainLease"), defaultRetrainLease)
+	retryMax, err := parseRetrainRetryMax(look.Get("FORECAST_RETRAIN_RETRY_MAX", "RETRAIN_RETRY_MAX", "retrain_retry_max", "retrainRetryMax"), lease, defaultRetrainRetryMax)
+	if err != nil {
+		// The lease is the backoff's base, so a cap that does not exceed it would
+		// turn the backoff into a fixed delay. Refused, like the TTL floor.
+		slog.Warn("forecast: ignoring the configured retrain retry cap", "err", err.Error())
+		retryMax = defaultRetrainRetryMax
+	}
+	if retryMax <= lease {
+		// Only reachable with a lease configured above the default cap: keep the
+		// cap above the base rather than below it.
+		retryMax = 2 * lease
+	}
 	return retrainConfig{
 		Enabled:     parseBool(look.Get("FORECAST_RETRAIN_ENABLED", "RETRAIN_ENABLED", "retrain_enabled", "retrainEnabled"), defaultRetrainEnabled),
 		Tick:        parseDuration(look.Get("FORECAST_RETRAIN_TICK", "RETRAIN_TICK", "retrain_tick", "retrainTick"), defaultRetrainTick),
-		Lease:       parseDuration(look.Get("FORECAST_RETRAIN_LEASE", "RETRAIN_LEASE", "retrain_lease", "retrainLease"), defaultRetrainLease),
+		Lease:       lease,
+		RetryMax:    retryMax,
 		Cron:        cronSpec,
 		Timezone:    jsonField(jd, "retrainTimezone"),
 		GrafanaURL:  url,
 		Token:       token,
 		SnapshotTTL: snapshotTTL,
 	}
+}
+
+// parseRetrainRetryMax reads the retry backoff cap. It must be strictly longer
+// than the lease it is measured against, because the lease is the backoff's base:
+// a cap at or below the base is a fixed delay wearing a backoff's name, so such a
+// value is refused and the default kept. Zero and negative are refusals too — the
+// cap is not an off switch (unlike FORECAST_SNAPSHOT_TTL), it is the ceiling every
+// retry eventually reaches.
+func parseRetrainRetryMax(s string, lease, def time.Duration) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("forecast: retrain retry max %q: %w", s, err)
+	}
+	if d <= lease {
+		return 0, fmt.Errorf("forecast: retrain retry max %s must be longer than the retrain lease %s", d, lease)
+	}
+	return d, nil
+}
+
+// retryDelay returns how long after a failure attempt n (1 = the first failure)
+// the row is due again: base doubled once per further attempt, capped at max, so a
+// row that keeps failing settles at one retry per cap instead of one per base
+// forever. attempt < 1 is treated as 1 (a row that never ran has one attempt's
+// delay), and an overflow at a very high attempt count falls back to max rather
+// than to a negative or zero delay — which would make the row due immediately and
+// turn the backoff into a hot loop.
+func retryDelay(base, max time.Duration, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := base
+	for i := 1; i < attempt; i++ {
+		d *= 2
+		if d <= 0 || d >= max {
+			return max
+		}
+	}
+	if d > max {
+		return max
+	}
+	return d
 }
 
 // parseSnapshotTTL reads the retention window. Unlike parseDuration, 0 is a value
@@ -743,10 +813,23 @@ type tickResult struct {
 	fetched bool
 	// denied is true when such a call came back 401/403.
 	denied bool
+	// claimed, ok and failed are the tick's backlog view: how many rows this tick
+	// claimed, how many it retrained, and how many it recorded as failed. A tick
+	// with claimed > 0 logs them once, so an operator can watch the queue drain —
+	// or fail to. A claim skipped because it was handed to a newer owner counts as
+	// claimed but neither ok nor failed.
+	claimed int
+	ok      int
+	failed  int
 }
 
 func (r tickResult) or(o tickResult) tickResult {
-	return tickResult{fetched: r.fetched || o.fetched, denied: r.denied || o.denied}
+	return tickResult{
+		fetched: r.fetched || o.fetched,
+		denied:  r.denied || o.denied,
+		ok:      r.ok + o.ok,
+		failed:  r.failed + o.failed,
+	}
 }
 
 // tickFromErr classifies one retrain attempt for the ticker. Only an auth
@@ -804,7 +887,11 @@ func (a *App) runScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !guard.watch(a.retrainDue(ctx)) {
+			res := a.retrainDue(ctx)
+			if res.claimed > 0 {
+				log.DefaultLogger.Info("retrain tick", "claimed", res.claimed, "ok", res.ok, "failed", res.failed)
+			}
+			if !guard.watch(res) {
 				continue
 			}
 			log.DefaultLogger.Error(
@@ -845,40 +932,96 @@ func (a *App) retrainDue(ctx context.Context) tickResult {
 	var out tickResult
 	for _, row := range rows {
 		if ctx.Err() != nil {
-			return out
+			break
 		}
 		out = out.or(a.retrainOne(ctx, owner, row))
 	}
+	// The claim statement's answer, not the processed count: a row skipped because
+	// its claim moved on was still claimed by this tick, and a row left unprocessed
+	// because the context was cancelled is the honest backlog number.
+	out.claimed = len(rows)
 	return out
 }
 
+// retrainOne retrains one claimed row and records the outcome. It owns the whole
+// reliability protocol for a row: extend the claim before working, bound the work
+// by the lease, count the failure, and space the retry by that count.
 func (a *App) retrainOne(ctx context.Context, owner string, row ScheduleRow) tickResult {
 	started := time.Now()
-	err := a.trainFromSpec(ctx, row)
+	// The lease was sized for a whole batch of rows, so a single heavy row could
+	// outlive it and be re-claimed by another replica mid-fit — duplicating the
+	// heaviest /api/ds/query and Fit work exactly when the fleet is loaded. Extend
+	// the claim to cover this row and run the row under the same deadline. Zero
+	// rows extended means the claim already moved to a newer owner: skip the row
+	// without fetching, fitting or finishing it, so their next run and status are
+	// not overwritten. An extend error is logged and the row is still worked — the
+	// claim it took still covers it.
+	if ok, err := a.sched.Extend(ctx, owner, row.OrgID, row.Scope, row.Key, a.retrain.Lease); err != nil {
+		log.DefaultLogger.Error("retrain extend", "scope", row.Scope, "key", row.Key, "err", err.Error())
+	} else if !ok {
+		log.DefaultLogger.Info("retrain claim lost", "scope", row.Scope, "key", row.Key, "owner", owner)
+		return tickResult{}
+	}
+	wctx, cancel := context.WithTimeout(ctx, a.retrain.Lease)
+	defer cancel()
+	err := a.trainFromSpec(wctx, row)
 	status := "ok"
-	// A failed retrain backs off for one lease; a busy compute slot only costs a
-	// tick, because the panel's own query is waiting on the same limiter.
+	// attempts is what the row stores after this run: 0 after a success, the
+	// previous count plus one after a failure, unchanged for a busy slot (the row
+	// never ran, so it did not fail) and for an interruption.
+	attempts := 0
 	next := time.Now().Add(a.retrain.Lease)
 	switch {
 	case err != nil:
-		status = "error: " + err.Error()
 		if errors.Is(err, errBusy) {
+			// A busy compute slot only costs a tick: the panel's own query is
+			// waiting on the same limiter, so backing off by a lease would delay a
+			// healthy retrain behind an unrelated overload. The row never ran, so
+			// it has not failed and does not burn an attempt.
+			attempts = row.Attempts
 			next = time.Now().Add(a.retrain.Tick)
+		} else {
+			attempts = row.Attempts + 1
+			next = time.Now().Add(retryDelay(a.retrain.Lease, a.retrain.RetryMax, attempts))
 		}
+		status = retryStatus(err, attempts)
 	default:
 		when, nerr := nextRun(row.Cron, row.Timezone, time.Now())
 		if nerr != nil {
-			status = "error: " + nerr.Error()
+			// A cron or timezone that no longer parses is this row's own failure,
+			// and it would fail again on the next tick: count it like a failure
+			// rather than leaving the row at "ok" with a lease-length delay.
+			attempts = row.Attempts + 1
+			status = retryStatus(nerr, attempts)
+			next = time.Now().Add(retryDelay(a.retrain.Lease, a.retrain.RetryMax, attempts))
 		} else {
 			next = when
 		}
 	}
-	if ferr := a.sched.Finish(ctx, owner, row.OrgID, row.Scope, row.Key, next, status); ferr != nil {
+	if ferr := a.sched.Finish(ctx, owner, row.OrgID, row.Scope, row.Key, next, status, attempts); ferr != nil {
 		log.DefaultLogger.Error("retrain finish", "scope", row.Scope, "key", row.Key, "status", status, "err", ferr.Error())
 	} else {
-		log.DefaultLogger.Info("retrain", "scope", row.Scope, "key", row.Key, "status", status, "dur", time.Since(started).Round(time.Millisecond).String())
+		log.DefaultLogger.Info("retrain", "scope", row.Scope, "key", row.Key, "status", status, "attempts", attempts, "dur", time.Since(started).Round(time.Millisecond).String())
 	}
-	return tickFromErr(err)
+	out := tickFromErr(err)
+	if err == nil {
+		out.ok = 1
+	} else {
+		out.failed = 1
+	}
+	return out
+}
+
+// retryStatus renders a failed retrain's status: the error, with the attempt
+// count appended once the row has one. The count is what makes a chronic failure
+// visible in the Retrain schedules table (last_status) without a new API field, so
+// it is omitted only while it is zero — "(attempt 0)" would read as a failure that
+// never happened.
+func retryStatus(err error, attempts int) string {
+	if attempts > 0 {
+		return fmt.Sprintf("error: %s (attempt %d)", err, attempts)
+	}
+	return "error: " + err.Error()
 }
 
 // trainFromSpec re-runs the fit the browser did, from the stored spec alone.

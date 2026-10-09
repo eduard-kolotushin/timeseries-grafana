@@ -22,11 +22,12 @@ func schedKey(scope string, orgID int64, key string) string {
 }
 
 type finishCall struct {
-	Owner  string
-	Scope  string
-	Key    string
-	Next   time.Time
-	Status string
+	Owner    string
+	Scope    string
+	Key      string
+	Next     time.Time
+	Status   string
+	Attempts int
 }
 
 // schedLease is one claimed row's holder and expiry, the in-memory twin of the
@@ -257,10 +258,10 @@ func (m *memSchedules) Claim(_ context.Context, orgID int64, owner string, lease
 // Finish mirrors the SQL's owner predicate: only the holder of the claim may
 // release it or write its outcome, so a retrain that outlived its lease leaves the
 // newer owner's claim, next run and status alone.
-func (m *memSchedules) Finish(_ context.Context, owner string, orgID int64, scope, key string, next time.Time, status string) error {
+func (m *memSchedules) Finish(_ context.Context, owner string, orgID int64, scope, key string, next time.Time, status string, attempts int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.finish = append(m.finish, finishCall{Owner: owner, Scope: scope, Key: key, Next: next, Status: status})
+	m.finish = append(m.finish, finishCall{Owner: owner, Scope: scope, Key: key, Next: next, Status: status, Attempts: attempts})
 	k := schedKey(scope, orgID, key)
 	if lease, ok := m.leases[k]; !ok || lease.owner != owner {
 		return nil
@@ -268,9 +269,35 @@ func (m *memSchedules) Finish(_ context.Context, owner string, orgID int64, scop
 	row := m.rows[k]
 	row.Scope, row.Key, row.OrgID = scope, key, orgID
 	row.NextRunAt, row.LastRunAt, row.LastStatus = next, time.Now(), status
+	row.Attempts = attempts
 	m.rows[k] = row
 	delete(m.leases, k)
 	return nil
+}
+
+// Extend mirrors the SQL: only the claim holder may move the lease, and a claim
+// that already moved on answers false rather than erroring.
+func (m *memSchedules) Extend(_ context.Context, owner string, orgID int64, scope, key string, lease time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := schedKey(scope, orgID, key)
+	held, ok := m.leases[k]
+	if !ok || held.owner != owner {
+		return false, nil
+	}
+	held.until = time.Now().Add(lease)
+	m.leases[k] = held
+	return true, nil
+}
+
+// hold registers row as claimed by owner for lease — the state Claim leaves
+// behind — so a test can drive retrainOne directly (which requires holding the
+// claim it is about to extend) without seeding a due row and going through the
+// claim predicate.
+func (m *memSchedules) hold(row ScheduleRow, owner string, lease time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.leases[schedKey(row.Scope, row.OrgID, row.Key)] = schedLease{owner: owner, until: time.Now().Add(lease)}
 }
 
 func (m *memSchedules) finished() []finishCall {
