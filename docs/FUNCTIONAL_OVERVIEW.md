@@ -854,15 +854,21 @@ The two processes meet at exactly two places, both in the overlay Postgres:
 
 ## Scaling and HA
 
-`gpx_forecast` is a Grafana **backend plugin**, not a service: Grafana spawns the binary from its plugin
+`gpx_forecast` is a Grafana **backend plugin**: Grafana spawns the binary from its plugin
 directory and dials the gRPC address the child announces in the plugin handshake (`pkg/main.go` serves through
-`datasource.Manage` and `app.Manage`). There is no remote or externally hosted mode — the SDK's standalone
-support (`internal/standalone`, `standalone.txt`) exists so an IDE can debug a plugin against a local plugin
-directory, and even that needs Grafana's plugins dir. So the backend runs **where Grafana runs**: one
-`gpx_forecast` process per plugin (overlay app, Forecast datasource) **per Grafana replica**, and the only
-scaling axis is more Grafana replicas over one Postgres. That is safe because the *queue* coordinates, not the
-processes: [`FOR UPDATE SKIP LOCKED` is what makes Grafana HA safe](ARCHITECTURE.md) — one plugin process per
-replica, all ticking, each due row retrained by exactly one of them, no leader and no lock table.
+`datasource.Manage` and `app.Manage`), so in its default **inline** mode the backend runs **where Grafana
+runs**: one `gpx_forecast` process per plugin (overlay app, Forecast datasource) **per Grafana replica**, and
+the scaling axis is more Grafana replicas over one Postgres. v16 adds a second, independent axis. Set
+`FORECAST_COMPUTE_URL` and that process stops fitting: it forwards every `POST /forecast` to the standalone
+`gpx_forecast_compute` service (the same handler and the same retrain ticker, token-authenticated), so fitting
+capacity scales with the compute Deployment (`docker compose up -d --scale forecast-compute=N`, or
+`compute.replicas` in the chart) while Grafana replicas stay put. The plugin then runs **no** ticker and the
+service does; training frames still come through Grafana's own `/api/ds/query`. With the variable unset nothing
+changes anywhere — the mode is one deployment variable, and the panel's resource URL and answer shape are the
+same in both. Both modes share one Postgres and one `forecast.retrain` queue, and the *queue* coordinates, not
+the processes: [`FOR UPDATE SKIP LOCKED` is what makes Grafana HA safe](ARCHITECTURE.md) — one ticker per
+process (Grafana replica or compute replica), all ticking, each due row retrained by exactly one of them, no
+leader and no lock table.
 
 Observed live (Kubernetes, 2026-09-21, 14:16–14:31 UTC) with a temporary second release of the same chart: the
 `timeseries` release's single Grafana pod plus two `fx-ha` replicas — **three scheduler processes**, all ticking
@@ -914,7 +920,10 @@ helm upgrade --install fx-ha ../timeseries-k8s/charts/timeseries -n timeseries -
 What it does not change:
 
 - The four load caps (`MAX_TRAIN_POINTS`, the 1,000,000-point emitted-window cap, `MAX_INFLIGHT`, the 16 MiB body cap) are **per process**, so N
-  replicas mean N× the fleet-wide fit concurrency: the queue bounds who retrains, not how much compute exists.
+  replicas mean N× the fleet-wide fit concurrency: the queue bounds who retrains, not how much compute exists. The
+  [v16 compute split](#v16-compute-split-compose-2026-10-09-20032015-utc) is how that capacity is grown on purpose
+  — the compute service's replicas each carry their own limiter and their own ticker over the same queue, while
+  the Grafana-managed process stops fitting and its slots bound forwards instead.
 - Every replica ticks and any of them may win — the `timeseries` process lost all three observed slots only
   because a replica's tick came first each time (the rows were still due 27 s into the slot); nothing is pinned
   to the oldest pod.
@@ -925,6 +934,30 @@ What it does not change:
   retries the row — the ghost row above is that case seen from the other side.
 - Adding a replica needs no plugin configuration, no leader and no lock table; the claim predicate plus the lease
   is the whole protocol.
+
+### v16 compute split (Compose, 2026-10-09, 20:03–20:15 UTC)
+
+The switch was exercised end to end on the Compose stack: the `forecast-compute` service (the plugin's own
+`gpx_forecast_compute` binary, three replicas for part of the run) plus the Grafana service pointed at it through
+`provisioning/plugins/apps.yaml` (`computeUrl` + `secureJsonData.computeToken`), against the same overlay Postgres.
+
+| Mechanism | Where | Observation |
+| --- | --- | --- |
+| **One variable selects the mode** | `docker compose logs grafana \| grep "forecast compute mode"` | `mode=remote url=http://forecast-compute:8080` with `computeUrl` set; `mode=inline url=` after removing it — and the whole time the same `FORECAST_COMPUTE_URL`/`_TOKEN` values stayed in the Grafana service env, which is also the measurement behind "Grafana does not forward host env to plugin processes": the plugin never saw them |
+| **Every fit is forwarded** | panel-shaped POSTs through the plugin resource URL | Fit → `{"times":[240000,300000],"values":[4,4]}`; a cacheKey-only probe → the same points with `"cached":true`; `forecast.snapshots` held one row under the asserted org (`X-Forecast-Org: 1`) and nothing under another. The compute service logged the `retrain` it owned in that window while Grafana logged **zero** `retrain tick` lines |
+| **Frames still come through Grafana's proxy** | compute log (`FORECAST_GRAFANA_URL=http://grafana:3000`) | `retrain train window … window=relative` from the service's own `POST /api/ds/query`, `dur=182–291 ms` per row — the same request body the overlay stored, sent by a process that never had a datasource client |
+| **The mode is a switch, not a second path** | three bodies (naive+cacheKey, drift, naive+`level: 0.9`) POSTed remote, then inline | All three responses **byte-identical** (`cmp`); latency on loopback: remote 9–16 ms vs inline 8–46 ms |
+| **Ticker handover, both directions** | logs | Remote: Grafana 0 `retrain tick`, the service `retrain tick claimed=3 failed=0 ok=3` at 20:05:22 and 20:10:00. Inline (compute stopped, rows forced due): Grafana `retrain tick failed=0 ok=3 claimed=3` at 20:13:44 with `retrain train window … window=relative` from `http://127.0.0.1:3000` |
+| **Scale-out safety** | 3 replicas, 3 rows forced due | One tick claimed all three (`claimed=3 ok=3`), each key retrained exactly once across the fleet (per-key count 1); the other replicas' ticks had nothing to claim. A second run at 20:05:52 was claimed by a different replica — the queue, not the process count, decides |
+| **Failure isolation** | `docker compose stop forecast-compute` | Panel fit → `502 forecast: compute service unreachable: Post "http://forecast-compute:8080/forecast": dial tcp: lookup forecast-compute on 127.0.0.11:53: no such host` — no silent local fit — while `GET /schedules` answered 200 and a Forecast-datasource `POST /api/ds/query` restored the snapshot from the store |
+| **The overlay itself** | provisioned `forecast-minute-week` dashboard (headless Chromium, remote mode) | Three panels drew history + `value (forecast)` with the interval band, no panel error and no reason text — the panel code and its resource URL are unchanged by the split |
+
+Not observed: a compute replica killed mid-fit (the lease/extension/owner-guard path is pinned by
+`TestPostgresReclaimsAnExpiredLease`, `TestRetrainOneClaimLostSkipsTheRow` and the worker's twins, and the same
+protocol was measured live for the plugin scheduler above); a real Kubernetes install of the chart's `compute`
+block (`helm lint` / `helm template` render it, and CI's render step greps the Deployment, Service,
+`FORECAST_GRAFANA_URL`, `computeUrl` and `computeToken`, plus the `compute.enabled=false` negative); and a
+multi-panel dashboard's concurrent forwards against a saturated `defaultMaxProxyInflight`.
 
 ## Verified live, not verified live
 

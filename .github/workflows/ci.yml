@@ -46,6 +46,8 @@ jobs:
         run: GOOS=linux GOARCH=amd64 go build -o /tmp/gpx_forecast_linux_amd64 ./pkg
       - name: Build the linux migrator
         run: GOOS=linux GOARCH=amd64 go build -o /tmp/gpx_forecast_migrate_linux_amd64 ./cmd/migrate
+      - name: Build the linux compute service
+        run: GOOS=linux GOARCH=amd64 go build -o /tmp/gpx_forecast_compute_linux_amd64 ./cmd/compute
       # The mage build definition is the plugin-tools path (.config/AGENTS/instructions.md),
       # while the Makefile is what ships. Nothing else compiles it: the Format step only
       # gofmts it, and `go build` cannot link a file that is `package main` with no main

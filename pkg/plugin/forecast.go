@@ -569,6 +569,10 @@ func httpStatusFor(err error) int {
 	switch {
 	case errors.Is(err, errBusy):
 		return http.StatusTooManyRequests
+	case errors.Is(err, errComputeUnreachable):
+		// The proxy's own answer; forwardForecast writes it directly, and the case
+		// keeps any other caller mapping it the same way.
+		return http.StatusBadGateway
 	case errors.Is(err, errTrainTooLong), errors.Is(err, errBodyTooLarge),
 		errors.Is(err, errTrainBodyTooLarge), errors.Is(err, errTrainSourceTooLarge),
 		errors.Is(err, errWindowTooManyPoints),

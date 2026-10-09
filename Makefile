@@ -13,11 +13,12 @@ SHELL := $(GIT_SH)
 endif
 endif
 
-.PHONY: all build frontend backend migrate ini-template help
+.PHONY: all build frontend backend migrate compute ini-template help
 
 DIST_BIN := dist/gpx_forecast_linux_amd64
 DIST_DS_BIN := dist/forecast-datasource/gpx_forecast_linux_amd64
 DIST_MIGRATE_BIN := dist/gpx_forecast_migrate_linux_amd64
+DIST_COMPUTE_BIN := dist/gpx_forecast_compute_linux_amd64
 
 # node/npm on PATH are nvm shims and can point at an install that is gone ("Node.js
 # v22.x.x is not installed or cannot be found"), so resolve a runtime that starts: the
@@ -41,12 +42,14 @@ help:
 	@echo "make frontend      webpack only, via $(NPM) on $(NODE)"
 	@echo "make backend       Linux amd64 gpx_forecast for the Grafana container"
 	@echo "make migrate       Linux amd64 migration CLI -> dist/"
+	@echo "make compute       Linux amd64 gpx_forecast_compute for the standalone compute service"
 	@echo "make ini-template  copy conf/forecast.ini.template into dist/"
 
 build:
 	$(MAKE) frontend
 	$(MAKE) backend
 	$(MAKE) migrate
+	$(MAKE) compute
 	$(MAKE) ini-template
 
 frontend:
@@ -67,6 +70,14 @@ backend:
 migrate:
 	mkdir -p "dist"
 	GOOS=linux GOARCH=amd64 go build -o "$(DIST_MIGRATE_BIN)" ./cmd/migrate
+
+# gpx_forecast_compute is the standalone compute service: the same /forecast handler
+# with the Grafana SDK's identity replaced by the shared token and X-Forecast-Org.
+# CGO off keeps it static, so the sandbox can run it on alpine and the chart on
+# distroless.
+compute:
+	mkdir -p "dist"
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$(DIST_COMPUTE_BIN)" ./cmd/compute
 
 ini-template:
 	cp "conf/forecast.ini.template" "dist/forecast.ini.template"

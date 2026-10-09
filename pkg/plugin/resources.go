@@ -47,6 +47,15 @@ func (a *App) handleForecast(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, errTrainBodyTooLarge.Error(), http.StatusRequestEntityTooLarge)
 		return
 	}
+	// Remote mode: the body is the compute service's to decode — decoding is the
+	// expensive step, and the two size checks above already refused an oversize one,
+	// so a forwarded body cannot be a legal inline request either. Every request is
+	// forwarded, a cacheKey-only Restore included, so the dispatch semantics have one
+	// implementation in both modes.
+	if a.compute != nil {
+		a.forwardForecast(w, req)
+		return
+	}
 	req.Body = http.MaxBytesReader(w, req.Body, limit)
 	var body ForecastRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {

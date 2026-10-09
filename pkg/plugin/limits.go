@@ -18,6 +18,12 @@ const (
 	defaultMaxForecastBody   = 16 << 20
 	defaultMaxQueryJSONBytes = 64 << 10
 
+	// defaultMaxProxyInflight bounds concurrent forwarded calls in a process that does no
+	// fitting: a slot is a socket and an upstream request, not a fit, so a remote plugin gets
+	// a wider default than the inline process whose slots bound fitting CPU.
+	// FORECAST_MAX_INFLIGHT overrides either in both modes.
+	defaultMaxProxyInflight = 32
+
 	// maxForecastPoints bounds one emitted window. It is the twin of the library's
 	// forecast.MaxForecastPoints (whose error httpStatusFor maps to the same 413),
 	// kept here as the plugin's own constant so the request is refused before the
@@ -153,7 +159,10 @@ func parseMaxInflight(s string) int {
 	return n
 }
 
-func maxInflightFrom(ctx context.Context, jsonData []byte) int {
+// maxInflightOr resolves the concurrent-work limit, falling back to the caller's default: the
+// inline app fits, so its slots bound CPU, while the remote app forwards, so its slots bound
+// sockets.
+func maxInflightOr(ctx context.Context, jsonData []byte, fallback int) int {
 	jd := map[string]any{}
 	if len(jsonData) > 0 {
 		_ = json.Unmarshal(jsonData, &jd)
@@ -166,7 +175,13 @@ func maxInflightFrom(ctx context.Context, jsonData []byte) int {
 	if n := parseMaxInflight(look.Get("FORECAST_MAX_INFLIGHT", "MAX_INFLIGHT", "max_inflight", "maxInflight")); n >= 1 {
 		return n
 	}
-	return defaultMaxInflight
+	return fallback
+}
+
+// maxInflightFrom is the inline app's and the datasource's limit: maxInflightOr with the
+// inline default.
+func maxInflightFrom(ctx context.Context, jsonData []byte) int {
+	return maxInflightOr(ctx, jsonData, defaultMaxInflight)
 }
 
 func checkTrainLen(times, values int) error {

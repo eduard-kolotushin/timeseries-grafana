@@ -21,8 +21,20 @@ store_ssl_mode = ${FORECAST_STORE_SSLMODE}
 store_password = ${FORECAST_STORE_PASSWORD}
 ; Concurrent Fit / ForecastRange slots in this process (default 4).
 max_inflight = ${FORECAST_MAX_INFLIGHT}
-; Unattended retrain scheduler. Only this process (the app) runs it; the
-; datasource section below does not, because alerting QueryData only Restores.
+; Where fitting runs. Empty (the default) keeps every fit and the retrain ticker
+; in this process. Set it to the standalone compute service's base URL
+; (gpx_forecast_compute, env FORECAST_COMPUTE_LISTEN, default :8080) and this
+; process forwards /forecast to that service and runs no ticker; the service needs
+; FORECAST_COMPUTE_TOKEN and runs its own ticker against the same store. The
+; service reads process env only (no ini, no jsonData), and it ignores this key.
+compute_url = ${FORECAST_COMPUTE_URL}
+; Shared secret the compute service requires on every forwarded request. The
+; service refuses to start without it; this process only warns when it is
+; missing, because the forwarded calls are then refused with 401 upstream.
+compute_token = ${FORECAST_COMPUTE_TOKEN}
+; Unattended retrain scheduler. Only this process (the app) runs it, unless
+; compute_url above moves it to the compute service; the datasource section below
+; never runs it, because alerting QueryData only Restores.
 ; The scheduler claims due rows from forecast.retrain and fetches its own
 ; training data from Grafana's /api/ds/query. Leave retrain_enabled empty (or
 ; true) to run it. Empty grafana_url means http://127.0.0.1:3000.
