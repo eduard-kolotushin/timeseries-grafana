@@ -988,7 +988,8 @@ answered (200 or 429).
 ## Verified live, not verified live
 
 Everything in the scenario lines above was observed on a running system. The following claims come from the
-source and are **not** backed by a live observation in this run:
+source and are **not** backed by a live observation end to end in this run (a row says so when one half of it
+was exercised):
 
 | Claim | Where it lives | Why it was not observed |
 | --- | --- | --- |
@@ -1001,7 +1002,7 @@ source and are **not** backed by a live observation in this run:
 | `FORECAST_MAX_INFLIGHT` env/ini precedence | `pkg/plugin/limits.go` | The jsonData **value** path is now measured (`maxInflight: 2` in the app jsonData gave exactly 2 in flight and 62 × `429 forecast: busy` in a 64-wide burst); the env and ini spellings remain unexercised, since neither environment sets them. |
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
 | A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |
-| Grafana dialing a **remote** plugin gRPC address (the SDK standalone client-mode path behind [ARCHITECTURE](ARCHITECTURE.md)'s "Why an HTTP service and not a remote plugin backend") | `grafana-plugin-sdk-go` `internal/standalone` + `backend/serve.go` (`ClientModeEnabled`, `RunDummyPluginLocator`) | The SDK side is source-read: `GF_PLUGIN_GRPC_ADDRESS_<PLUGIN_ID>` (or `standalone.txt`/`pid.txt` beside the plugin binary) makes a spawned plugin print the `1\|2\|tcp\|<address>\|grpc` locator for that address instead of its own. Whether Grafana core accepts a non-local address from that line was **not** exercised — the v16 design deliberately does not use the path, so nothing in this run depended on it. |
+| Grafana dialing a **remote** plugin gRPC address (the SDK standalone client-mode path behind [ARCHITECTURE](ARCHITECTURE.md)'s "Why an HTTP service and not a remote plugin backend") | `grafana-plugin-sdk-go` `internal/standalone` + `backend/serve.go` (`ClientModeEnabled`, `RunDummyPluginLocator`) | The SDK half is **measured**: `dist/gpx_forecast_linux_amd64` run with `GF_PLUGIN_GRPC_ADDRESS_EDUARDKOLOTUSHIN_FORECAST_APP=10.1.2.3:9876` printed the locator `1\|2\|tcp\|10.1.2.3:9876\|grpc` and logged `"Running dummy plugin locator","addr":"10.1.2.3:9876","pid":"0"` — a foreign address, no local listen — where the same binary without the variable logged `"Serving plugin","plugins":["resource","data","stream","diagnostics"]` and refused to run outside a host. Unexercised: Grafana core accepting a non-local address from that line (the probe's address was deliberately unreachable and no Grafana was in the loop). No shipped path depends on it. |
 
 ## Discrepancies found
 
