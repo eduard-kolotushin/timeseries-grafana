@@ -27,10 +27,15 @@ const (
 	// so the reused handlers read the same org they read under httpadapter.
 	computeOrgHeader = "X-Forecast-Org"
 
-	// computeTimeout bounds one forwarded call. A fit is milliseconds of work; the
-	// bound exists so a black-holed compute service cannot hold plugin sockets
-	// forever.
-	computeTimeout = 2 * time.Minute
+	// computeTimeout bounds one forwarded call. A fit is milliseconds of work, and the point of the
+	// bound is a *silent* upstream — a connection that is accepted and then never answered — which
+	// otherwise holds the caller's request (and a proxy slot) for as long as the bound allows.
+	// Measured live against a deliberately silent upstream: 2 minutes (the first value here) held the
+	// request until the client had long given up (~30 s), so the caller never saw the 502 the plugin
+	// eventually wrote. 15 s is far above a cold compute pod's first call (pgxpool connect, a fit of
+	// up to maxTrainPoints points, one Postgres write) and short enough that the reason still reaches
+	// a waiting panel.
+	computeTimeout = 15 * time.Second
 )
 
 var (

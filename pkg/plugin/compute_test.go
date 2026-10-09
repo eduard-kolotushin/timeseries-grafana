@@ -292,6 +292,44 @@ func TestServeComputeReportsABindFailure(t *testing.T) {
 	}
 }
 
+// TestForecastForwardSilentUpstreamGivesUpAtTheBound: the failure this bound exists for is an
+// upstream that *accepts* the connection and then never answers. The plugin must give up at its own
+// bound and answer 502 while the caller is still waiting — never hold the request until the upstream
+// or the client gives up — and it must release its forwarding slot on the way out.
+func TestForecastForwardSilentUpstreamGivesUpAtTheBound(t *testing.T) {
+	release := make(chan struct{})
+	silent := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release // accepted, never answered
+	}))
+	defer func() { close(release); silent.Close() }()
+
+	app, err := newAppWith(context.Background(), backend.AppInstanceSettings{}, newMemoryStore(), nil, nil,
+		&computeMode{url: silent.URL, token: "t", client: &http.Client{Timeout: 150 * time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+	body, _ := json.Marshal(ForecastRequest{
+		Times: []int64{0, 1000}, Values: []nullableFloat{1, 2}, Model: "naive", From: 2000, To: 3000,
+	})
+	started := time.Now()
+	status, raw := callRoute(t, app, adminCtx(7), http.MethodPost, "forecast", body)
+	took := time.Since(started)
+	if status != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s want 502 at the bound", status, raw)
+	}
+	if !strings.HasPrefix(string(raw), errComputeUnreachable.Error()) {
+		t.Fatalf("body=%q want it to name %q", raw, errComputeUnreachable)
+	}
+	if took > 5*time.Second {
+		t.Fatalf("the bound took %s; a silent upstream must be given up on, not waited out", took)
+	}
+	// The forwarding slot must be back: a stalling upstream cannot leak the proxy's capacity.
+	if n := len(app.limit.ch); n != 0 {
+		t.Fatalf("inflight slots held after the refusal: %d", n)
+	}
+}
+
 // TestComputeMuxServesOnlyForecastAndHealth: the service mounts the fit path, the ping
 // probe and the coarse health probe — no schedules API, no datasource routes — and a fit
 // reaches the same inline dispatch with the org from the header, so the snapshot lands
