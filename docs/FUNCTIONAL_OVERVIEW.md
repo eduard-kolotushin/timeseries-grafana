@@ -1390,3 +1390,25 @@ the plugin). The assertions were shown to bite: a flat `retryDelay`, an un-reset
 owner-unguarded `Extend` each failed their test in both repos before being reverted. **Not measured live this
 pass:** the plugin scheduler's own kill/reclaim (it needs a Grafana process and `/api/org`, and the Compose Grafana
 was down), and the Kubernetes path.
+
+**A stale `dist/` (and a matcher that never fired) broke the sandbox's baseline panel — found while checking the stack after this pass.**
+The Compose stack the user restarted mounted a `dist/` built *before* these commits: its plugin applied only
+`[0001 0002]` at `18:16:24` (ledger `applied_at`), so `forecast.retrain` had no `attempts` column, and the
+freshly built worker — whose claim now returns and writes that column — failed every tick with
+`ERROR msg="claim retrains" err="ERROR: column r.attempts does not exist (SQLSTATE 42703)"`. Nothing was
+retrained, `baselines.snapshots` stayed empty, nothing was published, and the `baselines` Druid datasource never
+came into existence, so the **Metrics vs baselines** panel's `refId B`
+(`SELECT __time, MAX(baseline_value) … FROM baselines WHERE metric_hash = 'ready' …`) failed with
+`Object 'baselines' not found` while `refId A` drew its metric normally. The operational half was `make build`
+here plus `make refresh` in the sandbox; webpack's `compareBeforeEmit` left every JS bundle's mtime untouched
+because they are byte-identical (only `dist/gpx_forecast_linux_amd64` and the migrator moved), and the refreshed
+plugin's ledger row `0003 retrain_attempts` landed at `18:25:20`. The incident also exposed a real defect in the
+new code: `missingAttemptsError` matched `PgError.ColumnName == "attempts"`, and PostgreSQL 17 leaves that field
+**empty** for the qualified `column r.attempts does not exist` (measured with a throwaway pgx probe against the
+live table), so the operator saw the raw 42703 the named error exists to replace. It now matches on the message,
+`TestMissingAttemptsError` pins the qualified (empty `ColumnName`) and unqualified shapes, and the reclaim test's
+claim takes `limit 1` so a gated run against a shared database cannot lease the sandbox's own rows. Convergence
+after the refresh: `retrain tick claimed=2 retrained=2 failed=0`, both `baseline` rows `ok` with
+`next_run_at 18:25:00` and `attempts 0`, `baselines.snapshots` refreshed at `18:23:45`, two consecutive ticks
+`published=2`, Druid serving `live`/`ready` at horizon `18:55:00Z`, and the panel's own two queries replayed
+through `POST /api/ds/query` answered `A: 358 points`, `B: 3 points` (`last_ts 1791572100000` = `18:55:00Z`).
