@@ -857,8 +857,10 @@ The two processes meet at exactly two places, both in the overlay Postgres:
 `gpx_forecast` is a Grafana **backend plugin**: Grafana spawns the binary from its plugin
 directory and dials the gRPC address the child announces in the plugin handshake (`pkg/main.go` serves through
 `datasource.Manage` and `app.Manage`), so in its default **inline** mode the backend runs **where Grafana
-runs**: one `gpx_forecast` process per plugin (overlay app, Forecast datasource) **per Grafana replica**, and
-the scaling axis is more Grafana replicas over one Postgres. v16 adds a second, independent axis. Set
+runs** (the SDK can be made to point Grafana at another host's gRPC address instead — `GF_PLUGIN_GRPC_ADDRESS_*`
+and the standalone files — but that is its debugger path, not a deployment; see the transport note in
+[ARCHITECTURE.md](ARCHITECTURE.md)): one `gpx_forecast` process per plugin (overlay app, Forecast datasource)
+**per Grafana replica**, and the scaling axis is more Grafana replicas over one Postgres. v16 adds a second, independent axis. Set
 `FORECAST_COMPUTE_URL` and that process stops fitting: it forwards every `POST /forecast` to the standalone
 `gpx_forecast_compute` service (the same handler and the same retrain ticker, token-authenticated), so fitting
 capacity scales with the compute Deployment (`docker compose up -d --scale forecast-compute=N`, or
@@ -976,6 +978,7 @@ source and are **not** backed by a live observation in this run:
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
 | A **mid-fit kill** of the plugin scheduler (its `Extend`-lost skip and backoff applied to a real `gpx_forecast` process) | `pkg/plugin/retrain.go` (`retrainOne`), `pkg/plugin/schedule.go` | Pass 7 measured the protocol live on the worker side (its SIGKILL/SIGTERM run) and, on the plugin side, measured the healthy path end to end in a real Grafana — `retrain tick claimed=3 failed=0 ok=3` with per-row `attempts=0` — but no `gpx_forecast` process was killed mid-retrain; the reclaim, the claim-lost skip and the backoff curve are pinned by `TestPostgresReclaimsAnExpiredLease`, `TestRetrainOneClaimLostSkipsTheRow` and `TestRetryDelay`. |
 | A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |
+| Grafana dialing a **remote** plugin gRPC address (the SDK standalone client-mode path behind [ARCHITECTURE](ARCHITECTURE.md)'s "Why an HTTP service and not a remote plugin backend") | `grafana-plugin-sdk-go` `internal/standalone` + `backend/serve.go` (`ClientModeEnabled`, `RunDummyPluginLocator`) | The SDK side is source-read: `GF_PLUGIN_GRPC_ADDRESS_<PLUGIN_ID>` (or `standalone.txt`/`pid.txt` beside the plugin binary) makes a spawned plugin print the `1\|2\|tcp\|<address>\|grpc` locator for that address instead of its own. Whether Grafana core accepts a non-local address from that line was **not** exercised — the v16 design deliberately does not use the path, so nothing in this run depended on it. |
 
 ## Discrepancies found
 
