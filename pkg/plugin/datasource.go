@@ -119,6 +119,10 @@ type forecastQueryJSON struct {
 	Kind     string  `json:"kind"`
 	CacheKey string  `json:"cacheKey"`
 	Level    float64 `json:"level"`
+	// SeriesLabels names the series the answer stands for, so a rule that also
+	// queries the metric can pair this baseline with it by label instead of
+	// broadcasting to every series the metric query returned.
+	SeriesLabels map[string]string `json:"seriesLabels"`
 }
 
 // computeLimit returns the per-instance limiter, creating the default one once
@@ -189,6 +193,12 @@ func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID in
 	if kind != queryKindForecast && level == 0 {
 		level = 0.95
 	}
+	// nil unless the query names a series, so an unnamed restore emits exactly
+	// the unlabelled frame it always did.
+	var labels data.Labels
+	if len(in.SeriesLabels) > 0 {
+		labels = data.Labels(in.SeriesLabels)
+	}
 	// Store I/O stays outside the inflight limiter so a slow Postgres does not
 	// hold compute slots; the limiter bounds Restore + ForecastRange only.
 	snap, ok, err := store.Get(ctx, orgID, in.CacheKey)
@@ -214,7 +224,7 @@ func (d *Datasource) queryOne(ctx context.Context, store SnapshotStore, orgID in
 		if err != nil {
 			return backend.ErrDataResponse(dataStatusFor(err), err.Error()), nil
 		}
-		return backend.DataResponse{Frames: data.Frames{frameFromSeries(q.RefID, series)}}, nil
+		return backend.DataResponse{Frames: data.Frames{frameFromSeries(q.RefID, series, labels)}}, nil
 	})
 	if err != nil {
 		return backend.ErrDataResponse(dataStatusFor(err), err.Error())
@@ -242,7 +252,7 @@ func seriesForKind(fitted forecast.Fitted, kind string, from, to time.Time, leve
 	}
 }
 
-func frameFromSeries(refID string, s timeseries.Series[float64]) *data.Frame {
+func frameFromSeries(refID string, s timeseries.Series[float64], labels data.Labels) *data.Frame {
 	ts := s.Times()
 	src := s.Values()
 	times := make([]time.Time, len(ts))
@@ -257,7 +267,7 @@ func frameFromSeries(refID string, s timeseries.Series[float64]) *data.Frame {
 	}
 	frame := data.NewFrame(refID,
 		data.NewField("Time", nil, times),
-		data.NewField("Value", nil, vs),
+		data.NewField("Value", labels, vs),
 	)
 	frame.Meta = &data.FrameMeta{Type: data.FrameTypeTimeSeriesWide}
 	return frame

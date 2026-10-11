@@ -4,6 +4,7 @@ import { ForecastPanel } from './ForecastPanel';
 import { TrainRangeEditor } from './TrainRangeEditor';
 import { RetrainEditor } from './RetrainEditor';
 import { AlertEditor } from './AlertEditor';
+import { AlertSeriesEditor } from './AlertSeriesEditor';
 
 export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOptions((builder) => {
   return builder
@@ -131,10 +132,34 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       editor: RetrainEditor,
     })
     .addCustomEditor({
+      id: 'alertSeries',
+      path: 'alertSeries',
+      name: 'Alert series',
+      description: 'Which metric series the alert rule is for. Shown only when the panel has more than one.',
+      category: ['Alerting'],
+      editor: AlertSeriesEditor,
+    })
+    .addTextInput({
+      path: 'alertLookback',
+      name: 'Alert lookback',
+      description: 'Both rule queries read now - this … now. Empty is 10m.',
+      defaultValue: '',
+      category: ['Alerting'],
+    })
+    .addNumberInput({
+      path: 'alertTolerance',
+      name: 'Alert tolerance',
+      description: 'Percent deviation from the baseline the rule fires above.',
+      defaultValue: 20,
+      settings: { min: 0 },
+      category: ['Alerting'],
+    })
+    .addCustomEditor({
       id: 'alertFromPanel',
       path: 'alertAction',
       name: 'New alert rule',
-      description: 'Open Grafana alerting with this panel’s live queries (including Mixed Forecast rows). Save the dashboard first. Existing rules stay on the Alerting page.',
+      description:
+        'Build a Grafana alert rule from this panel: its metric query plus the trained baseline over now - lookback … now, with a percent-deviation threshold. Save the dashboard first. Existing rules stay on the Alerting page.',
       category: ['Alerting'],
       editor: AlertEditor,
     });

@@ -32,13 +32,15 @@ export function isForecastTarget(q: {
   return false;
 }
 
-export function metricTargets<T extends { hide?: boolean; datasource?: DataQuery['datasource'] }>(targets: T[]): T[] {
+export function metricTargets<T extends { hide?: boolean; datasource?: DataQuery['datasource'] | string }>(
+  targets: T[]
+): T[] {
   return targets.filter((t) => !t.hide && !isForecastTarget(t));
 }
 
 export function splitPanelFrames(
   series: DataFrame[],
-  targets: Array<{ refId?: string; datasource?: DataQuery['datasource'] }>
+  targets: Array<{ refId?: string; datasource?: DataQuery['datasource'] | string }>
 ): { history: DataFrame[]; datasource: DataFrame[] } {
   const forecastIds = new Set(
     targets.filter(isForecastTarget).map((t) => t.refId).filter((id): id is string => Boolean(id))

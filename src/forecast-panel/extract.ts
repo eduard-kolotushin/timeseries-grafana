@@ -4,6 +4,8 @@ export type SeriesPoints = {
   name: string;
   times: number[];
   values: Array<number | null>;
+  /** The source field's own labels, so a restored frame can be paired with this series. */
+  labels?: Record<string, string>;
   /** The source field's own config (unit, decimals, min/max, links), so a rebuild of the frame keeps it. */
   config?: FieldConfig;
   /** The source frame's meta, likewise carried over by a rebuild. */
@@ -48,10 +50,12 @@ export function extractSeries(frame: DataFrame, allFrames?: DataFrame[]): Series
     // along, so a panel rebuilding this series into a frame does not lose them. Left off
     // when the source set nothing.
     const config = valueField.config && Object.keys(valueField.config).length > 0 ? valueField.config : undefined;
+    const labels = valueField.labels && Object.keys(valueField.labels).length > 0 ? valueField.labels : undefined;
     out.push({
       name: getFieldDisplayName(valueField, frame, frames),
       times,
       values,
+      labels,
       config,
       meta: frame.meta,
     });

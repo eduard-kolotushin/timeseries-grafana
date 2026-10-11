@@ -5,6 +5,7 @@ import {
   cacheKeyInputFromQuery,
   copySourceFromSibling,
   optionsFromQuery,
+  queryFromOptions,
   siblingMetricQueries,
   withCacheKey,
 } from './queryModel';
@@ -104,6 +105,44 @@ describe('optionsFromQuery', () => {
     const opts = optionsFromQuery(query());
     expect(opts.model).toBe('holt');
     expect(opts.trainRange).toEqual({ from: 'now-7d', to: 'now' });
+  });
+});
+
+describe('queryFromOptions', () => {
+  it('carries the panel fit and the chosen series, and fingerprints like the overlay', () => {
+    const q = queryFromOptions({
+      refId: 'B',
+      options: overlayOptions,
+      sourceTargets: [target],
+      seriesName: 'up',
+      seriesLabels: { host: 'a' },
+      datasource: { uid: 'fc', type: FORECAST_DATASOURCE_TYPE },
+    });
+    expect(q).toMatchObject({
+      refId: 'B',
+      kind: 'forecast',
+      seriesName: 'up',
+      model: 'holt',
+      alpha: 0.8,
+      beta: 0.2,
+      period: 7,
+      season: 'hour',
+      calendar: '',
+      level: 0.95,
+      trainRange: { from: 'now-7d', to: 'now' },
+      sourceTargets: [target],
+      seriesLabels: { host: 'a' },
+    });
+    // The key is derived from this query, so it has to reproduce the overlay's fingerprint.
+    expect(fingerprintPayload(cacheKeyInputFromQuery(q))).toEqual(
+      fingerprintPayload({ targets: [target], options: overlayOptions, seriesName: 'up' })
+    );
+  });
+
+  it('omits empty labels and tolerates absent options', () => {
+    const q = queryFromOptions({ refId: 'B', sourceTargets: [], seriesName: 's', datasource: { uid: 'fc' } });
+    expect(q.seriesLabels).toBeUndefined();
+    expect(q.model).toBe(defaultForecastQuery.model);
   });
 });
 

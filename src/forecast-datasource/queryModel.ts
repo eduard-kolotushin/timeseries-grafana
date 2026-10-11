@@ -33,6 +33,45 @@ export async function withCacheKey(query: ForecastDataQuery): Promise<ForecastDa
   return { ...query, cacheKey: key };
 }
 
+/**
+ * A Forecast query synthesized from overlay options, the inverse of `optionsFromQuery`.
+ * One alert rule is built from a panel's fit: the metric targets it was fitted on become
+ * `sourceTargets` (so the panel's own cacheKey is reproducible), the panel's fit options
+ * become the model, and the series the rule is for names the answer — and labels it, so a
+ * Math node pairs the baseline with that series instead of broadcasting to all of them.
+ * `datasource` is the Forecast datasource instance the rule will read through.
+ */
+export function queryFromOptions(input: {
+  refId: string;
+  options?: ForecastOptions;
+  sourceTargets: unknown[];
+  seriesName: string;
+  seriesLabels?: Record<string, string>;
+  datasource: { uid: string; type?: string };
+}): ForecastDataQuery {
+  const options = input.options;
+  const query: ForecastDataQuery = {
+    ...defaultForecastQuery,
+    refId: input.refId,
+    seriesName: input.seriesName,
+    datasource: input.datasource,
+    model: options?.model ?? defaultForecastQuery.model,
+    alpha: options?.alpha ?? defaultForecastQuery.alpha,
+    beta: options?.beta ?? defaultForecastQuery.beta,
+    period: options?.period ?? defaultForecastQuery.period,
+    season: options?.season ?? defaultForecastQuery.season,
+    calendar: options?.calendar ?? defaultForecastQuery.calendar,
+    level: options?.interval ?? defaultForecastQuery.level,
+    trainRange: options?.trainRange ?? defaultForecastQuery.trainRange,
+    lookback: options?.lookback,
+    sourceTargets: input.sourceTargets,
+  };
+  if (input.seriesLabels && Object.keys(input.seriesLabels).length > 0) {
+    query.seriesLabels = input.seriesLabels;
+  }
+  return query;
+}
+
 export function siblingMetricQueries(
   queries: Array<DataQuery & { hide?: boolean }> | undefined,
   selfRefId?: string

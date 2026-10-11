@@ -175,7 +175,30 @@ Fitting capacity scales on its own. One deployment variable moves the fit and th
 - **Failure is explicit**: an unreachable compute service is a 502 naming the failure — never a silent local fit, which would hide a split deployment whose compute half is down while the plugin quietly burns Grafana CPU. `CheckHealth` in remote mode additionally probes the compute service's `/healthz`, so the split is observable from Grafana
 - **Config**: `FORECAST_COMPUTE_URL` / `FORECAST_COMPUTE_TOKEN` (`COMPUTE_URL` / `COMPUTE_TOKEN`, ini `compute_url` / `compute_token`, jsonData `computeUrl` / `computeToken` + `secureJsonData.computeToken`), plus `FORECAST_COMPUTE_LISTEN` (default `:8080`, `--listen` overrides) and `FORECAST_COMPUTE_TOKEN` on the service. Sharing one env block with the plugin is safe: the service ignores the URL
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16 non-goals
+## v17 must-have
+
+A complete alert rule is one click away on a trained overlay panel, and it compares the right instants.
+
+- Overlay options **Alerting** builds a complete Grafana alert rule from the panel's own state, so no Mixed
+  datasource, hand-filled Forecast row, or **Copy source from query A** press is needed: **New alert rule** copies
+  the panel's metric queries and synthesizes one Forecast-datasource query from the panel's fit options (model and
+  its parameters, training range, legacy lookback), with the visible metric targets as `sourceTargets`, the chosen
+  series name, that series' labels, and the **same cacheKey** the overlay fit wrote, so the rule restores the
+  trained snapshot instead of answering `needTrain`
+- **Alert series** (a select shown only when the panel offers more than one series), **Alert lookback** (default
+  `10m`) and **Alert tolerance** (percent, default 20) are panel options; the series is the only input the operator
+  supplies, and an unloaded panel, a panel with no metric query to an alerting-capable datasource, or a deployment
+  with no Forecast datasource instance answers a reason instead of producing a broken rule
+- Both rule queries carry `relativeTimeRange { from: <lookback>, to: 0 }` — never a dashboard-derived range — so
+  the metric and the baseline reduce their last value at the same instant
+- The expression chain is Reduce(`last`) over the metric, Reduce(`last`) over the baseline, Math
+  `abs((metric - baseline) / baseline) * 100`, and a Threshold `gt <tolerance>` on that Math as the **alert
+  condition**; the panel's own expression rows are no longer reused or forwarded
+- A Forecast-datasource restore labels its frame from the query model's `seriesLabels`, so a metric query that
+  returns several series pairs only the chosen one (Grafana's Math node matches by labels and drops the rest)
+- Do not ship alert rules or contact points
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 non-goals
 
 Do not add these without first updating this document:
 
@@ -206,7 +229,7 @@ Do not add these without first updating this document:
 - Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource and datasource `QueryData`, plus oversize / busy (413/429) load limits
 - Table-driven tests cover the schedule resource (method/status matrix, Admin gate, upsert→list round-trip, invalid cron, the baseline-row rules — an existing worker key can be retimed, an invented one is `404`, either scope can be deleted — per-org key isolation where two orgs share one cache key and keep separate rows, the derived `source` summary and its cap, and that a listing never echoes the stored query objects) and `needTrain`-when-due
-- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, overlay New alert rule defaults, overlay load limits, `trainSource` capture, the schedule API, and the schedule UI
+- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, overlay New alert rule synthesis (the shared metric/baseline window, the two Reduce nodes, the Math deviation, the Threshold condition, the chosen series' `seriesName` / `seriesLabels` / `sourceTargets`, and a `cacheKey` equal to the overlay's), overlay load limits, `trainSource` capture, the schedule API, and the schedule UI
 - `trainSource` must not enter the `cacheKey` fingerprint: adding or editing a scheduled retrain must not invalidate a stored snapshot
 - The retrain scheduler must never fail a query: an unreachable `/api/ds/query`, a disabled scheduler, or a claim error leaves `needTrain` as the retrain path
 - A schedule row belongs to one org: `forecast.retrain` keeps `(scope, org_id, key)` unique, `0002_retrain.sql` rewrites an older table to it in place, and a table left on the old key fails the schedule store instead of sharing rows between orgs

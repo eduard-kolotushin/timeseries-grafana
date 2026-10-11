@@ -392,21 +392,53 @@ clicked in this pass). The `Delete` beside it still leaves the model (F5).
 
 | | |
 | --- | --- |
-| **Function** | Open Grafana's alerting editor pre-filled with this panel's live queries and identity. |
+| **Function** | Build a complete Grafana alert rule from the panel: its metric query plus a synthesized Forecast query that restores the trained baseline, both over one window ending now. |
 | **Who can use** | **Panel** (needs the dashboard saved and, in Grafana, permission to create rules). |
-| **How configured** | Panel options → *Alerting* → *New alert rule* (navigates to `/alerting/new`; the plugin ships no rules). |
-| **Input params** | None; the defaults carry the panel title, the panel's queries (including a Mixed Forecast row) and the dashboard/panel annotations. |
-| **Expected result** | The browser lands on `/alerting/new?defaults=…` with a rule form; an unsaved dashboard answers `Dashboard must be saved before alerts can be added.` and does not navigate. |
+| **How configured** | Panel options → *Alerting*: **Alert lookback** (default 10m), **Alert tolerance** (% deviation, default 20) and **Alert series** (a dropdown rendered only when the panel has more than one series); then *New alert rule*. No Mixed datasource and no hand-filled Forecast row is involved. |
+| **Input params** | The metric series, and only on a multi-series panel. The defaults carry the panel title, the metric rows, the synthesized Forecast row (fit options, `sourceTargets`, series name and labels, the overlay's `cacheKey`), two Reduce(`last`) nodes, the Math deviation, the Threshold condition, and the dashboard/panel annotations. |
+| **Expected result** | The browser lands on `/alerting/new?defaults=…` with a four-node expression chain that conditions on the Threshold over the Math. An unsaved dashboard answers `Dashboard must be saved before alerts can be added.`; a panel with no alerting-capable query answers `Cannot create alerts from this panel because no query to an alerting capable datasource is found.`; a multi-series panel with no choice answers `Choose the metric series this alert rule is for.`; a deployment without a Forecast datasource instance answers `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` None of them navigates. |
 
-**Positive — Compose:** clicking *New alert rule* navigated to
-`http://localhost:3000/alerting/new?defaults=%7B%22type%22%3A%22grafana-alerting%22%2C%22name%22%3A%22Seasonal+baseline+%28minute+of+week%29%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22…`
-— i.e. name `Seasonal baseline (minute of week)`, `refId A`, `datasourceUid: druid`, `relativeTimeRange {from: 21600, to: -10800}`
-and the panel's Druid target — and the editor rendered `1. Enter alert rule name` (prefilled) and
-`2. Define query and alert condition` with that query.
+**Positive — Compose, single-series Druid panel** (`Forecast minute-of-week demo` → panel 3, *Seasonal baseline (minute of week, with variance)*):
+clicking *New alert rule* landed on `/alerting/new?defaults=…` carrying the panel title, the
+`__dashboardUid__` / `__panelId__` annotations, and six rows — A = the panel's Druid SQL target (`druid`),
+B = a synthesized `forecast` row (`seriesName "value"`, `sourceTargets ["A"]`, the panel's `trainRange`, a 64-hex
+`cacheKey`), C = Reduce(`last`) over A, D = Reduce(`last`) over B, E = Math `abs(($C - $D) / $D) * 100`,
+F = Threshold `IS ABOVE 20` with `condition: "F"`. **Every** node carried `relativeTimeRange {from: 600, to: 0}`,
+where the behaviour this replaces was one dashboard-derived `{from: 21600, to: -10800}` for both data rows — which
+ended the metric query at *now* and rendered the forecast row from *now* into the future. The rule form rendered
+the metric SQL on A and the full Forecast editor on B, each reading "10m to now".
 
-**Negative — Compose:** not exercised live; the message is source-verified
-(`src/forecast-panel/alertFromPanel.ts:6`: `'Dashboard must be saved before alerts can be added.'`) and is emitted
-when the panel has no dashboard UID (pass 4 attempted it and stopped at Grafana 13's add-panel flow).
+**Positive — Compose, preview** (same panel, *Alert lookback* `1h` so the metric window has data): Grafana's
+*Preview* evaluated the chain end to end — C = **45.46715** (metric `last`), D = **44.11246** (the restored
+baseline, *not* `needTrain`, so the synthesized `cacheKey` is byte-equal to the key the overlay's fit stored),
+E = **3.07101** % (the arithmetic of those two reduces), F = Threshold → **Normal** (`1 series: 0 firing,
+1 normal`). Rebuilding the same rule with *Alert tolerance* `1` made F **Firing** (`1 series: 1 firing,
+0 normal`) and the payload's `F.model.evaluator` read `{type: "gt", params: [1]}`, so the tolerance is both
+carried and evaluated. Moving *Alert lookback* moved every node's window together (`10m` → `{from: 600, to: 0}`,
+`1h` → `{from: 3600, to: 0}`): the option's value reached the built rule through the panel model.
+
+**Positive — Compose, multi-series Prometheus panel** (a two-series labelled query over `overlay_gauge`, trained
+by the overlay into two snapshots): the *Alert series* dropdown appeared on the panel (a single-series panel shows
+no control), and clicking the button with no choice answered `Choose the metric series this alert rule is for.`
+without navigating. Choosing `{kind="alpha"}` produced the same six-row chain with
+`B.seriesName "{kind=\"alpha\"}"`, `B.seriesLabels {__name__: overlay_gauge, instance: metrics-exporter:8000,
+job: overlay, kind: alpha}` and `B.trainRange {now-30m → now}`, and the preview showed C = **2 series**
+(alpha, beta), D = **1 series labelled `kind="alpha"`**, E = `1 items dropped from union(s)` with only the alpha
+series left, F = **one** instance (**Normal**). Rebuilding with `{kind="beta"}` flipped it: D labelled
+`kind="beta"`, the union warning dropped the **alpha** series, E = **6.53617** % and F evaluated on beta alone.
+That is the label pairing the rule relies on — the restored baseline frame carries the chosen series' labels, so
+Grafana's Math node pairs them and drops the rest instead of leaving one bogus instance per metric series.
+
+**Negative — Compose, a window narrower than the snapshot's grid:** the beta rule at *Alert lookback* `2m`
+answered B with `forecast: no forecast points in the requested range` and D/E/F with
+`[sse.dependencyError] did not execute expression …`; the same datasource query served directly over
+`now-2m … now` returned a value, and at the default `10m` the preview restored the baseline. The window must
+therefore cover points of the fitted grid: the default does, a very short one can fall between grid steps. Left as
+observed behaviour — the empty range is the datasource's existing `ErrEmptyRange` answer, not a new failure mode.
+
+**Negative — Compose:** the unsaved-dashboard, no-alerting-capable-query and no-Forecast-instance paths were not
+exercised live in this pass (see the next table); their guards and strings are unit-tested in
+`src/forecast-panel/alertFromPanel.test.ts`.
 
 **Kubernetes:** the same option on the same build; the rule editor opened on the Kubernetes Grafana (that check
 ran through `make helm-grafana`'s port-forward, which serves the same pod).
@@ -994,7 +1026,9 @@ source and are **not** backed by a live observation in this run:
 | --- | --- | --- |
 | `REASON_TRAIN_MULTI_DATASOURCE` (a series whose datasource group the stored `trainSource` cannot replay) | `src/forecast-panel/trainQuery.ts`, `src/forecast-panel/overlayLoad.ts`, `src/forecast-panel/reasons.ts` | Needs one panel whose metric targets live on two datasources (Mixed); every sandbox dashboard trains from one, so the literal is source-verified rather than measured. |
 | The OpenSearch and Postgres train rejections, and the Druid/Postgres/OpenSearch rewrite branches beyond the Druid builder and Druid SQL | `src/forecast-panel/reasons.ts`, `src/forecast-panel/trainRewrite.ts` | No OpenSearch or Postgres panel exists in the sandbox dashboards and no non-Druid target either; the Prometheus branch is live (F13). |
-| `Dashboard must be saved before alerts can be added.` | `src/forecast-panel/alertFromPanel.ts:6` | The positive (`/alerting/new` with defaults) was verified; the unsaved-dashboard case needs a brand-new unsaved dashboard with the panel. Pass 4 attempted it and stopped at Grafana 13's add-panel flow (`Add` → a layout picker → `Add new element` never became reachable under automation), so the row stays source-verified. |
+| `Dashboard must be saved before alerts can be added.` | `src/forecast-panel/alertFromPanel.ts` (`REASON_DASHBOARD_NOT_SAVED`) | The positive (`/alerting/new` with defaults) was verified; the unsaved-dashboard case needs a brand-new unsaved dashboard with the panel. Pass 4 attempted it and stopped at Grafana 13's add-panel flow (`Add` → a layout picker → `Add new element` never became reachable under automation), so the row stays source-verified. |
+| `No matching metric series in this panel. Load it once, then pick the series this alert rule is for.` | `src/forecast-panel/alertFromPanel.ts` (`REASON_ALERT_SERIES_MISSING`) | Emitted when the panel has loaded no series, or when a stored `Alert series` names one the frames no longer carry. The multi-series pass always had frames loaded; making a panel report frames *without* series needs a datasource that answers empty, which the sandbox's Druid/Prometheus/TestData panels do not in their configured windows. Unit-tested. |
+| `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` | `src/forecast-panel/alertFromPanel.ts` (`REASON_FORECAST_DATASOURCE`) | Needs a deployment with zero (or two) Forecast datasource instances; both sandbox and chart provision exactly one, and deleting it would break every other alerting check in this document. Unit-tested (`forecastDatasourceUid` cases). |
 | Scheduler auto-disable after repeated 401/403 | `pkg/plugin/retrain.go` (`errGrafanaUnauthorized`) | Needs three consecutive rejected fetches across cron ticks; the Compose sandbox uses anonymous Admin and the token path was only exercised in its working (empty-token) form. |
 | `Copy source from query A` (Forecast editor) | `src/forecast-datasource/` | Opt-in, manual feature; the Forecast editor was not driven by hand. |
 | `DRUID_MAX_INFLIGHT` saturation | `timeseries-baselines/druid.go`, `timeseries-baselines/limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
@@ -1162,7 +1196,7 @@ driven live in pass 3 (2026-09-22) on the Compose stack and the Kubernetes relea
 | --- | --- |
 | F12 a target with no `datasource` field | a throwaway dashboard whose query A omits `datasource` trained from the panel's own datasource and drew history + forecast (`POST …/forecast` 200, "Using saved model"); the copy was deleted afterwards. Pass 5 repeated it and settled *why* it works: Grafana supplies the panel's datasource on every target it sends, so the panel never needs a fallback of its own — its `panelDatasource` parameter was dead weight and was deleted (`trainQuery.ts`), and a target that still arrives bare is reported as `Training query returned no points` rather than resolved against the org default |
 | F13 *Legacy lookback* | the option exists as a panel option (empty = Auto) **and** as a field in the Forecast query editor (`Explore`, datasource `forecast`: *Train from*, *Train to*, *Legacy lookback*); it is part of the `cacheKey` fingerprint (`src/forecast-panel/cacheKey.ts`), which is why the editor's tooltip tells you to keep it equal to the panel's |
-| F14 a Mixed panel with a reduce row | **New alert rule** navigated to `/alerting/new` with a `defaults` payload carrying both rows: the Druid metric (query A) and the reduce expression (`refId B`, `datasourceUid __expr__`, `queryType expression`, `model.reducer mean`, `model.expression A`) |
+| F14 a Mixed panel with a reduce row | **New alert rule** navigated to `/alerting/new` with a `defaults` payload carrying both rows: the Druid metric (query A) and the reduce expression (`refId B`, `datasourceUid __expr__`, `queryType expression`, `model.reducer mean`, `model.expression A`) — **superseded in v17**: a panel's own expression rows are no longer copied or forwarded, and both data rows now share one `now - lookback … now` window (see [F14](#f14-new-alert-rule-from-the-panel-options)) |
 | F15 two option edits in one editing session | *Show prediction interval* off plus *Max in-flight loads* 2 applied without an intermediate save; the save dialog's diff listed `"maxInflightLoads": 2`, `"showInterval": false` and the clamped `"interval": 0.99`, the saved dashboard (version 41) carries all three, and the band left the drawn panel at the same time |
 | F21 *Interval coverage* bounds | typing `5` into the field clamps to `0.99` (`COVERAGE_SETTINGS.max`) |
 | the `postgres.*`-only rollout lever | `helm upgrade --install timeseries … --set grafana.configRevision=$(date +%s)` created a new ReplicaSet and rolled the Grafana pod (`timeseries-grafana-7f89fd5cb-nr9zw`, 12:55:59) with a new `FORECAST_CONFIG_CHECKSUM=9d2aced3…` (was `e80beffb…`) |

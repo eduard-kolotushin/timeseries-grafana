@@ -1,100 +1,60 @@
 import React, { useState } from 'react';
-import { rangeUtil, StandardEditorProps } from '@grafana/data';
+import { StandardEditorProps } from '@grafana/data';
 import { locationService } from '@grafana/runtime';
 import { Alert, Button } from '@grafana/ui';
 import {
+  absoluteRangeMs,
   alertingNewPath,
   alertingUidsFor,
-  asSaveModel,
-  DashboardSaveModel,
-  dashboardTimeFromScene,
   dashboardUidFromPath,
-  DEFAULT_RELATIVE_TIME_RANGE,
-  findPanel,
-  findQueryRunnerState,
-  LivePanel,
-  pickLivePanel,
+  forecastDatasourceUid,
+  livePanel,
+  panelIdFromLocation,
+  panelSeries,
   REASON_DASHBOARD_NOT_SAVED,
-  RelativeTimeRange,
-  ruleFormDefaultsFromPanel,
+  ruleDefaultsFromPanel,
 } from './alertFromPanel';
+import { metricTargets } from './mixed';
+import { ForecastOptions } from './types';
 
-function liveSaveModel(): DashboardSaveModel | undefined {
-  const runtime = (window as Window & { grafanaRuntime?: { getDashboardSaveModel?: () => unknown } }).grafanaRuntime;
-  try {
-    return asSaveModel(runtime?.getDashboardSaveModel?.());
-  } catch {
-    return undefined;
-  }
-}
-
-function liveFromScene(panelId: number): { dashboardUid?: string; panel?: LivePanel; time?: { from: string; to: string } } {
-  const dash = (window as Window & { __grafanaSceneContext?: unknown }).__grafanaSceneContext as
-    | {
-        state?: {
-          uid?: string;
-          $timeRange?: unknown;
-          editPanel?: { state?: { panelRef?: { resolve?: () => unknown } } };
-        };
-      }
-    | undefined;
-  const viz = dash?.state?.editPanel?.state?.panelRef?.resolve?.();
-  const runner = findQueryRunnerState(viz);
-  const title =
-    viz && typeof viz === 'object' && 'state' in viz
-      ? String((viz as { state?: { title?: string } }).state?.title ?? '')
-      : '';
-  return {
-    dashboardUid: dash?.state?.uid,
-    time: dashboardTimeFromScene(dash),
-    panel: {
-      id: panelId,
-      title,
-      targets: runner?.queries,
-      datasource: runner?.datasource,
-      maxDataPoints: runner?.maxDataPoints,
-    },
-  };
-}
-
-function relativeFromDashboardTime(time?: { from: string; to: string }): RelativeTimeRange {
-  if (!time?.from || !time?.to) {
-    return DEFAULT_RELATIVE_TIME_RANGE;
-  }
-  try {
-    return rangeUtil.timeRangeToRelative(rangeUtil.convertRawToRange(time));
-  } catch {
-    return DEFAULT_RELATIVE_TIME_RANGE;
-  }
-}
-
-export const AlertEditor: React.FC<StandardEditorProps> = () => {
+export const AlertEditor: React.FC<StandardEditorProps<unknown, unknown, ForecastOptions>> = ({ context }) => {
   const [reason, setReason] = useState<string | null>(null);
 
   const onClick = () => {
     const loc = locationService.getLocation();
-    const panelId = Number(locationService.getSearchObject().editPanel);
-    const model = liveSaveModel();
-    const fromScene = liveFromScene(panelId);
-    const dashboardUid = model?.uid || fromScene.dashboardUid || dashboardUidFromPath(loc.pathname);
+    const panelId = panelIdFromLocation();
+    const live = livePanel(panelId);
+    const dashboardUid = live.dashboardUid || dashboardUidFromPath(loc.pathname);
     if (!dashboardUid || !Number.isFinite(panelId)) {
       setReason(REASON_DASHBOARD_NOT_SAVED);
       return;
     }
-    const panel = pickLivePanel(findPanel(model?.panels, panelId), fromScene.panel, panelId);
-    const result = ruleFormDefaultsFromPanel({
-      dashboardUid,
-      panel,
-      panelId,
-      relativeTimeRange: relativeFromDashboardTime(fromScene.time ?? model?.time),
-      alertingUids: alertingUidsFor(panel.targets ?? [], panel.datasource),
+    const panel = live.panel ?? { id: panelId };
+    // The rule's cacheKey is a hash of the panel's fit inputs, so building the defaults is
+    // async. The panel's loaded frames decide which series exist: a stale `Alert series`
+    // names nothing, and the builder answers a reason for it.
+    const build = async () => {
+      const result = await ruleDefaultsFromPanel({
+        dashboardUid,
+        panel,
+        panelId,
+        options: context.options,
+        series: panelSeries(context.data, panel.targets),
+        metricTargets: metricTargets(panel.targets ?? []),
+        ...absoluteRangeMs(live.time),
+        alertingUids: alertingUidsFor(panel.targets ?? [], panel.datasource),
+        forecastDatasourceUid: forecastDatasourceUid(panel.targets ?? []),
+      });
+      if (!result.ok) {
+        setReason(result.reason);
+        return;
+      }
+      setReason(null);
+      locationService.push(alertingNewPath(result.defaults, loc.pathname + loc.search));
+    };
+    void build().catch((err: unknown) => {
+      setReason(err instanceof Error ? err.message : String(err));
     });
-    if (!result.ok) {
-      setReason(result.reason);
-      return;
-    }
-    setReason(null);
-    locationService.push(alertingNewPath(result.defaults, loc.pathname + loc.search));
   };
 
   return (

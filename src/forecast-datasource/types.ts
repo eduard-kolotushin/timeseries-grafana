@@ -20,6 +20,12 @@ export interface ForecastDataQuery extends DataQuery {
   lookback?: string;
   /** Copy of overlay panel targets (query A) for the cacheKey fingerprint. */
   sourceTargets: unknown[];
+  /**
+   * Labels the restored frame's Value field with. A rule that also queries the metric
+   * pairs this baseline with the matching series by label instead of broadcasting to
+   * every series the metric query returned. Never part of the cacheKey fingerprint.
+   */
+  seriesLabels?: Record<string, string>;
   cacheKey?: string;
 }
 

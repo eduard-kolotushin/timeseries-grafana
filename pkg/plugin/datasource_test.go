@@ -37,6 +37,15 @@ func queryJSON(t *testing.T, kind, key string, level float64) []byte {
 	return b
 }
 
+func queryJSONLabels(t *testing.T, kind, key string, labels map[string]string) []byte {
+	t.Helper()
+	b, err := json.Marshal(forecastQueryJSON{Kind: kind, CacheKey: key, SeriesLabels: labels})
+	if err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	return b
+}
+
 func TestQueryData(t *testing.T) {
 	ctx := context.Background()
 	const orgID int64 = 1
@@ -231,6 +240,61 @@ func TestQueryData(t *testing.T) {
 		assertFrameValues(t, resp.Responses["B"], want.Values)
 		assertFrameValues(t, resp.Responses["C"], want.Lower)
 		assertFrameValues(t, resp.Responses["D"], want.Upper)
+	})
+
+	// A rule that queries the metric and this baseline together pairs them by
+	// label, so a query that names its series must label the answer — and a query
+	// that does not must stay exactly the unlabelled frame it always was.
+	t.Run("seriesLabels label the answer", func(t *testing.T) {
+		store := newMemoryStore()
+		seedSnapshot(t, store, orgID, key, fit)
+		ds, err := newDatasource(ctx, backend.DataSourceInstanceSettings{}, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			name   string
+			json   []byte
+			labels map[string]string
+		}{
+			{
+				name:   "named series",
+				json:   queryJSONLabels(t, "forecast", key, map[string]string{"host": "a"}),
+				labels: map[string]string{"host": "a"},
+			},
+			{name: "unnamed series", json: queryJSON(t, "forecast", key, 0)},
+		} {
+			resp, err := ds.QueryData(ctx, &backend.QueryDataRequest{
+				PluginContext: backend.PluginContext{OrgID: orgID},
+				Queries: []backend.DataQuery{{
+					RefID:     "B",
+					JSON:      tc.json,
+					TimeRange: backend.TimeRange{From: from, To: to},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			got := resp.Responses["B"]
+			if got.Error != nil {
+				t.Fatalf("%s: error=%v", tc.name, got.Error)
+			}
+			if len(got.Frames) != 1 {
+				t.Fatalf("%s: frames=%d", tc.name, len(got.Frames))
+			}
+			labels := got.Frames[0].Fields[1].Labels
+			if len(labels) != len(tc.labels) {
+				t.Fatalf("%s: labels=%v want=%v", tc.name, labels, tc.labels)
+			}
+			for k, v := range tc.labels {
+				if labels[k] != v {
+					t.Fatalf("%s: label %q=%q want %q", tc.name, k, labels[k], v)
+				}
+			}
+			if got.Frames[0].Fields[0].Labels != nil {
+				t.Fatalf("%s: time field labels=%v", tc.name, got.Frames[0].Fields[0].Labels)
+			}
+		}
 	})
 
 	t.Run("busy is 429", func(t *testing.T) {

@@ -23,6 +23,12 @@ export interface ForecastOptions {
   lookback?: string;
   /** Max overlay forecast loads in flight for this panel. Default 1, minimum 1. */
   maxInflightLoads?: number;
+  /** Series the alert rule is built for. Empty means the panel's only series. */
+  alertSeries?: string;
+  /** Alert window ending at now, e.g. `10m`; empty uses the 10-minute default. */
+  alertLookback?: string;
+  /** Percent deviation the rule's Threshold fires above. Default 20. */
+  alertTolerance?: number;
 }
 
 /**

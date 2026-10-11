@@ -23,7 +23,7 @@ make frontend   # webpack only
 make backend    # Linux amd64 binary only
 ```
 
-Grafana start/restart lives in the sibling sandbox Makefile (`make up`, `make refresh`, `make ingest`). A cluster install is `helm install` from [`timeseries-k8s`](../timeseries-k8s). Minute-of-week Druid→Kafka baselines run in sibling [`timeseries-baselines`](../timeseries-baselines), not in this plugin process. Alert rules use the nested Forecast datasource after an overlay train; this repo does not ship alert rules.
+Grafana start/restart lives in the sibling sandbox Makefile (`make up`, `make refresh`, `make ingest`). A cluster install is `helm install` from [`timeseries-k8s`](../timeseries-k8s). Minute-of-week Druid→Kafka baselines run in sibling [`timeseries-baselines`](../timeseries-baselines), not in this plugin process. Overlay options **New alert rule** builds the whole rule from the panel — its metric rows plus a synthesized Forecast row that restores the trained baseline, both over `now - lookback … now`, with reduce/math/threshold — so no Mixed datasource or hand-filled Forecast row is needed; alert rules themselves are not shipped here.
 
 ## Agents
 
