@@ -13,6 +13,7 @@ describe('extractSeries', () => {
     expect(extractSeries(frame)).toEqual([
       {
         name: 'A-series',
+        fieldName: 'A-series',
         times: [0, 1000, 2000],
         values: [1, 2, 3],
       },
@@ -64,8 +65,8 @@ describe('extractSeries', () => {
       ],
     });
     expect(extractSeries(frame)).toEqual([
-      { name: 'cpu', times: [0, 1000], values: [1, 2] },
-      { name: 'mem', times: [0, 1000], values: [3, 4] },
+      { name: 'cpu', fieldName: 'cpu', times: [0, 1000], values: [1, 2] },
+      { name: 'mem', fieldName: 'mem', times: [0, 1000], values: [3, 4] },
     ]);
   });
 
@@ -140,7 +141,7 @@ describe('historyFrame', () => {
   });
 
   it('rebuilds a bare series without config or meta', () => {
-    const frame = historyFrame({ name: 'v', times: [0], values: [1] });
+    const frame = historyFrame({ name: 'v', fieldName: 'v', times: [0], values: [1] });
     expect(frame.fields.map((field) => field.name)).toEqual(['Time', 'v']);
     expect(frame.fields[1].config.displayName).toBe('v');
     expect(frame.meta).toBeUndefined();
@@ -148,9 +149,9 @@ describe('historyFrame', () => {
 });
 
 describe('pickTrainingPoints', () => {
-  const display = { name: 'views', times: [1], values: [1] };
-  const trained = { name: 'views', times: [0, 1], values: [0, 1] };
-  const other = { name: 'other', times: [0], values: [9] };
+  const display = { name: 'views', fieldName: 'views', times: [1], values: [1] };
+  const trained = { name: 'views', fieldName: 'views', times: [0, 1], values: [0, 1] };
+  const other = { name: 'other', fieldName: 'other', times: [0], values: [9] };
 
   it('matches by name', () => {
     expect(pickTrainingPoints(display, [other, trained])).toBe(trained);
@@ -161,13 +162,13 @@ describe('pickTrainingPoints', () => {
   });
 
   it('does not fall back to the visible series when several trains miss', () => {
-    expect(pickTrainingPoints(display, [other, { name: 'x', times: [], values: [] }])).toBeNull();
+    expect(pickTrainingPoints(display, [other, { name: 'x', fieldName: 'x', times: [], values: [] }])).toBeNull();
   });
 });
 
 describe('trainingForFit', () => {
-  const display = { name: 'views', times: [1], values: [1] };
-  const trained = { name: 'views', times: [0, 1], values: [0, 1] };
+  const display = { name: 'views', fieldName: 'views', times: [1], values: [1] };
+  const trained = { name: 'views', fieldName: 'views', times: [0, 1], values: [0, 1] };
 
   it('returns null when the training query is empty (no silent fallback)', () => {
     expect(trainingForFit(display, [])).toBeNull();
@@ -180,8 +181,8 @@ describe('trainingForFit', () => {
   it('returns null on name mismatch when several train series exist', () => {
     expect(
       trainingForFit(display, [
-        { name: 'a', times: [0], values: [1] },
-        { name: 'b', times: [0], values: [2] },
+        { name: 'a', fieldName: 'a', times: [0], values: [1] },
+        { name: 'b', fieldName: 'b', times: [0], values: [2] },
       ])
     ).toBeNull();
   });

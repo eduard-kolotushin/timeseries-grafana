@@ -395,8 +395,8 @@ clicked in this pass). The `Delete` beside it still leaves the model (F5).
 | **Function** | Build a complete Grafana alert rule from the panel: its metric query plus a synthesized Forecast query that restores the trained baseline, both over one window ending now. |
 | **Who can use** | **Panel** (needs the dashboard saved and, in Grafana, permission to create rules). |
 | **How configured** | Panel options → *Alerting*: **Alert lookback** (default 10m), **Alert tolerance** (% deviation, default 20) and **Alert series** (a dropdown rendered only when the panel has more than one series); then *New alert rule*. No Mixed datasource and no hand-filled Forecast row is involved. |
-| **Input params** | The metric series, and only on a multi-series panel. The defaults carry the panel title, the metric rows, the synthesized Forecast row (fit options, `sourceTargets`, series name and labels, the overlay's `cacheKey`), two Reduce(`last`) nodes, the Math deviation, the Threshold condition, and the dashboard/panel annotations. |
-| **Expected result** | The browser lands on `/alerting/new?defaults=…` with a four-node expression chain that conditions on the Threshold over the Math. An unsaved dashboard answers `Dashboard must be saved before alerts can be added.`; a panel with no alerting-capable query answers `Cannot create alerts from this panel because no query to an alerting capable datasource is found.`; a multi-series panel with no choice answers `Choose the metric series this alert rule is for.`; a metric row of several unlabelled series answers `This panel’s series carry no labels, so the alert rule cannot tell them apart: …`; a deployment without a Forecast datasource instance answers `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` None of them navigates. |
+| **Input params** | The metric series, and only on a multi-series panel. The defaults carry the panel title, the metric rows, the synthesized Forecast row (fit options, `sourceTargets`, series name, the overlay's `cacheKey`, and `seriesLabels` — the chosen series' own labels, or `{__name__: …}` where Grafana synthesizes that name), the deviation as two Reduce(`last`) + Math + Threshold nodes — or, for a row no label or synthesized name can point at, one `sql` expression as the condition — and the dashboard/panel annotations. |
+| **Expected result** | The browser lands on `/alerting/new?defaults=…` with a four-node expression chain that conditions on the Threshold over the Math, or with a `sql` condition where the series can only be named inside SQL. An unsaved dashboard answers `Dashboard must be saved before alerts can be added.`; a panel with no alerting-capable query answers `Cannot create alerts from this panel because no query to an alerting capable datasource is found.`; a multi-series panel with no choice answers `Choose the metric series this alert rule is for.`; a row no label or synthesized name can point at answers `This panel’s series carry no labels, so the rule has to pick one inside a SQL expression, …` when Grafana's `sqlExpressions` feature is off and `This panel’s series carry no labels and no distinct series name, …` when no column can name it either; a deployment without a Forecast datasource instance answers `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` None of them navigates. |
 
 **Positive — Compose, single-series Druid panel** (`Forecast minute-of-week demo` → panel 3, *Seasonal baseline (minute of week, with variance)*):
 clicking *New alert rule* landed on `/alerting/new?defaults=…` carrying the panel title, the
@@ -438,16 +438,41 @@ the dropdown on the two-unlabelled-series panel set `options.alertSeries` to `A-
 the same value; with no pick the button answers `Choose the metric series this alert rule is for.` and does not
 navigate.
 
-**Negative — Compose, a metric row whose series carry no labels.** On a TestData panel (`random_walk`,
-`seriesCount: 2`) both series have empty field labels, so `B.seriesLabels` is absent. Measured through
-`/api/v1/eval`: the metric side's frames carry `__name__="A-series"` / `"A-series1"` (Grafana's own synthesis for
-those frames) while the restored baseline frame carries none, so Grafana broadcast it — E emitted **2 series** and
-F **2 instances**, i.e. the unchosen series was compared against the chosen series' baseline. Labelling the
-baseline by hand (`seriesLabels {__name__: "A-series1"}`) collapsed that to one series and one instance with
-`1 items dropped from union(s)`, which pins the pairing as the selector — but that label is not the panel's field
-labels, so the plugin does not guess it: the row now answers `This panel's series carry no labels, so the alert
-rule cannot tell them apart: …` instead of writing a rule that would alert on every series. A labelled metric
-(Prometheus, OpenSearch, Postgres series labels) is unaffected, and a single-series panel is unaffected.
+**Positive — Compose, a label-free row is named the way Grafana's evaluation names it.** On the TestData panel
+(`Alert unlabelled series demo`, `random_walk`, `seriesCount: 2`) both series have empty field labels, so no label
+can pair the baseline. Picking `A-series1` landed on `/alerting/new?defaults=…` with the **six** rows above —
+A = the TestData target, B = the synthesized forecast row with `seriesName "A-series1"` and
+`seriesLabels {__name__: "A-series1"}`, C/D = Reduce(`last`), E = Math, F = Threshold, `condition "F"`, every node
+`{from: 600, to: 0}` — i.e. the rule does not guess a label, it sends the name Grafana itself synthesizes.
+Measured through `/api/v1/eval`: A's frames carry `__name__="A-series"` / `"A-series1"` (the expression pipeline's
+own synthesis for a label-free legacy query), B restored the `A-series1` snapshot labelled
+`{__name__: "A-series1"}` (**not** `needTrain`), D = **1 series** (A-series dropped by the label pairing),
+E = **83.09471 %**, F = **1** (firing). The first build of this check took the SQL branch instead, and that was a
+defect in the plugin, not in the measurement: the frames carry `typeVersion: [0, 0]`, and mirroring Grafana's
+`shouldUseDataplane` means `FrameTypeVersion.IsZero()` — a zero version is the **legacy** path, which is exactly
+where the synthesis happens. `isZeroTypeVersion` now compares the wire array's parts (a plain `typeVersion = 0`
+comparison read `[0, 0]` as non-legacy), and the same panel then produced the `__name__` chain above.
+
+**Positive — Compose, a row nothing names gets the `sql` condition.** A Postgres panel
+(`overlay-postgres`, a two-metric legacy 3-column query: `SELECT $__timeGroupAlias(ts,1m), 'up' AS metric,
+avg(value) AS value … UNION ALL … 'down' …`) returns two series whose value fields are named `up` / `down` with
+**no** labels, `meta.type "timeseries-wide"` and `typeVersion [0,1]`, and Postgres is not a datasource Grafana
+names — so the picker offers `down` / `up` and picking `up` produced **three** rows: A = the Postgres target,
+B = the forecast row (no `seriesLabels`, one series), C = a `sql` expression node that **is** the condition, with
+`SELECT CASE WHEN abs((m - base) / base) * 100 > 20 THEN 1 ELSE 0 END AS alert FROM (SELECT (SELECT a.__value__
+FROM A a WHERE a.__metric_name__ = 'up' AND a.__value__ IS NOT NULL ORDER BY a.time DESC LIMIT 1) AS m, (SELECT
+b.__value__ FROM B b WHERE b.__value__ IS NOT NULL ORDER BY b.time DESC LIMIT 1) AS base) t`. Measured through
+`/api/v1/eval`: A's normalized table carries `time` / `__value__` / `__metric_name__`, and C answered a
+single-row, single-field number `alert` = **0** at tolerance 20 and **1** at tolerance 0 — the comparison is real
+and tracks the data, not a constant. (The throwaway dashboards for both checks were deleted afterwards; the
+`Alert unlabelled series demo` board is the pre-existing one from the previous pass.)
+
+**Superseded — Compose, the same TestData row under the old build.** The label-free row used to answer
+`This panel's series carry no labels, so the alert rule cannot tell them apart: …` instead of writing a rule: with
+the baseline unlabelled, Grafana broadcast it and E emitted **2 series** / F **2 instances** for a one-series
+choice, so refusing was the only honest answer while the plugin had no way to name the series. Both label-free
+tiers above replace that refusal. A labelled metric (Prometheus, OpenSearch, Postgres series labels) and a
+single-series panel were never affected.
 
 **Negative — Compose, a window narrower than the snapshot's grid:** the beta rule at *Alert lookback* `2m`
 answered B with `forecast: no forecast points in the requested range` and D/E/F with
@@ -1048,6 +1073,8 @@ source and are **not** backed by a live observation in this run:
 | The OpenSearch and Postgres train rejections, and the Druid/Postgres/OpenSearch rewrite branches beyond the Druid builder and Druid SQL | `src/forecast-panel/reasons.ts`, `src/forecast-panel/trainRewrite.ts` | No OpenSearch or Postgres panel exists in the sandbox dashboards and no non-Druid target either; the Prometheus branch is live (F13). |
 | `Dashboard must be saved before alerts can be added.` | `src/forecast-panel/alertFromPanel.ts` (`REASON_DASHBOARD_NOT_SAVED`) | The positive (`/alerting/new` with defaults) was verified; the unsaved-dashboard case needs a brand-new unsaved dashboard with the panel. Pass 4 attempted it and stopped at Grafana 13's add-panel flow (`Add` → a layout picker → `Add new element` never became reachable under automation), so the row stays source-verified. |
 | `No matching metric series in this panel. Load it once, then pick the series this alert rule is for.` | `src/forecast-panel/alertFromPanel.ts` (`REASON_ALERT_SERIES_MISSING`) | Emitted when the panel has loaded no series, or when a stored `Alert series` names one the frames no longer carry. The multi-series pass always had frames loaded; making a panel report frames *without* series needs a datasource that answers empty, which the sandbox's Druid/Prometheus/TestData panels do not in their configured windows. Unit-tested. |
+| `This panel’s series carry no labels, so the rule has to pick one inside a SQL expression, …` | `src/forecast-panel/alertFromPanel.ts` (`REASON_ALERT_SQL_OFF`) | The SQL-condition branch itself was measured live on a Postgres panel (F14); the refusal only fires with Grafana's `sqlExpressions` feature **off**, and the sandbox runs 13.1, where it is GA and default-on. Turning it off needs a Grafana restart with a `feature_toggles` override. Unit-tested against a mocked `config.featureToggles`. |
+| `This panel’s series carry no labels and no distinct series name, …` | `src/forecast-panel/alertFromPanel.ts` (`REASON_ALERT_SERIES_AMBIGUOUS`) | Needs a multi-series row where neither `__metric_name__` nor `__display_name__` is distinct and no label exists. Both sandbox shapes that were tried name their series: the TestData row synthesizes `__name__`, and a two-target Postgres panel aliasing both metrics `metric` collapses to **one** series in `panelSeries` (the plugin's fit identity is name-based, so those two frames are one series to the whole plugin) and builds the six-row chain. Unit-tested. |
 | `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` | `src/forecast-panel/alertFromPanel.ts` (`REASON_FORECAST_DATASOURCE`) | Needs a deployment with zero (or two) Forecast datasource instances; both sandbox and chart provision exactly one, and deleting it would break every other alerting check in this document. Unit-tested (`forecastDatasourceUid` cases). |
 | Scheduler auto-disable after repeated 401/403 | `pkg/plugin/retrain.go` (`errGrafanaUnauthorized`) | Needs three consecutive rejected fetches across cron ticks; the Compose sandbox uses anonymous Admin and the token path was only exercised in its working (empty-token) form. |
 | `Copy source from query A` (Forecast editor) | `src/forecast-datasource/` | Opt-in, manual feature; the Forecast editor was not driven by hand. |

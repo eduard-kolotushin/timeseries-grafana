@@ -1,5 +1,5 @@
 import { DataFrame, rangeUtil } from '@grafana/data';
-import { getDataSourceSrv, locationService } from '@grafana/runtime';
+import { config, getDataSourceSrv, locationService } from '@grafana/runtime';
 import { cacheKeyInputFromQuery, queryFromOptions } from '../forecast-datasource/queryModel';
 import { FORECAST_DATASOURCE_TYPE } from '../forecast-datasource/types';
 import { cacheKey } from './cacheKey';
@@ -16,8 +16,10 @@ export const REASON_NO_ALERTING_QUERY =
 export const REASON_ALERT_SERIES_REQUIRED = 'Choose the metric series this alert rule is for.';
 export const REASON_ALERT_SERIES_MISSING =
   'No matching metric series in this panel. Load it once, then pick the series this alert rule is for.';
-export const REASON_ALERT_SERIES_UNLABELLED =
-  'This panel’s series carry no labels, so the alert rule cannot tell them apart: Grafana pairs the baseline with a metric series by label. Alert from a single-series panel, or from a metric whose series are labelled.';
+export const REASON_ALERT_SERIES_AMBIGUOUS =
+  'This panel’s series carry no labels and no distinct series name, so the alert rule cannot say which one it is for. Give the query a per-series column or label, or split the series into separate panels.';
+export const REASON_ALERT_SQL_OFF =
+  'This panel’s series carry no labels, so the rule has to pick one inside a SQL expression, and SQL expressions are off in this Grafana. Enable the `sqlExpressions` feature toggle, or label the series.';
 export const REASON_FORECAST_DATASOURCE =
   'Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.';
 
@@ -68,7 +70,19 @@ export type RuleFormDefaults = {
 export type AlertFromPanelResult = { ok: true; defaults: RuleFormDefaults } | { ok: false; reason: string };
 
 /** A series the panel has loaded, as the fit that wrote the snapshot named it. */
-export type PanelSeries = { name: string; refId: string; labels?: Record<string, string> };
+export type PanelSeries = {
+  name: string;
+  refId: string;
+  labels?: Record<string, string>;
+  /** The source field's raw name — Grafana's `__metric_name__` inside an expression. */
+  fieldName: string;
+  /** The field's configured display name (never what Grafana's own column carries). */
+  displayName?: string;
+  /** The datasource's own display name; the `__display_name__` column. */
+  displayNameFromDS?: string;
+  /** Set on a legacy (non-dataplane) frame, the only path where Grafana synthesizes `__name__`. */
+  legacyMeta: boolean;
+};
 
 export const DEFAULT_RELATIVE_TIME_RANGE: RelativeTimeRange = { from: 600, to: 0 };
 
@@ -215,6 +229,10 @@ export function panelSeries(frames: DataFrame[] | undefined, targets: PanelTarge
         name: points.name,
         refId: typeof frame.refId === 'string' ? frame.refId : '',
         labels: points.labels,
+        fieldName: points.fieldName || points.name,
+        displayName: points.config?.displayName,
+        displayNameFromDS: points.config?.displayNameFromDS,
+        legacyMeta: !points.meta?.type || isZeroTypeVersion(points.meta.typeVersion),
       });
     }
   }
@@ -327,6 +345,139 @@ function pickSeries(series: PanelSeries[], alertSeries?: string): { series: Pane
   return found ? { series: found } : { reason: REASON_ALERT_SERIES_MISSING };
 }
 
+/**
+ * `data.FrameTypeVersion.IsZero()`: the wire form is `[major, minor]`, so a frame whose
+ * datasource set a type but a zero version (`[0, 0]`) still takes the legacy conversion
+ * path — which is where Grafana synthesizes `__name__`. Only a non-zero version means the
+ * dataplane path, where nothing is synthesized.
+ */
+function isZeroTypeVersion(version: unknown): boolean {
+  if (version == null) {
+    return true;
+  }
+  const parts = Array.isArray(version) ? version : [version];
+  return parts.every((part) => Number(part) === 0);
+}
+
+/** The datasources whose legacy frames Grafana names itself (`pkg/expr/converter.go`). */
+const SYNTHESIZING_DATASOURCE_TYPES = new Set([
+  'graphite',
+  'grafana-testdata-datasource',
+  'grafana-dynatrace-datasource',
+  'influxdb',
+]);
+
+/**
+ * How the rule tells Grafana which series it is for. Labels are what the Math node pairs
+ * by; `name` mirrors the `__name__` Grafana itself synthesizes for a label-free legacy
+ * frame; `column` is a `sql` condition selecting the row out of the evaluation's table.
+ */
+export type SeriesTarget =
+  | { kind: 'labels'; labels: Record<string, string> }
+  | { kind: 'name'; name: string }
+  | { kind: 'column'; column: '__metric_name__' | '__display_name__'; value: string }
+  | { kind: 'refuse'; reason: string };
+
+type SeriesSelector = 'displayNameFromDS' | 'displayName' | 'fieldName';
+
+function selectorValue(series: PanelSeries, key: SeriesSelector): string {
+  return (series[key] ?? '').trim();
+}
+
+/** A selector can name one series of the row when every series has a value and no two share it. */
+function distinctSelector(row: PanelSeries[], key: SeriesSelector): boolean {
+  const values = row.map((s) => selectorValue(s, key));
+  return values.every((v) => v !== '') && new Set(values).size === values.length;
+}
+
+/**
+ * The datasource type of the row the chosen series came from: a target usually carries its
+ * own `{uid, type}`, and a scene query that carries only a uid is resolved through Grafana's
+ * datasource registry.
+ */
+export function targetDatasourceType(
+  row: PanelSeries[],
+  rows: PanelTarget[],
+  chosen: PanelSeries,
+  panelDs: DatasourceRef
+): string {
+  const target = (chosen.refId ? rows.find((t) => t.refId === chosen.refId) : undefined) ?? rows[0];
+  const ref = target?.datasource;
+  if (ref && typeof ref === 'object' && typeof ref.type === 'string' && ref.type) {
+    return ref.type;
+  }
+  const uid = datasourceUid(ref, panelDs);
+  return uid ? getDataSourceSrv().getInstanceSettings(uid)?.type ?? '' : '';
+}
+
+/**
+ * How this rule can say which series it is for. Anything labelled pairs by label. A
+ * label-free row of several series has no label to pair with, so it is named the way the
+ * evaluation names it: Grafana's own synthesized `__name__` for a datasource it does that
+ * for, and otherwise the column the SQL condition selects (`__display_name__` /
+ * `__metric_name__`). A row nothing can name is refused, because Grafana would otherwise
+ * broadcast the one baseline across every series and alert on series nobody picked.
+ */
+export function seriesTarget(series: PanelSeries[], chosen: PanelSeries, datasourceType: string): SeriesTarget {
+  const row = chosen.refId ? series.filter((s) => s.refId === chosen.refId) : series;
+  if (row.length <= 1) {
+    return { kind: 'labels', labels: chosen.labels ?? {} };
+  }
+  if (chosen.labels && Object.keys(chosen.labels).length > 0) {
+    return { kind: 'labels', labels: chosen.labels };
+  }
+  const named =
+    SYNTHESIZING_DATASOURCE_TYPES.has(datasourceType) && row.every((s) => s.legacyMeta);
+  if (named) {
+    for (const key of ['displayNameFromDS', 'displayName', 'fieldName'] as const) {
+      if (distinctSelector(row, key)) {
+        return { kind: 'name', name: selectorValue(chosen, key) };
+      }
+    }
+  }
+  if (distinctSelector(row, 'displayNameFromDS')) {
+    return { kind: 'column', column: '__display_name__', value: selectorValue(chosen, 'displayNameFromDS') };
+  }
+  if (distinctSelector(row, 'fieldName')) {
+    return { kind: 'column', column: '__metric_name__', value: selectorValue(chosen, 'fieldName') };
+  }
+  return { kind: 'refuse', reason: REASON_ALERT_SERIES_AMBIGUOUS };
+}
+
+/** `sqlExpressions` is GA and default-on from Grafana 13.1; before that an admin enables it. */
+export function sqlExpressionsEnabled(cfg: { featureToggles?: { sqlExpressions?: boolean } } = config): boolean {
+  return cfg?.featureToggles?.sqlExpressions === true;
+}
+
+/** A bare SQL identifier: the engine names each input table after its refId. */
+const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The alert condition for a row no label or synthesized name can point at: one SQL
+ * expression that selects the chosen series by name out of the metric table and the single
+ * row of the baseline table, computes the percent deviation and compares it with the
+ * tolerance, so the answer is a single Number (1 fires, 0 does not, NULL → NoData). Both
+ * sides take the last non-null value, exactly like the chain's Reduce(`last`).
+ */
+export function deviationSQL(input: {
+  metricRefId: string;
+  baselineRefId: string;
+  column: '__metric_name__' | '__display_name__';
+  value: string;
+  tolerance: number;
+}): string {
+  const tolerance =
+    Number.isFinite(input.tolerance) && input.tolerance >= 0 ? input.tolerance : DEFAULT_ALERT_TOLERANCE;
+  const value = input.value.replace(/'/g, "''");
+  return (
+    `SELECT CASE WHEN abs((m - base) / base) * 100 > ${tolerance} THEN 1 ELSE 0 END AS alert FROM ` +
+    `(SELECT (SELECT a.__value__ FROM ${input.metricRefId} a WHERE a.${input.column} = '${value}'` +
+    ` AND a.__value__ IS NOT NULL ORDER BY a.time DESC LIMIT 1) AS m, ` +
+    `(SELECT b.__value__ FROM ${input.baselineRefId} b WHERE b.__value__ IS NOT NULL` +
+    ` ORDER BY b.time DESC LIMIT 1) AS base) t`
+  );
+}
+
 function reduceExpression(refId: string, sourceRefId: string, window: RelativeTimeRange): AlertQuery {
   return {
     refId,
@@ -407,9 +558,11 @@ function thresholdExpression(
 /**
  * A complete Grafana alert rule from the state of a trained overlay panel: the panel's
  * metric rows, one synthesized Forecast row that restores the snapshot the overlay fit
- * wrote, Reduce(last) over each, a Math percent deviation, and a Threshold on it as the
- * alert condition. `series` is what the panel has loaded — the caller reads it from the
- * frames so a stale `alertSeries` names a series that is really there.
+ * wrote, and the deviation between them. A series that can be named pairs by label (or by
+ * Grafana's synthesized `__name__`) and gets the readable Reduce/Reduce/Math/Threshold
+ * chain; a label-free row whose series only a column can tell apart gets a `sql` expression
+ * as the condition instead. `series` is what the panel has loaded — the caller reads it
+ * from the frames so a stale `alertSeries` names a series that is really there.
  */
 export async function ruleDefaultsFromPanel(input: {
   dashboardUid?: string;
@@ -443,13 +596,15 @@ export async function ruleDefaultsFromPanel(input: {
     return { ok: false, reason: picked.reason };
   }
   const chosen = picked.series;
-  // Grafana's Math node pairs the baseline with a metric series by label, so a row that
-  // returns several series none of which is labelled cannot be narrowed to the chosen one:
-  // the baseline would broadcast and every series would get an instance. Refuse that shape
-  // instead of writing a rule that alerts on series the operator did not pick.
+  // How this rule says which series it is for. A labelled row pairs by label; a label-free
+  // row is named the way the evaluation names it (Grafana's synthesized `__name__`, or a
+  // SQL column the condition selects); a row nothing can name is refused, because Grafana
+  // would otherwise broadcast the one baseline across every series and alert on series the
+  // operator did not pick.
   const chosenRow = chosen.refId ? input.series.filter((s) => s.refId === chosen.refId) : input.series;
-  if (chosenRow.length > 1 && !chosen.labels) {
-    return { ok: false, reason: REASON_ALERT_SERIES_UNLABELLED };
+  const identity = seriesTarget(input.series, chosen, targetDatasourceType(chosenRow, rows, chosen, panelDs));
+  if (identity.kind === 'refuse') {
+    return { ok: false, reason: identity.reason };
   }
 
   const forecastUid = input.forecastDatasourceUid?.trim();
@@ -464,7 +619,11 @@ export async function ruleDefaultsFromPanel(input: {
   // forecast query's sourceTargets, which is what the cacheKey is computed from.
   const seriesRows = rows.filter((target) => !chosen.refId || target.refId === chosen.refId);
   for (const target of seriesRows.length > 0 ? seriesRows : rows) {
-    const refId = typeof target.refId === 'string' && target.refId ? target.refId : nextRefId(queries);
+    // The SQL branch addresses the metric table by refId, so a target refId that is not a
+    // bare SQL identifier gets a generated one — every other branch keeps the panel's.
+    const declared = typeof target.refId === 'string' && target.refId ? target.refId : '';
+    const refId =
+      declared && (identity.kind !== 'column' || SQL_IDENTIFIER.test(declared)) ? declared : nextRefId(queries);
     const { hide: _hide, ...model } = target;
     queries.push({
       refId,
@@ -478,14 +637,20 @@ export async function ruleDefaultsFromPanel(input: {
 
   // The synthesized row carries the overlay's fit options and every visible metric target,
   // so the key below is the one the overlay wrote. It is derived from this very query, which
-  // is what makes the two impossible to drift apart.
+  // is what makes the two impossible to drift apart. `seriesLabels` is not part of the
+  // fingerprint, so naming the series here does not move the key.
   const forecastRefId = nextRefId(queries);
   const forecastModel = queryFromOptions({
     refId: forecastRefId,
     options: input.options,
     sourceTargets: input.metricTargets,
     seriesName: chosen.name,
-    seriesLabels: chosen.labels,
+    seriesLabels:
+      identity.kind === 'labels'
+        ? chosen.labels
+        : identity.kind === 'name'
+          ? { __name__: identity.name }
+          : undefined,
     datasource: { uid: forecastUid, type: FORECAST_DATASOURCE_TYPE },
   });
   const key = await cacheKey({
@@ -509,18 +674,46 @@ export async function ruleDefaultsFromPanel(input: {
     model: forecastQueryModel,
   });
 
-  const metricReduce = nextRefId(queries);
-  queries.push(reduceExpression(metricReduce, metricRefId, window));
-  const baselineReduce = nextRefId(queries);
-  queries.push(reduceExpression(baselineReduce, forecastRefId, window));
-  const deviation = nextRefId(queries);
-  queries.push(
-    mathExpression(deviation, `abs(($${metricReduce} - $${baselineReduce}) / $${baselineReduce}) * 100`, window)
-  );
-  const conditionRefId = nextRefId(queries);
-  queries.push(
-    thresholdExpression(conditionRefId, deviation, input.options?.alertTolerance ?? DEFAULT_ALERT_TOLERANCE, window)
-  );
+  let conditionRefId: string;
+  if (identity.kind === 'column') {
+    // Nothing can name this row's series for the Math node, so the condition itself selects
+    // the one series and computes the deviation — the pipeline has to allow a SQL node.
+    if (!sqlExpressionsEnabled()) {
+      return { ok: false, reason: REASON_ALERT_SQL_OFF };
+    }
+    conditionRefId = nextRefId(queries);
+    queries.push({
+      refId: conditionRefId,
+      queryType: 'expression',
+      relativeTimeRange: window,
+      datasourceUid: EXPRESSION_DATASOURCE_UID,
+      model: {
+        refId: conditionRefId,
+        type: 'sql',
+        datasource: EXPRESSION_DATASOURCE,
+        expression: deviationSQL({
+          metricRefId,
+          baselineRefId: forecastRefId,
+          column: identity.column,
+          value: identity.value,
+          tolerance: input.options?.alertTolerance ?? DEFAULT_ALERT_TOLERANCE,
+        }),
+      },
+    });
+  } else {
+    const metricReduce = nextRefId(queries);
+    queries.push(reduceExpression(metricReduce, metricRefId, window));
+    const baselineReduce = nextRefId(queries);
+    queries.push(reduceExpression(baselineReduce, forecastRefId, window));
+    const deviation = nextRefId(queries);
+    queries.push(
+      mathExpression(deviation, `abs(($${metricReduce} - $${baselineReduce}) / $${baselineReduce}) * 100`, window)
+    );
+    conditionRefId = nextRefId(queries);
+    queries.push(
+      thresholdExpression(conditionRefId, deviation, input.options?.alertTolerance ?? DEFAULT_ALERT_TOLERANCE, window)
+    );
+  }
 
   return {
     ok: true,

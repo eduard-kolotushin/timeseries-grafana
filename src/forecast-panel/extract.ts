@@ -2,6 +2,12 @@ import { DataFrame, FieldConfig, FieldType, getFieldDisplayName, QueryResultMeta
 
 export type SeriesPoints = {
   name: string;
+  /**
+   * The source field's raw name — `getFieldDisplayName` can prefer a configured display name,
+   * and a rule that has to name this series inside an expression needs the field name Grafana
+   * itself uses for `__metric_name__`.
+   */
+  fieldName: string;
   times: number[];
   values: Array<number | null>;
   /** The source field's own labels, so a restored frame can be paired with this series. */
@@ -53,6 +59,7 @@ export function extractSeries(frame: DataFrame, allFrames?: DataFrame[]): Series
     const labels = valueField.labels && Object.keys(valueField.labels).length > 0 ? valueField.labels : undefined;
     out.push({
       name: getFieldDisplayName(valueField, frame, frames),
+      fieldName: String(valueField.name ?? ''),
       times,
       values,
       labels,

@@ -1,5 +1,6 @@
 import { webcrypto } from 'crypto';
-import { FieldType, toDataFrame } from '@grafana/data';
+import { DataFrameType, FieldType, toDataFrame } from '@grafana/data';
+import { config } from '@grafana/runtime';
 import { FORECAST_DATASOURCE_TYPE } from '../forecast-datasource/types';
 import { cacheKey } from './cacheKey';
 import { extractSeries } from './extract';
@@ -11,6 +12,7 @@ import {
   asSaveModel,
   dashboardTimeFromScene,
   dashboardUidFromPath,
+  deviationSQL,
   EXPRESSION_DATASOURCE_TYPE,
   EXPRESSION_DATASOURCE_UID,
   findPanel,
@@ -23,25 +25,31 @@ import {
   PanelTarget,
   panelSeries,
   pickLivePanel,
+  REASON_ALERT_SERIES_AMBIGUOUS,
   REASON_ALERT_SERIES_MISSING,
   REASON_ALERT_SERIES_REQUIRED,
-  REASON_ALERT_SERIES_UNLABELLED,
+  REASON_ALERT_SQL_OFF,
   REASON_DASHBOARD_NOT_SAVED,
   REASON_FORECAST_DATASOURCE,
   REASON_NO_ALERTING_QUERY,
   ruleDefaultsFromPanel,
+  SeriesTarget,
+  seriesTarget,
   windowFrom,
 } from './alertFromPanel';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
 jest.mock('@grafana/runtime', () => ({
+  // The toggle the SQL-condition branch needs; a test flips it off in place.
+  config: { featureToggles: { sqlExpressions: true } },
   getDataSourceSrv: () => ({
     getInstanceSettings: (uid: string) =>
-      ({ druid: { meta: { alerting: true } }, loki: { meta: { alerting: false } } } as Record<
-        string,
-        { meta: { alerting: boolean } } | undefined
-      >)[uid],
+      ({
+        druid: { type: 'grafadruid-druid-datasource', meta: { alerting: true } },
+        loki: { type: 'loki', meta: { alerting: false } },
+        testdata: { type: 'grafana-testdata-datasource', meta: { alerting: true } },
+      } as Record<string, { type?: string; meta: { alerting: boolean } } | undefined>)[uid],
     getList: () => [{ uid: 'fc', type: 'eduardkolotushin-forecast-datasource' }],
   }),
 }));
@@ -69,7 +77,9 @@ const options: ForecastOptions = {
 
 const visibleFromMs = 1_700_000_000_000;
 const visibleToMs = 1_700_000_600_000;
-const series: PanelSeries[] = [{ name: 'p95', refId: 'A', labels: { host: 'a' } }];
+const series: PanelSeries[] = [
+  { name: 'p95', refId: 'A', labels: { host: 'a' }, fieldName: 'p95', legacyMeta: true },
+];
 
 type BuildInput = {
   dashboardUid?: string;
@@ -166,7 +176,7 @@ describe('panelSeries', () => {
   it('names the panel’s metric series as the fit does, with labels and the frame’s refId', () => {
     const f = frame();
     expect(panelSeries([f], [druid])).toEqual([
-      { name: extractSeries(f, [f])[0].name, refId: 'A', labels: { host: 'a' } },
+      { name: extractSeries(f, [f])[0].name, refId: 'A', labels: { host: 'a' }, fieldName: 'Value', legacyMeta: true },
     ]);
   });
 
@@ -177,6 +187,124 @@ describe('panelSeries', () => {
   it('mentions each series once', () => {
     const f = frame();
     expect(panelSeries([f, f], [druid])).toHaveLength(1);
+  });
+
+  it('reads the dataplane test the way Grafana does: a zero typeVersion is still legacy', () => {
+    const withMeta = (typeVersion: [number, number]) => {
+      const f = frame();
+      f.meta = { type: DataFrameType.TimeSeriesMulti, typeVersion };
+      return f;
+    };
+    // `[0, 0]` is `FrameTypeVersion.IsZero()`, so the expression pipeline still synthesizes
+    // `__name__` for these frames — the shape the whole `name` branch depends on.
+    expect(panelSeries([withMeta([0, 0])], [druid])[0].legacyMeta).toBe(true);
+    expect(panelSeries([withMeta([1, 0])], [druid])[0].legacyMeta).toBe(false);
+  });
+});
+
+describe('seriesTarget', () => {
+  const bare = (name: string, over: Partial<PanelSeries> = {}): PanelSeries => ({
+    name,
+    refId: 'A',
+    fieldName: name,
+    legacyMeta: true,
+    ...over,
+  });
+
+  const cases: Array<[string, PanelSeries[], PanelSeries, string, SeriesTarget]> = [
+    [
+      'a labelled series pairs by its labels',
+      [bare('p95', { labels: { host: 'a' } })],
+      bare('p95', { labels: { host: 'a' } }),
+      'prometheus',
+      { kind: 'labels', labels: { host: 'a' } },
+    ],
+    [
+      'the only series of its row stays unlabelled',
+      [bare('up')],
+      bare('up'),
+      'prometheus',
+      { kind: 'labels', labels: {} },
+    ],
+    [
+      'a datasource Grafana names → the synthesized __name__',
+      [bare('A-series'), bare('A-series1')],
+      bare('A-series1'),
+      'grafana-testdata-datasource',
+      { kind: 'name', name: 'A-series1' },
+    ],
+    [
+      'the datasource display name wins over the field name',
+      [bare('A-series', { displayNameFromDS: 'alpha' }), bare('A-series1', { displayNameFromDS: 'beta' })],
+      bare('A-series1', { displayNameFromDS: 'beta' }),
+      'grafana-testdata-datasource',
+      { kind: 'name', name: 'beta' },
+    ],
+    [
+      'a dataplane frame is never named → the metric column',
+      [bare('A-series', { legacyMeta: false }), bare('A-series1', { legacyMeta: false })],
+      bare('A-series1', { legacyMeta: false }),
+      'grafana-testdata-datasource',
+      { kind: 'column', column: '__metric_name__', value: 'A-series1' },
+    ],
+    [
+      'a datasource Grafana does not name → the metric column',
+      [bare('A-series'), bare('A-series1')],
+      bare('A-series1'),
+      'prometheus',
+      { kind: 'column', column: '__metric_name__', value: 'A-series1' },
+    ],
+    [
+      'a datasource display name is preferred as the column',
+      [bare('A', { displayNameFromDS: 'alpha' }), bare('B', { displayNameFromDS: 'beta' })],
+      bare('B', { displayNameFromDS: 'beta' }),
+      'prometheus',
+      { kind: 'column', column: '__display_name__', value: 'beta' },
+    ],
+    [
+      'no distinct selector → refuse',
+      [bare('same', { fieldName: '' }), bare('same1', { fieldName: '' })],
+      bare('same1', { fieldName: '' }),
+      'prometheus',
+      { kind: 'refuse', reason: REASON_ALERT_SERIES_AMBIGUOUS },
+    ],
+  ];
+
+  it.each(cases)('%s', (_name, all, chosen, type, want) => {
+    expect(seriesTarget(all, chosen, type)).toEqual(want);
+  });
+});
+
+describe('deviationSQL', () => {
+  it('builds the one-row condition that selects the series and compares the deviation', () => {
+    expect(
+      deviationSQL({
+        metricRefId: 'A',
+        baselineRefId: 'B',
+        column: '__metric_name__',
+        value: 'a-series1',
+        tolerance: 20,
+      })
+    ).toBe(
+      "SELECT CASE WHEN abs((m - base) / base) * 100 > 20 THEN 1 ELSE 0 END AS alert FROM (SELECT (SELECT a.__value__ FROM A a WHERE a.__metric_name__ = 'a-series1' AND a.__value__ IS NOT NULL ORDER BY a.time DESC LIMIT 1) AS m, (SELECT b.__value__ FROM B b WHERE b.__value__ IS NOT NULL ORDER BY b.time DESC LIMIT 1) AS base) t"
+    );
+  });
+
+  it('escapes a quote in the series value', () => {
+    const sql = deviationSQL({
+      metricRefId: 'A',
+      baselineRefId: 'B',
+      column: '__metric_name__',
+      value: "o'brien",
+      tolerance: 20,
+    });
+    expect(sql).toContain("a.__metric_name__ = 'o''brien'");
+  });
+
+  it.each([Number.NaN, Infinity, -1])('keeps the default tolerance for %s', (tolerance) => {
+    expect(
+      deviationSQL({ metricRefId: 'A', baselineRefId: 'B', column: '__metric_name__', value: 'x', tolerance })
+    ).toContain('* 100 > 20 THEN');
   });
 });
 
@@ -331,8 +459,8 @@ describe('ruleDefaultsFromPanel', () => {
       panel: { id: 3, title: 'Two series', targets: [druid, c], maxDataPoints: 15000 },
       metricTargets: [druid, c],
       series: [
-        { name: 'p95', refId: 'A' },
-        { name: 'p99', refId: 'C' },
+        { name: 'p95', refId: 'A', fieldName: 'p95', legacyMeta: true },
+        { name: 'p99', refId: 'C', fieldName: 'p99', legacyMeta: true },
       ],
       options: { ...options, alertSeries: 'p99' },
     });
@@ -349,6 +477,75 @@ describe('ruleDefaultsFromPanel', () => {
     expect(got.defaults.queries[3].model.expression).toBe('A');
   });
 
+  const testdata = {
+    refId: 'A',
+    datasource: { uid: 'testdata', type: 'grafana-testdata-datasource' },
+    seriesCount: 2,
+  };
+  const labelFree = (name: string): PanelSeries => ({ name, refId: 'A', fieldName: name, legacyMeta: true });
+
+  it('names a label-free series with the __name__ Grafana synthesizes for it', async () => {
+    const got = await build({
+      panel: { id: 3, title: 'Two label-free series', targets: [testdata], maxDataPoints: 15000 },
+      metricTargets: [testdata],
+      series: [labelFree('A-series'), labelFree('A-series1')],
+      options: { ...options, alertSeries: 'A-series1' },
+      alertingUids: new Set(['testdata']),
+    });
+    expect(got.ok).toBe(true);
+    if (!got.ok) {
+      return;
+    }
+    // Still the readable chain, with the baseline labelled the way the evaluation names it.
+    expect(got.defaults.queries.map((q) => q.refId)).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
+    expect(got.defaults.condition).toBe('F');
+    expect(got.defaults.queries[1].model.seriesLabels).toEqual({ __name__: 'A-series1' });
+    // `seriesLabels` is not part of the fingerprint, so the key is still the overlay's.
+    expect(got.defaults.queries[1].model.cacheKey).toBe(
+      await cacheKey({ targets: [testdata], visibleFromMs, visibleToMs, options, seriesName: 'A-series1' })
+    );
+  });
+
+  it('selects a label-free series inside a SQL condition nothing else can name', async () => {
+    const got = await build({
+      panel: { id: 3, title: 'Two label-free series', targets: [druid], maxDataPoints: 15000 },
+      metricTargets: [druid],
+      series: [labelFree('A-series'), labelFree('A-series1')],
+      options: { ...options, alertSeries: 'A-series1' },
+    });
+    expect(got.ok).toBe(true);
+    if (!got.ok) {
+      return;
+    }
+    expect(got.defaults.queries.map((q) => q.refId)).toEqual(['A', 'B', 'C']);
+    expect(got.defaults.condition).toBe('C');
+    expect(
+      got.defaults.queries.some((q) => ['reduce', 'math', 'threshold'].includes(String(q.model.type)))
+    ).toBe(false);
+    const sql = got.defaults.queries[2];
+    expect(sql.queryType).toBe('expression');
+    expect(sql.datasourceUid).toBe(EXPRESSION_DATASOURCE_UID);
+    expect(sql.model.type).toBe('sql');
+    expect(sql.relativeTimeRange).toEqual({ from: 600, to: 0 });
+    expect(String(sql.model.expression)).toContain("a.__metric_name__ = 'A-series1'");
+    expect(String(sql.model.expression)).toContain('* 100 > 20 THEN');
+  });
+
+  it('refuses the SQL-condition shape while sqlExpressions is off', async () => {
+    config.featureToggles.sqlExpressions = false;
+    try {
+      const got = await build({
+        panel: { id: 3, title: 'Two label-free series', targets: [druid], maxDataPoints: 15000 },
+        metricTargets: [druid],
+        series: [labelFree('A-series'), labelFree('A-series1')],
+        options: { ...options, alertSeries: 'A-series1' },
+      });
+      expect(got).toEqual({ ok: false, reason: REASON_ALERT_SQL_OFF });
+    } finally {
+      config.featureToggles.sqlExpressions = true;
+    }
+  });
+
   it.each<[string, BuildInput, string]>([
     ['an unsaved dashboard', { dashboardUid: '' }, REASON_DASHBOARD_NOT_SAVED],
     ['no alerting-capable row', { alertingUids: new Set() }, REASON_NO_ALERTING_QUERY],
@@ -357,23 +554,23 @@ describe('ruleDefaultsFromPanel', () => {
       'two series and no choice',
       {
         series: [
-          { name: 'a', refId: 'A' },
-          { name: 'b', refId: 'A' },
+          { name: 'a', refId: 'A', fieldName: 'a', legacyMeta: true },
+          { name: 'b', refId: 'A', fieldName: 'b', legacyMeta: true },
         ],
       },
       REASON_ALERT_SERIES_REQUIRED,
     ],
     ['a stale series choice', { options: { ...options, alertSeries: 'gone' } }, REASON_ALERT_SERIES_MISSING],
     [
-      'two unlabelled series in one row',
+      'two label-free series nothing can name',
       {
         series: [
-          { name: 'A-series', refId: 'A' },
-          { name: 'A-series1', refId: 'A' },
+          { name: 'same', refId: 'A', fieldName: '', legacyMeta: true },
+          { name: 'same1', refId: 'A', fieldName: '', legacyMeta: true },
         ],
-        options: { ...options, alertSeries: 'A-series1' },
+        options: { ...options, alertSeries: 'same1' },
       },
-      REASON_ALERT_SERIES_UNLABELLED,
+      REASON_ALERT_SERIES_AMBIGUOUS,
     ],
     ['no Forecast datasource instance', { forecastDatasourceUid: undefined }, REASON_FORECAST_DATASOURCE],
   ])('%s → %s', async (_name, over, reason) => {

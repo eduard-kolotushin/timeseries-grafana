@@ -4,7 +4,7 @@ import { loadOverlayForecasts } from './overlayLoad';
 import { REASON_BUSY, REASON_OVERSIZE, REASON_TRAIN_EMPTY, REASON_TRAIN_MULTI_DATASOURCE, REASON_TRAIN_TOO_LONG } from './reasons';
 import { ForecastResponse } from './types';
 
-const visible = [{ name: 'up', times: [1, 2], values: [1, 2] }];
+const visible = [{ name: 'up', fieldName: 'up', times: [1, 2], values: [1, 2] }];
 
 function frame(): MutableDataFrame {
   const f = new MutableDataFrame();
@@ -160,8 +160,8 @@ describe('loadOverlayForecasts', () => {
     const post = jest.fn<Promise<ForecastResponse>, [Record<string, unknown>]>().mockRejectedValueOnce({ status: 429 });
     const got = await loadOverlayForecasts({
       visible: [
-        { name: 'a', times: [1], values: [1] },
-        { name: 'b', times: [1], values: [1] },
+        { name: 'a', fieldName: 'a', times: [1], values: [1] },
+        { name: 'b', fieldName: 'b', times: [1], values: [1] },
       ],
       fromMs: 3,
       toMs: 4,
@@ -198,8 +198,8 @@ describe('loadOverlayForecasts', () => {
     });
     const got = await loadOverlayForecasts({
       visible: [
-        { name: 'a', times: [1], values: [1] },
-        { name: 'b', times: [1], values: [1] },
+        { name: 'a', fieldName: 'a', times: [1], values: [1] },
+        { name: 'b', fieldName: 'b', times: [1], values: [1] },
       ],
       fromMs: 3,
       toMs: 4,
@@ -231,7 +231,7 @@ describe('loadOverlayForecasts', () => {
     await loadOverlayForecasts({
       // The visible display name differs from the training series name: the backend
       // re-extracts the training frame, so `seriesName` must be the matched one.
-      visible: [{ name: 'rate (visible)', times: [1, 2], values: [1, 2] }],
+      visible: [{ name: 'rate (visible)', fieldName: 'rate', times: [1, 2], values: [1, 2] }],
       fromMs: 3,
       toMs: 4,
       level: 0,
@@ -317,8 +317,8 @@ describe('loadOverlayForecasts', () => {
 
   it('names every visible series key on each fit', async () => {
     const two = [
-      { name: 'up', times: [1, 2], values: [1, 2] },
-      { name: 'down', times: [1, 2], values: [3, 4] },
+      { name: 'up', fieldName: 'up', times: [1, 2], values: [1, 2] },
+      { name: 'down', fieldName: 'down', times: [1, 2], values: [3, 4] },
     ];
     const both = new MutableDataFrame();
     both.addField({ name: 'Time', type: FieldType.time, values: [1, 2] });
@@ -351,7 +351,7 @@ describe('loadOverlayForecasts', () => {
 
   it('omits the key set when the panel shows more series than the backend accepts', async () => {
     const names = Array.from({ length: MAX_PANEL_KEYS + 1 }, (_, i) => `s${i}`);
-    const visible = names.map((name) => ({ name, times: [1, 2], values: [1, 2] }));
+    const visible = names.map((name) => ({ name, fieldName: name, times: [1, 2], values: [1, 2] }));
     const frame = new MutableDataFrame();
     frame.addField({ name: 'Time', type: FieldType.time, values: [1, 2] });
     for (const name of names) {
@@ -383,8 +383,8 @@ describe('loadOverlayForecasts', () => {
 
   it('reports why a series the stored source cannot replay was dropped', async () => {
     const two = [
-      { name: 'up', times: [1, 2], values: [1, 2] },
-      { name: 'other', times: [1, 2], values: [3, 4] },
+      { name: 'up', fieldName: 'up', times: [1, 2], values: [1, 2] },
+      { name: 'other', fieldName: 'other', times: [1, 2], values: [3, 4] },
     ];
     // Two training series, so the sole-candidate fallback cannot match `other`: it has no
     // frame, which is exactly the case the dropped group's reason explains.

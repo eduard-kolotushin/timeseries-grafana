@@ -197,9 +197,21 @@ A complete alert rule is one click away on a trained overlay panel, and it compa
   condition**; the panel's own expression rows are no longer reused or forwarded
 - A Forecast-datasource restore labels its frame from the query model's `seriesLabels`, so a metric query that
   returns several series pairs only the chosen one (Grafana's Math node matches by labels and drops the rest) and
-  the alert instance carries that series' labels. A metric row whose series carry **no** labels cannot be narrowed
-  at all — Grafana would broadcast the one baseline across every series and produce an instance per series — so a
-  panel with more than one unlabelled series in a row answers `REASON_ALERT_SERIES_UNLABELLED` instead of that rule
+  the alert instance carries that series' labels — the measured behaviour of every labelled datasource
+  (Prometheus, Druid SQL wide with a `GROUP BY` dimension, Postgres `time_series` dimension columns, OpenSearch
+  group-by keys). When the chosen row's series carry **no** labels, the rule instead names the series the way the
+  evaluation does: for the datasources where Grafana synthesizes a name
+  (graphite / testdata / dynatrace / influxdb, legacy conversion path) the baseline is labelled
+  `{__name__: <DisplayNameFromDS | DisplayName | field name, the first that is non-empty and unique in that query>}`,
+  and otherwise the rule is built with a **`sql` expression as the alert condition** that selects the series by
+  `__metric_name__` / `__display_name__`, computes `abs((metric - baseline) / baseline) * 100` against
+  `Alert tolerance` and returns 1 / 0 (Grafana maps `0` to Normal, non-zero to Alerting, NULL to NoData). That
+  path needs Grafana's `sqlExpressions` feature (GA and default-on in 13.1, admin-enabled before it); with the
+  feature off, and for a row whose series no column or label can name, the button answers a reason instead of
+  writing a rule
+- A rule is only ever built for one series: the two label-free shapes above keep that promise without sending a
+  label the datasource never set (which would make Grafana broadcast the single baseline across every series and
+  alert on series the operator did not choose)
 - Do not ship alert rules or contact points
 
 ## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 non-goals
@@ -233,7 +245,7 @@ Do not add these without first updating this document:
 - Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource and datasource `QueryData`, plus oversize / busy (413/429) load limits
 - Table-driven tests cover the schedule resource (method/status matrix, Admin gate, upsert→list round-trip, invalid cron, the baseline-row rules — an existing worker key can be retimed, an invented one is `404`, either scope can be deleted — per-org key isolation where two orgs share one cache key and keep separate rows, the derived `source` summary and its cap, and that a listing never echoes the stored query objects) and `needTrain`-when-due
-- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, overlay New alert rule synthesis (the shared metric/baseline window, the two Reduce nodes, the Math deviation, the Threshold condition, the chosen series' `seriesName` / `seriesLabels` / `sourceTargets`, and a `cacheKey` equal to the overlay's), overlay load limits, `trainSource` capture, the schedule API, and the schedule UI
+- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, overlay New alert rule synthesis (the shared metric/baseline window, the two Reduce nodes, the Math deviation, the Threshold condition, the chosen series' `seriesName` / `seriesLabels` / `sourceTargets`, and a `cacheKey` equal to the overlay's — plus `seriesTarget`'s identity decision (labels → the synthesized `__name__` → the SQL column → a reason) and `deviationSQL`'s golden statement), overlay load limits, `trainSource` capture, the schedule API, and the schedule UI
 - `trainSource` must not enter the `cacheKey` fingerprint: adding or editing a scheduled retrain must not invalidate a stored snapshot
 - The retrain scheduler must never fail a query: an unreachable `/api/ds/query`, a disabled scheduler, or a claim error leaves `needTrain` as the retrain path
 - A schedule row belongs to one org: `forecast.retrain` keeps `(scope, org_id, key)` unique, `0002_retrain.sql` rewrites an older table to it in place, and a table left on the old key fails the schedule store instead of sharing rows between orgs

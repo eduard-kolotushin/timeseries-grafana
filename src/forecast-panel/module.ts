@@ -135,7 +135,8 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       id: 'alertSeries',
       path: 'alertSeries',
       name: 'Alert series',
-      description: 'Which metric series the alert rule is for; Grafana pairs the baseline with it by label. Shown only when the panel has more than one.',
+      description:
+        'Which metric series the alert rule is for; Grafana pairs the baseline with it by label, or the rule selects it by name where the series carry no labels. Shown only when the panel has more than one.',
       category: ['Alerting'],
       editor: AlertSeriesEditor,
     })
