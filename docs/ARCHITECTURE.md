@@ -16,8 +16,19 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`); the rows are the loa
 | `src/forecast-panel/mixed.ts` | Metric vs Forecast datasource targets/frames on Mixed overlay |
 | `src/forecast-panel/alertFromPanel.ts` | Overlay options New alert rule: builds the rule from panel state — metric rows copied, one Forecast row synthesized (fit options, `sourceTargets`, series name + labels, the overlay's `cacheKey`), two Reduce(`last`), a Math deviation, a Threshold on it as the condition — or, for a row with no labels and no synthesized name, a `sql` expression as the condition that selects the series by column |
 | `src/forecast-datasource/` | Nested queryable datasource for alerting (`kind` forecast / lower / upper) |
-| `src/components/AppConfig/` | Configuration tab: default retrain schedule (the store has no fields anywhere) |
-| `src/pages/` | App config page bodies; the `schedules` tab renders the `forecast.retrain` table |
+| `src/components/App/App.tsx` | App shell: routes the three tabs (Overview, Configuration, `?page=schedules`) |
+| `src/constants.ts` | Plugin id and resource paths derived from `plugin.json` |
+| `src/pages/` | Page bodies: the Overview landing, and the Configuration tab that mounts the default-schedule form beside the Retrain schedules table |
+| `src/components/AppConfig/RetrainSchedules.tsx` | Retrain schedules tab: `GET|PUT|DELETE /schedules`, the default-cron form, the derived source (panel/dashboard/series), the copyable `baseline` hash |
+| `src/forecast-panel/ForecastPanel.tsx` | Overlay entry: panel options, one load per refresh, history + forecast frames on the shared time axis |
+| `src/forecast-panel/overlayLoad.ts` | One overlay load: extraction, the sequential per-series `POST /forecast` calls, panel reasons when a window is empty |
+| `src/forecast-panel/overlayInflight.ts` | The panel's max-in-flight load gate (`maxInflightLoads`, default 1) |
+| `src/forecast-panel/lookback.ts` | Train-window helpers: relative lookback resolution, the `MAX_TRAIN_POINTS` / `MAX_PANEL_KEYS` mirror of the backend caps, civil-date calendar |
+| `src/forecast-panel/{TrainRangeEditor,TrainRangeCalendar,RetrainEditor,AlertEditor,AlertSeriesEditor}.tsx` | Panel option editors: train window + calendar, Retrain, the New alert rule button and its `Alert series` picker |
+| `src/forecast-panel/module.ts` | Panel registration: the option editors and `COVERAGE_SETTINGS` defaults |
+| `src/forecast-panel/retrain.ts` | Panel-side retrain queue: per-dashboard/panel-key dedupe plus a Retrain-all generation the overlay's next load consumes |
+| `src/forecast-panel/types.ts` | `ForecastOptions` and the model/season/calendar/severity unions the panel and the datasource share |
+| `src/forecast-datasource/queryModel.ts` | Forecast query ↔ `CacheKeyInput` bridge: the datasource computes the same `cacheKey` the overlay stored |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules; fit path records `trainSource` and upserts the `panel` schedule row |
 | `pkg/plugin/limits.go` | Train-length / body caps, the pre-decode per-element budget, the one-window `maxForecastPoints` cap and the Fit / ForecastRange inflight semaphore |
@@ -26,8 +37,9 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`); the rows are the loa
 | `pkg/plugin/app.go` | App backend instance: store-aware `CheckHealth`, dispose of the scheduler and the pool; `newAppWith` takes the compute mode (nil = inline) |
 | `pkg/plugin/compute.go` | v16 compute mode: `computeFrom` (URL presence selects it), the `computeAuth` token+org boundary, `forwardForecast`, `ServeCompute`/`serveHTTP` |
 | `pkg/plugin/retention.go` | v14 retention sweep, run on the retrain ticker |
-| `pkg/store/` | Embedded versioned migration engine (`go:embed migrations/*.sql`) |
-| `pkg/store/migrations/` | `0001_snapshots.sql`, `0002_retrain.sql` — the schema authority |
+| `pkg/store/dsn.go` | DSN assembly plus the `Lookup` precedence every setting uses: `FORECAST_*` env → `GF_PLUGIN_*` env → grafana.ini via GrafanaCfg → jsonData; the same interface serves the plugin and the env-only `cmd/migrate` |
+| `pkg/store/migrate.go` | Versioned migration engine: `go:embed migrations/*.sql`, one transaction per file under `pg_advisory_xact_lock`, ledger `forecast.schema_migrations` |
+| `pkg/store/migrations/` | `0001_snapshots.sql`, `0002_retrain.sql`, `0003_retrain_attempts.sql` — the schema authority |
 | `cmd/migrate/` | `gpx_forecast_migrate`: CI/CD entry point that applies the migrations |
 | `cmd/compute/` | `gpx_forecast_compute`: the standalone compute service (same `/forecast` handler + ticker, token/org auth, process env only) |
 | `pkg/plugin/schedule.go` | `ScheduleStore` over `forecast.retrain` (list / read one row / upsert / delete / due / claim / finish / identify) |
