@@ -467,6 +467,15 @@ single-row, single-field number `alert` = **0** at tolerance 20 and **1** at tol
 and tracks the data, not a constant. (The throwaway dashboards for both checks were deleted afterwards; the
 `Alert unlabelled series demo` board is the pre-existing one from the previous pass.)
 
+**What the rule can see, by datasource shape.** The mechanism is Grafana's own converter (`pkg/expr/converter.go`); "measured" means this pass read the frames through `/api/ds/query`.
+
+| Datasource shape | What the rule gets | Measured |
+| --- | --- | --- |
+| Prometheus (and any datasource that labels its value fields) | the value field's label set, so the baseline pairs by label | this pass: A's frames carry `{__name__, instance, job, kind}`, and the labelled regression pairs on `kind="beta"` |
+| TestData, legacy frames (`typeVersion [0, 0]` → `FrameTypeVersion.IsZero()`) | no labels; the pipeline synthesizes `__name__` = `DisplayNameFromDS → DisplayName → field name` | this pass: `__name__="A-series"` / `"A-series1"`, and the `name` branch above pairs on it |
+| Postgres legacy 3-column `format: time_series` (`typeVersion [0, 1]`) | no labels and no `__name__`; the value fields are named after the metric column, so `__metric_name__` carries it | this pass: value fields `up` / `down`, and the `sql` branch above selects with `__metric_name__ = 'up'` |
+| Druid SQL wide with a `GROUP BY` dimension, Postgres `time_series` dimension columns, OpenSearch group-by keys | the value field's label set (the dimension becomes a label) — the same mechanism as the Prometheus row | not re-measured in this pass |
+
 **Superseded — Compose, the same TestData row under the old build.** The label-free row used to answer
 `This panel's series carry no labels, so the alert rule cannot tell them apart: …` instead of writing a rule: with
 the baseline unlabelled, Grafana broadcast it and E emitted **2 series** / F **2 instances** for a one-series
