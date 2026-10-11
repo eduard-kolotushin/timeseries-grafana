@@ -396,7 +396,7 @@ clicked in this pass). The `Delete` beside it still leaves the model (F5).
 | **Who can use** | **Panel** (needs the dashboard saved and, in Grafana, permission to create rules). |
 | **How configured** | Panel options → *Alerting*: **Alert lookback** (default 10m), **Alert tolerance** (% deviation, default 20) and **Alert series** (a dropdown rendered only when the panel has more than one series); then *New alert rule*. No Mixed datasource and no hand-filled Forecast row is involved. |
 | **Input params** | The metric series, and only on a multi-series panel. The defaults carry the panel title, the metric rows, the synthesized Forecast row (fit options, `sourceTargets`, series name and labels, the overlay's `cacheKey`), two Reduce(`last`) nodes, the Math deviation, the Threshold condition, and the dashboard/panel annotations. |
-| **Expected result** | The browser lands on `/alerting/new?defaults=…` with a four-node expression chain that conditions on the Threshold over the Math. An unsaved dashboard answers `Dashboard must be saved before alerts can be added.`; a panel with no alerting-capable query answers `Cannot create alerts from this panel because no query to an alerting capable datasource is found.`; a multi-series panel with no choice answers `Choose the metric series this alert rule is for.`; a deployment without a Forecast datasource instance answers `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` None of them navigates. |
+| **Expected result** | The browser lands on `/alerting/new?defaults=…` with a four-node expression chain that conditions on the Threshold over the Math. An unsaved dashboard answers `Dashboard must be saved before alerts can be added.`; a panel with no alerting-capable query answers `Cannot create alerts from this panel because no query to an alerting capable datasource is found.`; a multi-series panel with no choice answers `Choose the metric series this alert rule is for.`; a metric row of several unlabelled series answers `This panel’s series carry no labels, so the alert rule cannot tell them apart: …`; a deployment without a Forecast datasource instance answers `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` None of them navigates. |
 
 **Positive — Compose, single-series Druid panel** (`Forecast minute-of-week demo` → panel 3, *Seasonal baseline (minute of week, with variance)*):
 clicking *New alert rule* landed on `/alerting/new?defaults=…` carrying the panel title, the
@@ -427,7 +427,27 @@ job: overlay, kind: alpha}` and `B.trainRange {now-30m → now}`, and the previe
 series left, F = **one** instance (**Normal**). Rebuilding with `{kind="beta"}` flipped it: D labelled
 `kind="beta"`, the union warning dropped the **alpha** series, E = **6.53617** % and F evaluated on beta alone.
 That is the label pairing the rule relies on — the restored baseline frame carries the chosen series' labels, so
-Grafana's Math node pairs them and drops the rest instead of leaving one bogus instance per metric series.
+Grafana's Math node pairs them and drops the rest instead of leaving one bogus instance per metric series. It is a
+**label-set match, not position**: the survivor is always the series whose labels equal the baseline's — the one
+that was chosen — and both directions were measured on this one panel.
+
+**Positive — Compose, the picker does not guess.** *Alert series* renders a `Select a series` placeholder (a real
+option, because a `Select` displays its first option even while the panel option is empty — an unchosen series used
+to be shown as if it had been picked) and the panel model stays empty until a pick. Choosing `A-series1` through
+the dropdown on the two-unlabelled-series panel set `options.alertSeries` to `A-series1` and the control displayed
+the same value; with no pick the button answers `Choose the metric series this alert rule is for.` and does not
+navigate.
+
+**Negative — Compose, a metric row whose series carry no labels.** On a TestData panel (`random_walk`,
+`seriesCount: 2`) both series have empty field labels, so `B.seriesLabels` is absent. Measured through
+`/api/v1/eval`: the metric side's frames carry `__name__="A-series"` / `"A-series1"` (Grafana's own synthesis for
+those frames) while the restored baseline frame carries none, so Grafana broadcast it — E emitted **2 series** and
+F **2 instances**, i.e. the unchosen series was compared against the chosen series' baseline. Labelling the
+baseline by hand (`seriesLabels {__name__: "A-series1"}`) collapsed that to one series and one instance with
+`1 items dropped from union(s)`, which pins the pairing as the selector — but that label is not the panel's field
+labels, so the plugin does not guess it: the row now answers `This panel's series carry no labels, so the alert
+rule cannot tell them apart: …` instead of writing a rule that would alert on every series. A labelled metric
+(Prometheus, OpenSearch, Postgres series labels) is unaffected, and a single-series panel is unaffected.
 
 **Negative — Compose, a window narrower than the snapshot's grid:** the beta rule at *Alert lookback* `2m`
 answered B with `forecast: no forecast points in the requested range` and D/E/F with

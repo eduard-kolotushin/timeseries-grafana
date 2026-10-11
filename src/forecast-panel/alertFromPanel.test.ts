@@ -25,6 +25,7 @@ import {
   pickLivePanel,
   REASON_ALERT_SERIES_MISSING,
   REASON_ALERT_SERIES_REQUIRED,
+  REASON_ALERT_SERIES_UNLABELLED,
   REASON_DASHBOARD_NOT_SAVED,
   REASON_FORECAST_DATASOURCE,
   REASON_NO_ALERTING_QUERY,
@@ -363,6 +364,17 @@ describe('ruleDefaultsFromPanel', () => {
       REASON_ALERT_SERIES_REQUIRED,
     ],
     ['a stale series choice', { options: { ...options, alertSeries: 'gone' } }, REASON_ALERT_SERIES_MISSING],
+    [
+      'two unlabelled series in one row',
+      {
+        series: [
+          { name: 'A-series', refId: 'A' },
+          { name: 'A-series1', refId: 'A' },
+        ],
+        options: { ...options, alertSeries: 'A-series1' },
+      },
+      REASON_ALERT_SERIES_UNLABELLED,
+    ],
     ['no Forecast datasource instance', { forecastDatasourceUid: undefined }, REASON_FORECAST_DATASOURCE],
   ])('%s → %s', async (_name, over, reason) => {
     expect(await build(over)).toEqual({ ok: false, reason });

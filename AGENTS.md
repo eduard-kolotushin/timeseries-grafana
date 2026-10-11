@@ -98,7 +98,7 @@ Fitting capacity scales on its own, selected by one deployment variable. `FORECA
 
 ## v17 in scope
 
-Overlay options **Alerting** builds the whole rule from panel state: metric queries copied, one Forecast query synthesized (fit options, `sourceTargets`, chosen series name and labels, the overlay's `cacheKey`), both over `now - <Alert lookback> … now`, with two Reduce(`last`) nodes, a Math percent-deviation node and a Threshold on it as the alert condition; **Alert series** is offered only when the panel has more than one series. No Mixed datasource or Forecast row is required. The nested datasource's `QueryData` labels its frame from the query model's `seriesLabels`. Do not ship alert rules.
+Overlay options **Alerting** builds the whole rule from panel state: metric queries copied, one Forecast query synthesized (fit options, `sourceTargets`, chosen series name and labels, the overlay's `cacheKey`), both over `now - <Alert lookback> … now`, with two Reduce(`last`) nodes, a Math percent-deviation node and a Threshold on it as the alert condition; **Alert series** is offered only when the panel has more than one series (a `Select a series` placeholder until one is picked), and a metric row whose series carry no labels answers a reason instead of a rule that would alert on every series. No Mixed datasource or Forecast row is required. The nested datasource's `QueryData` labels its frame from the query model's `seriesLabels`. Do not ship alert rules.
 
 ## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 out of scope
 

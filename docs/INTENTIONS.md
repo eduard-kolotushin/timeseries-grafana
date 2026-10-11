@@ -188,14 +188,18 @@ A complete alert rule is one click away on a trained overlay panel, and it compa
 - **Alert series** (a select shown only when the panel offers more than one series), **Alert lookback** (default
   `10m`) and **Alert tolerance** (percent, default 20) are panel options; the series is the only input the operator
   supplies, and an unloaded panel, a panel with no metric query to an alerting-capable datasource, or a deployment
-  with no Forecast datasource instance answers a reason instead of producing a broken rule
+  with no Forecast datasource instance answers a reason instead of producing a broken rule. The select shows a
+  `Select a series` placeholder until one is chosen — never an unchosen series as if it had been picked
 - Both rule queries carry `relativeTimeRange { from: <lookback>, to: 0 }` — never a dashboard-derived range — so
   the metric and the baseline reduce their last value at the same instant
 - The expression chain is Reduce(`last`) over the metric, Reduce(`last`) over the baseline, Math
   `abs((metric - baseline) / baseline) * 100`, and a Threshold `gt <tolerance>` on that Math as the **alert
   condition**; the panel's own expression rows are no longer reused or forwarded
 - A Forecast-datasource restore labels its frame from the query model's `seriesLabels`, so a metric query that
-  returns several series pairs only the chosen one (Grafana's Math node matches by labels and drops the rest)
+  returns several series pairs only the chosen one (Grafana's Math node matches by labels and drops the rest) and
+  the alert instance carries that series' labels. A metric row whose series carry **no** labels cannot be narrowed
+  at all — Grafana would broadcast the one baseline across every series and produce an instance per series — so a
+  panel with more than one unlabelled series in a row answers `REASON_ALERT_SERIES_UNLABELLED` instead of that rule
 - Do not ship alert rules or contact points
 
 ## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 non-goals

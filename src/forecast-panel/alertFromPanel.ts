@@ -16,6 +16,8 @@ export const REASON_NO_ALERTING_QUERY =
 export const REASON_ALERT_SERIES_REQUIRED = 'Choose the metric series this alert rule is for.';
 export const REASON_ALERT_SERIES_MISSING =
   'No matching metric series in this panel. Load it once, then pick the series this alert rule is for.';
+export const REASON_ALERT_SERIES_UNLABELLED =
+  'This panel’s series carry no labels, so the alert rule cannot tell them apart: Grafana pairs the baseline with a metric series by label. Alert from a single-series panel, or from a metric whose series are labelled.';
 export const REASON_FORECAST_DATASOURCE =
   'Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.';
 
@@ -441,6 +443,14 @@ export async function ruleDefaultsFromPanel(input: {
     return { ok: false, reason: picked.reason };
   }
   const chosen = picked.series;
+  // Grafana's Math node pairs the baseline with a metric series by label, so a row that
+  // returns several series none of which is labelled cannot be narrowed to the chosen one:
+  // the baseline would broadcast and every series would get an instance. Refuse that shape
+  // instead of writing a rule that alerts on series the operator did not pick.
+  const chosenRow = chosen.refId ? input.series.filter((s) => s.refId === chosen.refId) : input.series;
+  if (chosenRow.length > 1 && !chosen.labels) {
+    return { ok: false, reason: REASON_ALERT_SERIES_UNLABELLED };
+  }
 
   const forecastUid = input.forecastDatasourceUid?.trim();
   if (!forecastUid) {
