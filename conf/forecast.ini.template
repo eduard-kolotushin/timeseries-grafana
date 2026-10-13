@@ -6,7 +6,9 @@
 ;
 ; Precedence in gpx_forecast: FORECAST_STORE_* env (only if Grafana forwards host
 ; env; Grafana 12.4+ does not by default), then GF_PLUGIN_* for this process's
-; plugin id, then this plugin section via GrafanaCfg, then jsonData
+; plugin id, then the id-less GF_PLUGIN_<KEY> Grafana 13 exports for this same
+; section ([plugin.<id>] store_host arrives as GF_PLUGIN_STORE_HOST), then this
+; plugin section via GrafanaCfg, then jsonData
 ; (provisioned app or Forecast datasource jsonData; the plugin's pages
 ; render no store fields).
 

@@ -14,7 +14,7 @@ func TestEnvLookup(t *testing.T) {
 		want string
 	}{
 		{
-			name: "FORECAST_* wins over both GF_PLUGIN prefixes",
+			name: "FORECAST_* wins over every GF_PLUGIN spelling",
 			env: map[string]string{
 				"FORECAST_STORE_HOST":                    "from-forecast",
 				PluginEnvPrefixApp + "STORE_HOST":        "from-app",
@@ -34,6 +34,21 @@ func TestEnvLookup(t *testing.T) {
 			name: "datasource prefix is the fallback",
 			env:  map[string]string{PluginEnvPrefixDatasource + "STORE_HOST": "from-ds"},
 			want: "from-ds",
+		},
+		{
+			// Grafana 13 exports the section without the plugin id; an operator
+			// writing one by hand can use either spelling.
+			name: "the id-less section spelling Grafana exports",
+			env:  map[string]string{PluginEnvPrefixSection + "STORE_HOST": "from-section"},
+			want: "from-section",
+		},
+		{
+			name: "an id-qualified spelling wins over the id-less one",
+			env: map[string]string{
+				PluginEnvPrefixSection + "STORE_HOST": "from-section",
+				PluginEnvPrefixApp + "STORE_HOST":     "from-app",
+			},
+			want: "from-app",
 		},
 		{
 			name: "a blank value is not a value",

@@ -34,6 +34,8 @@ func clearStoreEnv(t *testing.T) {
 		store.PluginEnvPrefixDatasource + "STORE_USER",
 		store.PluginEnvPrefixDatasource + "STORE_SSL_MODE",
 		store.PluginEnvPrefixDatasource + "STORE_PASSWORD",
+		// Grafana 13 exports the section without the plugin id.
+		store.PluginEnvPrefixSection + "STORE_HOST",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -83,6 +85,22 @@ func TestStoreDSN(t *testing.T) {
 			env:      map[string]string{store.PluginEnvPrefixDatasource + "STORE_HOST": "from-ds-gf"},
 			settings: backend.AppInstanceSettings{JSONData: jsonHost},
 			wantHost: "from-ds-gf:5432",
+		},
+		{
+			// The spelling a Grafana 13 plugin process actually carries.
+			name:     "the id-less GF_PLUGIN spelling Grafana exports",
+			env:      map[string]string{store.PluginEnvPrefixSection + "STORE_HOST": "from-section"},
+			settings: backend.AppInstanceSettings{JSONData: jsonHost},
+			wantHost: "from-section:5432",
+		},
+		{
+			name: "an id-qualified GF_PLUGIN spelling wins over the id-less one",
+			env: map[string]string{
+				store.PluginEnvPrefixSection + "STORE_HOST": "from-section",
+				store.PluginEnvPrefixApp + "STORE_HOST":     "from-app",
+			},
+			settings: backend.AppInstanceSettings{JSONData: jsonHost},
+			wantHost: "from-app:5432",
 		},
 		{
 			name:     "GrafanaCfg store_host",

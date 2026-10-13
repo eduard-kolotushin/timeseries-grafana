@@ -371,13 +371,14 @@ type storeLookup struct {
 }
 
 // Get resolves one setting in the precedence order store.Lookup documents:
-// FORECAST_* env, then GF_PLUGIN_* env, then grafana.ini via GrafanaCfg, then
-// jsonData.
+// FORECAST_* env, then the GF_PLUGIN_* variables of this plugin's own ini section
+// (id-qualified first, then the id-less form Grafana exports), then grafana.ini via
+// GrafanaCfg, then jsonData.
 func (s storeLookup) Get(forecastEnv, gfSuffix, iniKey, jsonKey string) string {
 	if v := strings.TrimSpace(s.getenv(forecastEnv)); v != "" {
 		return v
 	}
-	for _, prefix := range []string{store.PluginEnvPrefixApp, store.PluginEnvPrefixDatasource} {
+	for _, prefix := range []string{store.PluginEnvPrefixApp, store.PluginEnvPrefixDatasource, store.PluginEnvPrefixSection} {
 		if v := strings.TrimSpace(s.getenv(prefix + gfSuffix)); v != "" {
 			return v
 		}
@@ -387,6 +388,7 @@ func (s storeLookup) Get(forecastEnv, gfSuffix, iniKey, jsonKey string) string {
 			iniKey,
 			store.PluginEnvPrefixApp + gfSuffix,
 			store.PluginEnvPrefixDatasource + gfSuffix,
+			store.PluginEnvPrefixSection + gfSuffix,
 			"plugin.eduardkolotushin-forecast-app." + iniKey,
 			"plugin.eduardkolotushin-forecast-datasource." + iniKey,
 		}

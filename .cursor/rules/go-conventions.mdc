@@ -22,7 +22,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Panel forecasts each numeric series independently
 - Panel `showInterval` gates `level`; training uses a from/to query, not the visible range; forecast uses a from/to window (`ForecastRange`)
 - Train rewrite is type-keyed in the overlay frontend (Prom / OpenSearch / Postgres / Druid); `pkg/` has no Prom/OS/PG **datasource** clients (pgx snapshot store is allowed)
-- Snapshot DSN: `FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*` / GrafanaCfg, then jsonData; CI merges `conf/forecast.ini.template` (app and datasource plugin sections)
+- Snapshot DSN: `FORECAST_STORE_*` (Grafana 12.4+ does not forward host env by default), then the `GF_PLUGIN_*` variables of this process's own `[plugin.<id>]` section — the id-qualified `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*` first, then the id-less `GF_PLUGIN_<KEY>` Grafana 13 exports (`[plugin.<id>] store_host` → `GF_PLUGIN_STORE_HOST`) — then GrafanaCfg, then jsonData; CI merges `conf/forecast.ini.template` (app and datasource plugin sections)
 - Datasource `QueryData` Restores by `cacheKey` and emits forecast / lower / upper; miss is an error (overlay trains). Do not query other datasources from `pkg/`
 - Overlay Mixed: cacheKey and train use metric targets only; Forecast datasource frames are not fitted or plotted
 - Forecast query editor does not auto-fill; Copy source from query A is opt-in for `sourceTargets` only

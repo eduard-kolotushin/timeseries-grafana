@@ -8,16 +8,25 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// PluginEnvPrefixApp and PluginEnvPrefixDatasource are the Grafana 12.4+ process
-// env spellings of a plugin's own ini section: Grafana exports
-// [plugin.<id>] <key> as GF_PLUGIN_<ID>_<KEY>.
+// PluginEnvPrefixApp, PluginEnvPrefixDatasource and PluginEnvPrefixSection are the
+// process env spellings of a plugin's own [plugin.<id>] ini section. The first two
+// name one of the two sections explicitly, which is what an operator writes for a
+// process they start themselves (the migration CLI, a debug shell):
+// GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_STORE_HOST.
+//
+// Grafana uses the third. A plugin process serves exactly one plugin, so Grafana
+// exports the section without the plugin id — [plugin.eduardkolotushin-forecast-app]
+// store_host arrives as GF_PLUGIN_STORE_HOST. Read from the process environment of a
+// running app and datasource under Grafana 13.1.0, which sets only that spelling.
 const (
 	PluginEnvPrefixApp        = "GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_"
 	PluginEnvPrefixDatasource = "GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_"
+	PluginEnvPrefixSection    = "GF_PLUGIN_"
 )
 
 // Lookup resolves one store setting in the plugin's precedence order:
-// FORECAST_* env, then GF_PLUGIN_* env for either plugin id, then grafana.ini via
+// FORECAST_* env, then the GF_PLUGIN_* variables of this plugin's own ini section
+// (id-qualified first, then the id-less form Grafana exports), then grafana.ini via
 // GrafanaCfg, then jsonData. It is an interface so the same DSN rules serve the
 // plugin (which has an ini file and jsonData) and the migration CLI (env only).
 type Lookup interface {
@@ -90,9 +99,9 @@ func (e EnvLookup) Get(forecastEnv, gfSuffix, iniKey, jsonKey string) string {
 	if v := strings.TrimSpace(e.Getenv(forecastEnv)); v != "" {
 		return v
 	}
-	// iniKey and jsonKey have no env spelling, so the two GF_PLUGIN_* process
-	// variables Grafana exports for this plugin's own sections are the last word.
-	for _, prefix := range []string{PluginEnvPrefixApp, PluginEnvPrefixDatasource} {
+	// iniKey and jsonKey have no env spelling, so the GF_PLUGIN_* process variables
+	// Grafana exports for this plugin's own section are the last word.
+	for _, prefix := range []string{PluginEnvPrefixApp, PluginEnvPrefixDatasource, PluginEnvPrefixSection} {
 		if v := strings.TrimSpace(e.Getenv(prefix + gfSuffix)); v != "" {
 			return v
 		}
