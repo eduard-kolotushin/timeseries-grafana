@@ -237,7 +237,8 @@ Three consecutive ticks refused with 401/403 disable the ticker and log a hint n
 retry forever; the panel's own Retrain button keeps working meanwhile.
 
 Per-model crons and the admin API live on the app's **Retrain schedules** page
-(`/a/eduardkolotushin-forecast-app?page=schedules`) and at
+(`/plugins/eduardkolotushin-forecast-app?page=schedules`, or Administration → Plugins and data → Plugins →
+Timeseries Forecast → **Retrain schedules**) and at
 `GET|PUT|DELETE /api/plugins/eduardkolotushin-forecast-app/resources/schedules` (Admin).
 
 ## 10. Optional: the standalone compute service
@@ -289,8 +290,13 @@ Then in the UI:
    when a snapshot was restored, or offers **Retrain** when the store has none.
 3. **New alert rule** from the panel options builds a rule against the metric query plus a synthesized
    Forecast query — that is the path that needs section 7.
-4. `/a/eduardkolotushin-forecast-app` (Forecast page) and `?page=schedules` (Retrain schedules) appear in
-   the nav once the app is enabled.
+4. The app's pages: `/a/eduardkolotushin-forecast-app` is its Overview page (what the plugin does and the
+   two wiring rules), and the config pages carry a tab bar — **Overview · Configuration · Retrain
+   schedules**. `Retrain schedules` (`/plugins/eduardkolotushin-forecast-app?page=schedules`) lists the
+   `forecast.retrain` rows with Source / Scope / Key / Cron / Timezone / Next run / Last run / Status /
+   Enabled, plus search and the admin controls for the cron and the default. Grafana marks the unsigned
+   plugin with an **Invalid plugin signature** banner in that header — expected, informational, and it
+   does not block loading.
 
 ## 12. Troubleshooting
 
@@ -299,6 +305,7 @@ Then in the UI:
 | `404 {"message":"Plugin is not enabled"}` on `/resources/…` | the app instance is not enabled for the org | section 6 (provisioning `disabled: false`, or Enable in the UI/API) |
 | plugin absent from the plugin list | wrong directory, flattened tree, missing `plugin.json`, or no restart | section 3, then restart Grafana |
 | log says the unsigned plugin is not allowed to load | allowlist missing one of the three ids | section 4 — app **and** panel **and** datasource |
+| the plugin page shows an **Invalid plugin signature** banner | the plugin is unsigned (by design; signing is out of scope) | expected and informational once section 4 is in place — it only disappears with a signed build |
 | backend fails to start (no `/resources` at all) | binary not executable, wrong owner, or wrong architecture | `chmod 0755`, `chown` to Grafana's UID (472), rebuild for the host's `GOOS`/`GOARCH` |
 | panel always trains / a "no store" reason on every load | the DSN is not visible to the **plugin process** — the host's `FORECAST_STORE_*` env is not forwarded on Grafana 12.4+ | section 6c: use `GF_PLUGIN_*`, the ini section, or jsonData |
 | alert rule's forecast query fails while the panel works | the **Forecast datasource** instance has no store keys (it does not inherit the app's jsonData) | section 7 |
