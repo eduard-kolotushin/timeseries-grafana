@@ -112,6 +112,7 @@ Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see 
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend + migration CLI + compute service to `dist/`
 - `make gate-check` re-runs the CI Go steps from a cold module cache behind the configured proxy; `make deps-report` writes the module inventory for a security review ([docs/COMPANY-BUILD.md](docs/COMPANY-BUILD.md))
+- Installing a built `dist/` into an existing Grafana — unsigned load, app/datasource provisioning, the store and its migrations, the retrainer: [docs/INSTALL.md](docs/INSTALL.md)
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`
 - Cluster images and Helm live in `timeseries-k8s` (build from a git pin of this repo)
 - GitHub Actions on `main`: `gofmt` over `./pkg ./cmd` and `Magefile.go`, `go test -race ./pkg/... ./cmd/...`, the linux backend, migrator and compute-service builds, the migration CLI against the service Postgres, frontend lint/typecheck/jest/webpack
