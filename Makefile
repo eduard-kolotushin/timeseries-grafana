@@ -13,12 +13,21 @@ SHELL := $(GIT_SH)
 endif
 endif
 
-.PHONY: all build frontend backend migrate compute ini-template help
+.PHONY: all build frontend backend migrate compute gate-check deps-report ini-template help
 
 DIST_BIN := dist/gpx_forecast_linux_amd64
 DIST_DS_BIN := dist/forecast-datasource/gpx_forecast_linux_amd64
 DIST_MIGRATE_BIN := dist/gpx_forecast_migrate_linux_amd64
 DIST_COMPUTE_BIN := dist/gpx_forecast_compute_linux_amd64
+
+# Cold-cache scratch for the company gate: the module cache `make gate-check` fills and the
+# inventory `make deps-report` writes. See docs/COMPANY-BUILD.md.
+GATE_CACHE ?= .gate-cache
+
+# The module cache is deliberately outside the repo: an in-tree cache is walked by gofmt-style
+# recursive tools (which do not honour the go tool's dot-directory rule), while a temp dir keeps
+# `gofmt -l .` exactly the check CI runs.
+GATE_MODCACHE ?= $(if $(TEMP),$(TEMP),/tmp)/forecast-gate-mod-$(notdir $(CURDIR))
 
 # node/npm on PATH are nvm shims and can point at an install that is gone ("Node.js
 # v22.x.x is not installed or cannot be found"), so resolve a runtime that starts: the
@@ -44,6 +53,8 @@ help:
 	@echo "make migrate       Linux amd64 migration CLI -> dist/"
 	@echo "make compute       Linux amd64 gpx_forecast_compute for the standalone compute service"
 	@echo "make ini-template  copy conf/forecast.ini.template into dist/"
+	@echo "make gate-check    CI Go steps from a cold module cache behind the configured proxy"
+	@echo "make deps-report   per-module version inventory -> $(GATE_CACHE)/deps-report.md"
 
 build:
 	$(MAKE) frontend
@@ -81,3 +92,19 @@ compute:
 
 ini-template:
 	cp "conf/forecast.ini.template" "dist/forecast.ini.template"
+
+# Cold-cache replica of the CI Go steps behind whatever module proxy is configured: a build that
+# only works from a warm local module cache fails here instead of in the pipeline. `-race` stays in
+# CI (this dev box has no gcc). See docs/COMPANY-BUILD.md.
+gate-check:
+	@go env GOPROXY GOSUMDB GOPRIVATE HTTP_PROXY HTTPS_PROXY NO_PROXY
+	rm -rf "$(GATE_MODCACHE)"
+	GOMODCACHE="$(GATE_MODCACHE)" go mod download all
+	GOMODCACHE="$(GATE_MODCACHE)" go test ./pkg/... ./cmd/...
+	GOMODCACHE="$(GATE_MODCACHE)" sh -c 'GOOS=linux GOARCH=amd64 go build -o "$(GATE_CACHE)/gpx_forecast_linux_amd64" ./pkg && GOOS=linux GOARCH=amd64 go build -o "$(GATE_CACHE)/gpx_forecast_migrate_linux_amd64" ./cmd/migrate && GOOS=linux GOARCH=amd64 go build -o "$(GATE_CACHE)/gpx_forecast_compute_linux_amd64" ./cmd/compute'
+	GOMODCACHE="$(GATE_MODCACHE)" go vet -tags mage .
+
+# Per-module version inventory for a security review (docs/COMPANY-BUILD.md).
+deps-report:
+	mkdir -p "$(GATE_CACHE)"
+	sh tools/deps-report.sh "$(GATE_CACHE)/deps-report.md"

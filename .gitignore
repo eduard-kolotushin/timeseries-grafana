@@ -51,6 +51,9 @@ ci/
 # ESLint cache
 .eslintcache
 
+# gate-check module cache, build outputs and the dependency inventory
+.gate-cache/
+
 RETRAIN_SNAPSHOTS_SCALING_PLAN.md
 diagrams_backup_ru
 audit/

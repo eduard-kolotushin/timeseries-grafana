@@ -312,4 +312,4 @@ Same as `timeseries-forecast`: grid `last + k * step` for `k ≥ 1`, clipped to 
 
 ## Modules
 
-`go.mod` requires tagged `github.com/eduard-kolotushin/timeseries` and `github.com/eduard-kolotushin/timeseries-forecast`. Do not add a `replace` directive.
+`go.mod` requires tagged `github.com/eduard-kolotushin/timeseries` and `github.com/eduard-kolotushin/timeseries-forecast`. Do not add a `replace` directive. Builds resolve these through the configured Go module proxy — never a `direct` fetch — and the committed `go.sum` is the integrity check that makes a mirror safe (see [COMPANY-BUILD.md](COMPANY-BUILD.md)).

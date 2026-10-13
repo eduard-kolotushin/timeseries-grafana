@@ -10,7 +10,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - **Plugin ID:** `eduardkolotushin-forecast-app` (nested panel `eduardkolotushin-forecast-panel`, nested datasource `eduardkolotushin-forecast-datasource`)
 - **Go module:** `github.com/eduard-kolotushin/timeseries-grafana`
 - **Go:** 1.26+
-- **Libraries:** tagged `timeseries` and `timeseries-forecast` modules (no `replace`)
+- **Libraries:** tagged `timeseries` and `timeseries-forecast` modules (no `replace`); builds resolve them through the company Go proxy — see [docs/COMPANY-BUILD.md](docs/COMPANY-BUILD.md)
 - **Sandbox:** sibling `timeseries-grafana-sandbox`
 - **Kubernetes:** sibling `timeseries-k8s`
 - **Compute service:** `cmd/compute` → `gpx_forecast_compute`, the optional standalone fit/tick process (v16, `FORECAST_COMPUTE_URL`)
@@ -111,6 +111,7 @@ Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see 
 - Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, `trainSource` capture, mixed frames, forecast-query `cacheKey`, the one-click alert rule synthesis (window, reduce/math/threshold chain, series choice and its reasons, and the synthesized query's `cacheKey`), overlay load limits, and the schedule API/UI
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend + migration CLI + compute service to `dist/`
+- `make gate-check` re-runs the CI Go steps from a cold module cache behind the configured proxy; `make deps-report` writes the module inventory for a security review ([docs/COMPANY-BUILD.md](docs/COMPANY-BUILD.md))
 - Run Grafana from `timeseries-grafana-sandbox` after building `dist/`
 - Cluster images and Helm live in `timeseries-k8s` (build from a git pin of this repo)
 - GitHub Actions on `main`: `gofmt` over `./pkg ./cmd` and `Magefile.go`, `go test -race ./pkg/... ./cmd/...`, the linux backend, migrator and compute-service builds, the migration CLI against the service Postgres, frontend lint/typecheck/jest/webpack
