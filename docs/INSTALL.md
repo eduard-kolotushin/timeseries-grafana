@@ -118,6 +118,8 @@ apps:
       storeSslMode: disable
     secureJsonData:
       storePassword: overlay
+      # The retrainer's own Grafana credential (section 9a), created in this org.
+      grafanaToken: glsa_…
 ```
 
 ### 6b. Or the API / UI (Admin)
@@ -125,12 +127,13 @@ apps:
 ```sh
 curl -s -X POST localhost:3000/api/plugins/eduardkolotushin-forecast-app/settings \
   -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"jsonData":{"storeHost":"overlay-postgres","storePort":5432,"storeDatabase":"overlay","storeUser":"overlay","storeSslMode":"disable"},"secureJsonData":{"storePassword":"overlay"}}'
+  -d '{"enabled":true,"jsonData":{"storeHost":"overlay-postgres","storePort":5432,"storeDatabase":"overlay","storeUser":"overlay","storeSslMode":"disable"},"secureJsonData":{"storePassword":"overlay","grafanaToken":"glsa_…"}}'
 ```
 
 In the UI: **Administration → Plugins and data → Plugins → Timeseries Forecast → Enable**, or the app's
-own **Configuration** page. That page renders no store fields by design — the DSN is deployment
-configuration, not a user setting.
+own **Configuration** page. That page renders no store fields and no retrain endpoint/credential fields by
+design — the DSN, `grafanaUrl` and `grafanaToken` are deployment configuration, written through provisioning
+or this API, not a user setting.
 
 Disabling the app again drops its backend: the resource endpoints answer
 `404 {"message":"Plugin is not enabled"}` (verified), and re-enabling with the same jsonData brings them
@@ -282,6 +285,18 @@ curl -s -X POST http://127.0.0.1:3000/api/serviceaccounts/7/tokens -H 'Content-T
 Leave `secondsToLive` out for a token that does not expire; with an expiry, the scheduler meets `401` after
 it lapses and disables itself after three ticks (below), so renew it early — the value is read when the
 plugin (or compute) process starts.
+
+**Several orgs.** The plugin is installed once, but Grafana keeps a plugin's settings *per org* — its
+`plugin_setting` row is keyed by `org_id` + `plugin_id`, `secureJsonData` included — so enable and configure
+the app in each org that needs it: `org_id` in the provisioning file above, or the settings API while acting
+in that org (section 6b). Each org then has its own app instance, its own ticker, and its own credential, and
+that ticker claims only the rows of the org its token belongs to (`/api/org`), so give every org a
+service-account token of its own in `secureJsonData.grafanaToken`. The `FORECAST_GRAFANA_TOKEN` and
+`grafana_token` spellings are process-wide and *outrank* `secureJsonData`, so a single such value would serve
+one org's credential to every org's instance — leave them unset in a multi-org deployment. An org with no
+token of its own still has its overlay and its Retrain button; only its unattended retraining is missing, and
+that never touches another org's models. Datasources are per org as well, so every org whose alerts should
+restore a snapshot needs its own **Forecast** datasource (section 7).
 
 The datasource's own credentials are not this key's business: Grafana applies them when it runs the stored
 query, so the plugin never talks to Abyss or to IAM. That has one consequence worth knowing: a datasource
