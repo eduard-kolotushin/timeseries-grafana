@@ -37,9 +37,15 @@ compute_token = ${FORECAST_COMPUTE_TOKEN}
 ; Unattended retrain scheduler. Only this process (the app) runs it, unless
 ; compute_url above moves it to the compute service; the datasource section below
 ; never runs it, because alerting QueryData only Restores.
-; The scheduler claims due rows from forecast.retrain and fetches its own
-; training data from Grafana's /api/ds/query. Leave retrain_enabled empty (or
-; true) to run it. Empty grafana_url means http://127.0.0.1:3000.
+; The scheduler claims due rows from forecast.retrain and calls GET /api/org once
+; and POST /api/ds/query per row, both with its own Grafana token. Point this at
+; Grafana itself, reached directly by whichever process ticks: 127.0.0.1:3000 for
+; this process, Grafana's service name from a compute-service container (and the
+; sub-path Grafana serves under, when serve_from_sub_path is on). Never at an
+; IAM/forward-auth URL in front of Grafana: that proxy replaces the Authorization
+; header and needs a browser session, which an unattended call has neither of.
+; Leave retrain_enabled empty (or true) to run it. Empty grafana_url means
+; http://127.0.0.1:3000.
 retrain_enabled = ${FORECAST_RETRAIN_ENABLED}
 retrain_tick = ${FORECAST_RETRAIN_TICK}
 retrain_lease = ${FORECAST_RETRAIN_LEASE}
@@ -48,7 +54,8 @@ retrain_lease = ${FORECAST_RETRAIN_LEASE}
 retrain_retry_max = ${FORECAST_RETRAIN_RETRY_MAX}
 retrain_cron = ${FORECAST_RETRAIN_CRON}
 grafana_url = ${FORECAST_GRAFANA_URL}
-; Viewer service-account token for /api/ds/query when anonymous auth is off.
+; Viewer service-account token of the org that owns the panels, for /api/org and
+; /api/ds/query. Not an IAM user token: those expire with a browser session.
 grafana_token = ${FORECAST_GRAFANA_TOKEN}
 
 [plugin.eduardkolotushin-forecast-datasource]

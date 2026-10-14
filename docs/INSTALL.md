@@ -217,24 +217,66 @@ export FORECAST_STORE_HOST=... FORECAST_STORE_USER=... FORECAST_STORE_PASSWORD=.
 
 ## 9. Unattended retraining
 
-Only the **app** process runs the scheduler (the datasource never does; it only Restores). It claims due
-rows from `forecast.retrain` and fetches its own training frames from Grafana's `/api/ds/query`, so it
-needs Grafana's URL and, when anonymous auth is off, a Viewer service-account token:
+Only the **app** process — or the compute service, when `compute_url` moves the ticker to it — runs the
+scheduler (the datasource never does; it only Restores). It claims due rows from `forecast.retrain` and
+fetches its own training frames from Grafana, so it needs a Grafana URL it can reach itself and, when
+anonymous auth is off, a Viewer service-account token:
 
 | key (jsonData / ini / env) | default | meaning |
 | --- | --- | --- |
 | `retrainEnabled` / `retrain_enabled` / `FORECAST_RETRAIN_ENABLED` | on | `false` turns the ticker off (and the retention sweep with it) |
 | `retrainCron` / `retrain_cron` / `FORECAST_RETRAIN_CRON` | `0 3 * * *` | next run per model; the model's own cron wins once a schedule row exists |
 | `grafanaUrl` / `grafana_url` / `FORECAST_GRAFANA_URL` | `http://127.0.0.1:3000` | where training frames come from |
-| `grafanaToken` / `grafana_token` / `FORECAST_GRAFANA_TOKEN` | — | Viewer service-account token for `/api/ds/query` |
+| `grafanaToken` / `grafana_token` / `FORECAST_GRAFANA_TOKEN` | — | Viewer service-account token for `/api/org` and `/api/ds/query` |
 | `FORECAST_SNAPSHOT_TTL` / `snapshot_ttl` | `72h` | delete snapshots nothing refreshed; `0` disables, below `1h` is refused |
 | `FORECAST_RETRAIN_TICK` / `retrain_tick` | `30s` | claim loop interval |
 | `FORECAST_RETRAIN_LEASE` / `retrain_lease` | `6m` | claim lease; a fit that would outlive it is dropped, not duplicated |
 | `FORECAST_RETRAIN_RETRY_MAX` / `retrain_retry_max` | `1h` | cap on the retry backoff; not longer than the lease is refused |
 
-Three consecutive ticks refused with 401/403 disable the ticker and log a hint naming
-`FORECAST_GRAFANA_URL` / `FORECAST_GRAFANA_TOKEN`. A wrong URL is a configuration error, not something to
-retry forever; the panel's own Retrain button keeps working meanwhile.
+### 9a. Which URL, and which token
+
+The scheduler calls two endpoints of that URL, each with `Authorization: Bearer <grafanaToken>`:
+`GET <url>/api/org` once per process (the org its claims are scoped to) and `POST <url>/api/ds/query` once
+per due row. Both must be **Grafana itself, reached directly** by the process that ticks:
+
+- plugin in Grafana's process (the normal case): `http://127.0.0.1:3000` — the default, and correct as long
+  as Grafana listens there on the same host.
+- compute service (section 10): Grafana as *that container* sees it, e.g. `http://grafana:3000` or
+  `http://<release>-grafana:80`. `127.0.0.1` inside that container is the service itself, not Grafana.
+- **not** an IAM / forward-auth / SSO URL in front of Grafana. Such a proxy replaces `Authorization` and
+  requires a browser session cookie; the unattended call carries a service-account token and no session, so
+  it is refused. Keep the proxy in front of browsers and point this key at Grafana directly.
+- the scheme is required (`http://` or `https://`), trailing slashes are trimmed, and the path must match
+  what Grafana serves: with `serve_from_sub_path = true` and `root_url = https://iam-host.sbt/grafana-vm-01`,
+  an internal `grafana_url = http://127.0.0.1:3000/grafana-vm-01` is correct where `http://127.0.0.1:3000`
+  is not.
+
+Two checks from the host that ticks, before trusting a deployment (both are read-only):
+
+```bash
+# Does this process reach Grafana, and does Grafana serve at the root?
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/health   # 200 root, 404 → add the sub-path
+# Is the credential accepted by the listener this process talks to?
+curl -s -H "Authorization: Bearer $FORECAST_GRAFANA_TOKEN" http://127.0.0.1:3000/api/org | head -c 80
+```
+
+`200` plus a `{"id":…}` body for both is what a working retrainer looks like; a redirect or `401` on the
+second one means the direct listener still expects the proxy's session, which the authentication team has to
+allow for API tokens on that path. The token is a Grafana **service account** token in the org that owns the
+panels — Viewer is enough for both endpoints — because the scheduler resolves its org from `/api/org` and
+claims only that org's rows.
+
+The datasource's own credentials are not this key's business: Grafana applies them when it runs the stored
+query, so the plugin never talks to Abyss or to IAM. That has one consequence worth knowing: a datasource
+that authorizes *per user* (an IAM token forwarded with the request, as Abyss does in the browser) has no
+user on an unattended fetch — it needs its own credential in its datasource settings for retrains to work.
+
+How a misconfiguration shows up: `401`/`403` counts as a refusal and three consecutive ticks end the ticker
+with one Error log naming `FORECAST_GRAFANA_URL` / `FORECAST_GRAFANA_TOKEN`; a URL that is unreachable, or
+wrong but answering (a `404` path), leaves the ticker running — it logs `retrain tick … failed=N` and the
+row's `lastStatus` carries the error, which is where to look first.
+
+The panel's own Retrain button keeps working meanwhile: it trains interactively and writes the same row.
 
 Per-model crons and the admin API live on the app's **Retrain schedules** page
 (`/plugins/eduardkolotushin-forecast-app?page=schedules`, or Administration → Plugins and data → Plugins →

@@ -216,6 +216,8 @@ Every branch logs `retrain scope=… key=… status=… attempts=… dur=…`, a
 
 Default `FORECAST_GRAFANA_URL` is `http://127.0.0.1:3000` and the default token is empty, which is what the sandbox's anonymous Admin uses. A production Grafana with anonymous auth off needs a Viewer service-account token, which the scheduler reads from the same levels as the DSN (`FORECAST_GRAFANA_TOKEN`, `[plugin.eduardkolotushin-forecast-app]` / `[plugin.eduardkolotushin-forecast-datasource]`, or `secureJsonData.grafanaToken` written through the settings API — the Configuration page has no field for it). Neither available: Grafana answers `401`/`403` and the scheduler disables itself after three consecutive refusals (above), while the overlay keeps working and `needTrain` keeps refreshing the rows.
 
+The URL must be the endpoint the ticking process reaches itself — `127.0.0.1:3000` inside Grafana's process, Grafana's Service name from a compute container, plus the sub-path Grafana serves under when `serve_from_sub_path` is on — never an IAM/forward-auth URL in front of Grafana, because that proxy owns the browser's `Authorization` header and session cookie while this call carries a service-account token and no session.
+
 ## Train step
 
 Train step follows the model, not the dashboard interval:
