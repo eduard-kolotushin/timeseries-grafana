@@ -266,6 +266,23 @@ allow for API tokens on that path. The token is a Grafana **service account** to
 panels — Viewer is enough for both endpoints — because the scheduler resolves its org from `/api/org` and
 claims only that org's rows.
 
+Where that token comes from: **Administration → Users and access → Service accounts**
+(`/org/serviceaccounts`) → **Add service account** with role **Viewer** → **Add service account token** →
+copy the `glsa_…` value, which Grafana shows once. A service account belongs to the org you are signed in
+to (`sa-<org>-<name>`), which is the org `/api/org` then reports — create it in the org that owns the
+panels. An Admin credential can do the same over the API:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/api/serviceaccounts -H 'Content-Type: application/json' \
+  -d '{"name":"forecast-retrainer","role":"Viewer"}'                  # → {"id":7,"login":"sa-1-forecast-retrainer",…}
+curl -s -X POST http://127.0.0.1:3000/api/serviceaccounts/7/tokens -H 'Content-Type: application/json' \
+  -d '{"name":"forecast-retrainer"}'                                  # → {"key":"glsa_…"} — the value to configure, once
+```
+
+Leave `secondsToLive` out for a token that does not expire; with an expiry, the scheduler meets `401` after
+it lapses and disables itself after three ticks (below), so renew it early — the value is read when the
+plugin (or compute) process starts.
+
 The datasource's own credentials are not this key's business: Grafana applies them when it runs the stored
 query, so the plugin never talks to Abyss or to IAM. That has one consequence worth knowing: a datasource
 that authorizes *per user* (an IAM token forwarded with the request, as Abyss does in the browser) has no
