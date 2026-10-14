@@ -94,13 +94,13 @@ Cloned panel targets are rewritten by `datasource.type` before `ds.query`. Windo
 | `prometheus` | Force range (`range: true`, `instant: false`, `exemplar: false`); set target `interval` to the train step. Re-query with new `range` / `intervalMs` / `maxDataPoints` / `__from`/`__to`. Do not globally replace numbers in `expr`. If `$__range` / `$__rate_interval` / `$__interval` are still macros, leave them for the Prometheus plugin. |
 | `grafana-opensearch-datasource` | Skip non-metric query types (reason). Pin date_histogram `settings.interval` to the train step; `request.range` drives extended bounds. |
 | `postgres`, `grafana-postgresql-datasource` | Keep `format` as time series. If `rawSql` still has `$__timeFilter` / `$__timeFrom` / `$__timeTo` / `$__unixEpochFilter`, leave them. If Grafana already expanded ISO/`BETWEEN`, replace those visible-range literals (same idea as Druid SQL), not arbitrary integers. |
-| other (Druid, TestData) | Existing `applyLookbackRange`. TestData already honors `DataQueryRequest.range`. |
+| other (Druid, TestData, Abyss) | Existing `applyLookbackRange`. TestData already honors `DataQueryRequest.range`. An Abyss target keeps its `$time` / `$defaultFilter` macros, which the datasource expands from the range of the request it answers — the train request interactively, the `from`/`to` the scheduler posts to `/api/ds/query` on a retrain — so the window is never frozen into its SQL. |
 
 Set `request.intervalMs` to the train step before `ds.query`.
 
 Valid train queries: Prometheus **range** PromQL (Mimir/AMP same type); OpenSearch **Lucene metric + date histogram** or **PPL time series**; Postgres **time series** SQL with Grafana time macros.
 
-Invalid (reason, history only, no POST): Prometheus instant; OpenSearch logs/raw/traces; Postgres table/EXPLAIN; frames that are not time+number. Unsupported types are detected on the target **before** query when possible.
+Invalid (reason, history only, no POST): Prometheus instant; OpenSearch logs/raw/traces; Postgres table/EXPLAIN; frames that are not time+number. Unsupported types are detected on the target **before** query when possible. A reply that is a legacy table object (`{columns, rows, type:'table'}`, what a frontend datasource such as `sbt-datasource-abyss` returns for a `format: "table"` target) or a graphite series is converted to a real frame — a `time` column of local date strings becomes epoch ms — before extraction, so the training frames match the visible series instead of yielding "Training query returned no points".
 
 ## Snapshot store
 
