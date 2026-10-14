@@ -14,6 +14,7 @@ import { datasourceUid } from './alertFromPanel';
 import { trainMaxDataPoints, trainStepInterval } from './lookback';
 import { metricTargets } from './mixed';
 import { REASON_TRAIN_EMPTY, REASON_TRAIN_MULTI_DATASOURCE } from './reasons';
+import { toTrainingFrames } from './trainFrames';
 import { rewriteTrainTargets, summarizeTrainTargets, TrainRewriteWindow } from './trainRewrite';
 
 /**
@@ -202,7 +203,10 @@ export async function queryTrainingFrames(
         // stable between a probe and a fit) with the panel's macros in it.
         querySummary: summarizeTrainTargets(ds.type || refType(group.ref), group.targets) || undefined,
       };
-      frames.push(...resp.data);
+      // A frontend datasource answers with a legacy table object; convert it the way Grafana's panel
+      // pipeline converts the visible series, or `extractSeries` finds no time field and the fit
+      // never happens.
+      frames.push(...toTrainingFrames(resp.data));
     }
   }
   if (frames.length > 0) {

@@ -284,4 +284,33 @@ describe('rewriteTrainTargets other', () => {
     );
     expect(got.targets[0].builder.intervals.intervals).toEqual([`${isoUtc(trainFrom)}/${isoUtc(trainTo)}`]);
   });
+
+  it('leaves an Abyss target’s own macros for the datasource to expand', () => {
+    const rawSql =
+      'SELECT $time as "time", avg("value")/10000000 as "avg" FROM "corax_generator_g4" WHERE $defaultFilter and "name" like \'%jvm_%\' GROUP BY $time';
+    const target = {
+      refId: 'A',
+      datasource: { uid: 'abyss', type: 'sbt-datasource-abyss' },
+      format: 'table',
+      rawSql,
+    };
+    const got = rewriteTrainTargets('sbt-datasource-abyss', [target], window);
+
+    expect(got.reason).toBeUndefined();
+    // The datasource expands `$time` / `$defaultFilter` against the range of the request it answers — the
+    // training window interactively, the from/to the scheduler posts on a retrain — so the stored object
+    // keeps them and the window is never frozen into the SQL.
+    expect(got.targets[0]).toEqual(target);
+    // Cloned, not mutated: the fit stores these very objects and the scheduler replays them.
+    expect(got.targets[0]).not.toBe(target);
+  });
+
+  it('still pins Grafana’s own time macros in the same generic rewrite', () => {
+    const rawSql = 'SELECT __time, value FROM metrics WHERE ts BETWEEN \'${__from:date:iso}\' AND \'${__to:date:iso}\'';
+    const got = rewriteTrainTargets('sbt-datasource-abyss', [{ refId: 'A', rawSql }], window);
+
+    expect(got.targets[0].rawSql).toContain(isoUtc(trainFrom));
+    expect(got.targets[0].rawSql).toContain(isoUtc(trainTo));
+    expect(got.targets[0].rawSql).not.toContain('${__from');
+  });
 });

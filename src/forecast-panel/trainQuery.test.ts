@@ -1,5 +1,6 @@
 import { DataFrame, DataQueryRequest, FieldType, MutableDataFrame, dateTime } from '@grafana/data';
 import { of } from 'rxjs';
+import { extractSeries } from './extract';
 import { REASON_TRAIN_EMPTY, REASON_TRAIN_MULTI_DATASOURCE, REASON_UNSUPPORTED_PROM_INSTANT } from './reasons';
 import { queryTrainingFrames, trainRejectReason } from './trainQuery';
 
@@ -204,6 +205,44 @@ describe('queryTrainingFrames', () => {
     expect(result.source?.datasourceUid).toBe('prom');
     expect(result.source?.queries).toBe(first.seen[0]);
     expect(result.droppedReason).toBe(REASON_TRAIN_MULTI_DATASOURCE);
+  });
+
+  it('converts a frontend datasource’s legacy table so the training series can be extracted', async () => {
+    // What `sbt-datasource-abyss` answers for `format: "table"`: no `fields`, a time column of local date
+    // strings. Before the conversion these frames reached `extractSeries` as `undefined.fields` and the
+    // panel stopped at REASON_TRAIN_EMPTY without ever POSTing a fit.
+    const table = {
+      columns: [
+        { text: 'time', type: 'time' },
+        { text: 'avg' },
+      ],
+      rows: [
+        ['2026-10-07 18:00:00', 13319.2099],
+        ['2026-10-07 19:00:00', 1.5],
+      ],
+      meta: { executedQueryString: 'SELECT …' },
+      refId: 'A',
+      type: 'table',
+    };
+    const abyss = datasource([table as unknown as DataFrame]);
+    mockGet.mockResolvedValue({ ...abyss.ds, type: 'sbt-datasource-abyss' });
+
+    const result = await queryTrainingFrames(request([{ uid: 'abyss', type: 'sbt-datasource-abyss' }]), {
+      fromMs,
+      toMs,
+      intervalMs: 60_000,
+    });
+
+    const frames = result.frames ?? [];
+    expect(frames).toHaveLength(1);
+    const series = extractSeries(frames[0], frames);
+    expect(series).toHaveLength(1);
+    expect(series[0].name).toBe('avg');
+    expect(series[0].times).toEqual([
+      new Date(2026, 9, 7, 18, 0, 0).getTime(),
+      new Date(2026, 9, 7, 19, 0, 0).getTime(),
+    ]);
+    expect(series[0].values).toEqual([13319.2099, 1.5]);
   });
 
   it('omits the source when no group returned frames', async () => {
