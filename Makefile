@@ -13,7 +13,7 @@ SHELL := $(GIT_SH)
 endif
 endif
 
-.PHONY: all build frontend backend migrate compute gate-check deps-report ini-template help
+.PHONY: all build frontend backend migrate compute gate-check deps-report ini-template docs help
 
 DIST_BIN := dist/gpx_forecast_linux_amd64
 DIST_DS_BIN := dist/forecast-datasource/gpx_forecast_linux_amd64
@@ -53,6 +53,7 @@ help:
 	@echo "make migrate       Linux amd64 migration CLI -> dist/"
 	@echo "make compute       Linux amd64 gpx_forecast_compute for the standalone compute service"
 	@echo "make ini-template  copy conf/forecast.ini.template into dist/"
+	@echo "make docs          copy docs/ into dist/"
 	@echo "make gate-check    CI Go steps from a cold module cache behind the configured proxy"
 	@echo "make deps-report   per-module version inventory -> $(GATE_CACHE)/deps-report.md"
 
@@ -62,6 +63,7 @@ build:
 	$(MAKE) migrate
 	$(MAKE) compute
 	$(MAKE) ini-template
+	$(MAKE) docs
 
 frontend:
 	PATH="$(NODE_DIR):$$PATH" "$(NPM)" install
@@ -92,6 +94,9 @@ compute:
 
 ini-template:
 	cp "conf/forecast.ini.template" "dist/forecast.ini.template"
+
+docs:
+	cp -r "docs" "dist/docs"
 
 # Cold-cache replica of the CI Go steps behind whatever module proxy is configured: a build that
 # only works from a warm local module cache fails here instead of in the pipeline. `-race` stays in
