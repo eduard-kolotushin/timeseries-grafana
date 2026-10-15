@@ -90,7 +90,16 @@ On a machine inside the gate: `make gate-check` exits 0 here and in the sibling 
 repo, the frontend sequence above exits 0, and `.gate-cache/deps-report.md` is attached to the ticket.
 A module the proxy refuses is fixed in the proxy allow-list, never by editing this repo's graph.
 
-## 6. Not covered
+## 6. The corporate pipeline
+
+`Jenkinsfile` at the repo root is the company pipeline: it imports the shared library (`ru.sbrf.devops.Globals`)
+and returns `wrapJenkinsfile(this)`, so the build steps themselves live in that library, not here. Its
+`onDistrib` step fetches the commit id recorded beside the published distribution from Nexus and compares it
+with `git rev-parse HEAD`, failing the job when they differ, so a distribution and the source tree it records
+stay paired. The comparison is byte-exact (`cmp`), so the recorded file has to match `git rev-parse HEAD`
+including its trailing newline. `make build` copies `docs/` into `dist/` for that distribution (`make docs`).
+
+## 7. Not covered
 
 The Kubernetes image build stages (`timeseries-k8s/docker/{grafana,compute,baselines}/Dockerfile`) run
 `go build` inside `golang:1.26-bookworm` and do not inherit the host's `go env`; if the gate applies
