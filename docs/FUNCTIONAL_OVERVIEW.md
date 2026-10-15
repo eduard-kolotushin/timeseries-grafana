@@ -366,6 +366,18 @@ action sends, pinned by that action's own jest case — answered `{"message":"ok
 is collected there"}`. The page renders that `note` as an info alert (unit-tested; the button itself was not
 clicked in this pass). The `Delete` beside it still leaves the model (F5).
 
+**Pass 6 — Grafana 12.2.10, and narrow windows:** the same tab, same build, on `grafana/grafana:12.2.10` (the
+company line) and on 13.1.0, at viewport widths 1400/1100/900/700, over a store holding a 64-char `metric_hash`
+`baseline` row and a `panel` row with a long title, series and query summary. Grafana 12.2's `InteractiveTable`
+honors a column's `width` but ignores its `minWidth`, so `Source` and `Key` were laid out at their content's
+min-content width — one character, because those cells carry `overflow-wrap: anywhere` — and the key printed one
+letter per line: Key column 85px, its `<code>` box 19×883 (64 lines); the same columns are 260px on 13.1.0, which
+honors `minWidth`, and are what makes a narrow window survive there at all. The floor now sits on the cells' own
+content (`min-width` 180 for the key, 200 for the source), which no table can undercut: after the fix the key cell
+is 196px with a 130×61 (4-line) `<code>` on 12.2.10 and 260px with a 194×47 (3-line) one on 13.1.0, identical at
+all four widths, the `panel` row's source cell is 216px on 12.2.10, and the plugin details sidebar stays in place
+at 700px on both versions.
+
 ### F13. Retrain action
 
 | | |
