@@ -95,7 +95,12 @@ compute:
 ini-template:
 	cp "conf/forecast.ini.template" "dist/forecast.ini.template"
 
+# The corporate distribution carries the guide, so `docs/` ships inside dist/. The destination is
+# cleared first: `cp -r` copies a directory *into* an existing one, which would nest the guide as
+# dist/docs/docs on every rebuild. mkdir keeps the target usable before dist/ exists.
 docs:
+	mkdir -p "dist"
+	rm -rf "dist/docs"
 	cp -r "docs" "dist/docs"
 
 # Cold-cache replica of the CI Go steps behind whatever module proxy is configured: a build that
