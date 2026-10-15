@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { css } from '@emotion/css';
+import { css, cx } from '@emotion/css';
 import {
   Alert,
   Badge,
@@ -118,6 +118,17 @@ const getStyles = () => ({
   // one line by being unbreakable content instead of by a column minimum.
   nowrap: css({
     whiteSpace: 'nowrap',
+  }),
+  // A column's `minWidth` is not applied by Grafana 12.2's InteractiveTable, which then lays
+  // such a column out at its content's min-content width — one character for a 64-char key,
+  // because the cell wraps anywhere — and the key printed one letter per line. Flooring the
+  // cell's own content holds on every version: a cell is never narrower than its content's
+  // min-content width, whatever the table does with the column definition.
+  keyCell: css({
+    minWidth: 180,
+  }),
+  sourceCell: css({
+    minWidth: 200,
   }),
 });
 
@@ -267,7 +278,7 @@ export const RetrainSchedules = () => {
           const href = dashboardHref(source);
           const series = source.seriesName && source.seriesName !== name ? source.seriesName : '';
           return (
-            <div className={styles.wrap}>
+            <div className={cx(styles.wrap, styles.sourceCell)}>
               {href ? <a href={href}>{name}</a> : <span>{name}</span>}
               {(series || source.lookback || source.querySummary) && (
                 <div>
@@ -291,16 +302,18 @@ export const RetrainSchedules = () => {
         // the plugin details sidebar out; the table scrolls inside its own container.
         minWidth: 260,
         cell: ({ row }) => (
-          <Stack direction="row" gap={1} alignItems="center">
-            <code className={styles.wrap}>{row.original.key}</code>
-            <ClipboardButton
-              getText={() => row.original.key}
-              icon="copy"
-              size="sm"
-              tooltip="Copy key"
-              aria-label={`${rowId(row.original)} copy key`}
-            />
-          </Stack>
+          <div className={styles.keyCell}>
+            <Stack direction="row" gap={1} alignItems="center">
+              <code className={styles.wrap}>{row.original.key}</code>
+              <ClipboardButton
+                getText={() => row.original.key}
+                icon="copy"
+                size="sm"
+                tooltip="Copy key"
+                aria-label={`${rowId(row.original)} copy key`}
+              />
+            </Stack>
+          </div>
         ),
       },
       {
