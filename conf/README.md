@@ -44,7 +44,7 @@ The service is its own binary, `gpx_forecast_compute` (`cmd/compute`, `make comp
 | `FORECAST_COMPUTE_TOKEN` | shared secret; required, the service refuses to start without it |
 | `FORECAST_STORE_*` | the same snapshot store as the plugin |
 | `FORECAST_RETRAIN_*`, `FORECAST_SNAPSHOT_TTL`, `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` | the ticker, unchanged — training frames still come from Grafana's own `/api/ds/query` |
-| `FORECAST_MAX_INFLIGHT` | concurrent fits in this service (default 32) |
+| `FORECAST_MAX_INFLIGHT` | concurrent fits in this service (default 4) |
 
 It ignores `compute_url`, so a shared env block cannot make one compute service forward to another. The plugin asserts the org Grafana authenticated on every forwarded call (`X-Forecast-Org`, overwritten, never taken from the caller) and the service injects it as the plugin context, so `forecast.snapshots` and `forecast.retrain` stay org-scoped exactly as inline. The service mounts `/forecast`, `/ping` and an unauthenticated, coarse `/healthz`; the schedules API and alerting `QueryData` stay in the Grafana-managed plugin, which keeps working from the same store while the service is down. Replicas share one Postgres, so the `forecast.retrain` claim queue makes N tickers safe: each due row is claimed once.
 

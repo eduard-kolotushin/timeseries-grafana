@@ -29,7 +29,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Nested datasource `QueryData` Restores snapshots; alerting uses Grafana `refId`s (metric vs forecast / interval)
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
 - No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots and schedules; `POST /api/ds/query` on Grafana's own API is not a datasource client
-- Stay within v1–v16 unless `docs/INTENTIONS.md` is updated first
+- Stay within v1–v17 unless `docs/INTENTIONS.md` is updated first
 - The compute service (`cmd/compute`, `gpx_forecast_compute`) runs the same `pkg/plugin` `/forecast` handler and the same retrain ticker over plain HTTP: no second fit or dispatch implementation, no datasource client, and it reads process env only (never grafana.ini or jsonData)
 
 ## v1 in scope
@@ -58,7 +58,7 @@ Postgres snapshot store (`forecast.snapshots` via pgx). Skip the train query unt
 
 ## v7 in scope
 
-Mergeable `conf/forecast.ini.template` for CI/CD `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`). Backend reads `FORECAST_STORE_*` (not forwarded into plugin processes on Grafana 12.4+ by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*` / GrafanaCfg, then jsonData. Alerting QueryData uses Forecast datasource jsonData, not the app Configuration page.
+Mergeable `conf/forecast.ini.template` for CI/CD `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`). Backend reads `FORECAST_STORE_*` (not forwarded into plugin processes on Grafana 12.4+ by default), then `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`, then the id-less `GF_PLUGIN_<KEY>` spelling Grafana 13 exports, then GrafanaCfg, then jsonData. Alerting QueryData uses Forecast datasource jsonData, not the app Configuration page.
 
 ## v8 in scope
 

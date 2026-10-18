@@ -26,26 +26,28 @@ import {
  */
 export function toTrainingFrames(data: DataQueryResponseData[]): DataFrame[] {
   const frames: DataFrame[] = [];
+  if (!Array.isArray(data)) {
+    return frames;
+  }
   for (const item of data) {
-    let converted: DataFrame[];
     try {
-      converted = getProcessedDataFrames([item]);
+      // `toDataFrame` throws `Unsupported data format` on a shape Grafana cannot read. Dropping the
+      // item keeps the other datasources' frames; a reply that converts to nothing already has an
+      // answer on the caller's empty-frames path. The string→epoch-ms conversion sits inside the
+      // same guard: one malformed field drops the item instead of throwing out of the function.
+      for (const frame of getProcessedDataFrames([item])) {
+        let changed = false;
+        const fields = frame.fields.map((field) => {
+          if (field.type !== FieldType.time || field.values.every((v) => v == null || typeof v === 'number')) {
+            return field;
+          }
+          changed = true;
+          return ensureTimeField(field);
+        });
+        frames.push(changed ? { ...frame, fields } : frame);
+      }
     } catch {
-      // `toDataFrame` throws `Unsupported data format` on a shape Grafana cannot read. Dropping it keeps
-      // the other datasources' frames; a reply that converts to nothing already has an answer on the
-      // caller's empty-frames path.
       continue;
-    }
-    for (const frame of converted) {
-      let changed = false;
-      const fields = frame.fields.map((field) => {
-        if (field.type !== FieldType.time || field.values.every((v) => v == null || typeof v === 'number')) {
-          return field;
-        }
-        changed = true;
-        return ensureTimeField(field);
-      });
-      frames.push(changed ? { ...frame, fields } : frame);
     }
   }
   return frames;

@@ -180,6 +180,17 @@ export async function queryTrainingFrames(
       signal
     )) as DataQueryResponse;
     if (resp?.data?.length) {
+      // A frontend datasource answers with a legacy table object; convert it the way Grafana's panel
+      // pipeline converts the visible series, or `extractSeries` finds no time field and the fit
+      // never happens.
+      const converted = toTrainingFrames(resp.data);
+      if (converted.length === 0) {
+        // A reply that converts to nothing is an empty answer: it must not spend the one
+        // trainSource claim, or a real group after it would be dropped as a second datasource
+        // and the load would end without frames anyway.
+        skipReason = skipReason ?? REASON_TRAIN_EMPTY;
+        continue;
+      }
       if (source) {
         // A second datasource produced frames. The stored trainSource names one group's
         // query objects and the scheduler re-extracts by series name from that group, so
@@ -203,10 +214,7 @@ export async function queryTrainingFrames(
         // stable between a probe and a fit) with the panel's macros in it.
         querySummary: summarizeTrainTargets(ds.type || refType(group.ref), group.targets) || undefined,
       };
-      // A frontend datasource answers with a legacy table object; convert it the way Grafana's panel
-      // pipeline converts the visible series, or `extractSeries` finds no time field and the fit
-      // never happens.
-      frames.push(...toTrainingFrames(resp.data));
+      frames.push(...converted);
     }
   }
   if (frames.length > 0) {
@@ -268,7 +276,15 @@ export function trainRejectReason(
       reason = reason ?? REASON_TRAIN_EMPTY;
       continue;
     }
-    const rewritten = rewriteTrainTargets(refType(group.ref), group.targets, window);
+    const type = refType(group.ref);
+    if (type === '') {
+      // The fit path classifies a string or typeless ref through the registry (`ds.type || refType`),
+      // which can train a target this sync check would misread: any `rawSql` target without a typed
+      // ref looks Postgres to the rewrite, and an Abyss `format: "table"` target is exactly that
+      // shape. Staying silent is the contract — never refuse a fit the fit path performs.
+      return undefined;
+    }
+    const rewritten = rewriteTrainTargets(type, group.targets, window);
     if (rewritten.targets.length > 0) {
       // One group the rewrite keeps is enough: `queryTrainingFrames` trains it and reports
       // no reason, so naming one here would refuse a fit the fit path performs.

@@ -21,7 +21,11 @@ store_database = ${FORECAST_STORE_DATABASE}
 store_user = ${FORECAST_STORE_USER}
 store_ssl_mode = ${FORECAST_STORE_SSLMODE}
 store_password = ${FORECAST_STORE_PASSWORD}
-; Concurrent Fit / ForecastRange slots in this process (default 4).
+; How long a snapshot nothing refreshed may live (the retrain ticker's retention sweep;
+; default 72h, 0 disables, a value below 1h falls back to the default).
+; snapshot_ttl = ${FORECAST_SNAPSHOT_TTL}
+; Concurrent Fit / ForecastRange slots in this process (default 4; when compute_url
+; below is set, this process forwards instead of fitting and the default is 32).
 max_inflight = ${FORECAST_MAX_INFLIGHT}
 ; Where fitting runs. Empty (the default) keeps every fit and the retrain ticker
 ; in this process. Set it to the standalone compute service's base URL

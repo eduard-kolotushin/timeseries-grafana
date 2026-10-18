@@ -1,5 +1,12 @@
 # Forecast overlay cannot train from the `sbt-datasource-abyss` datasource
 
+> **RESOLVED** in this repo, commit `e3d179f`: `queryTrainingFrames` now runs every reply item
+> through `toTrainingFrames` (`src/forecast-panel/trainFrames.ts`) — Grafana's own
+> `getProcessedDataFrames` plus `ensureTimeField` for a `time` field whose values are still
+> strings — before `extractSeries`, so the fit `POST /forecast` goes out. The hand-built
+> normalizer proposed in *Recommended fix* below was superseded by that smaller change, and the
+> `frames.push(...resp.data)` line it cites is now `frames.push(...toTrainingFrames(resp.data))`.
+
 Report for the plugin developer. Self-contained: explains the observed failure, the
 root cause, how the Abyss datasource actually produces its response, and the exact fix
 that is needed in this repo (`timeseries-grafana`).

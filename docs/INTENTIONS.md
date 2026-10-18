@@ -76,7 +76,7 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 
 ## v7 must-have
 
-- Backend DSN resolution: `FORECAST_STORE_*` env (Grafana 12.4+ does not forward host env into plugin processes by default), then Grafana `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*` / GrafanaCfg, then jsonData / `secureJsonData`. Empty host (and no URL): persist off
+- Backend DSN resolution: `FORECAST_STORE_*` env (Grafana 12.4+ does not forward host env into plugin processes by default), then Grafana `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` / `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`, then the id-less `GF_PLUGIN_<KEY>` spelling Grafana 13 exports, then GrafanaCfg, then jsonData / `secureJsonData`. Empty host (and no URL): persist off
 - Mergeable Grafana `.ini` snippet (`conf/forecast.ini.template`) for proprietary CI/CD that already ships this plugin with Grafana: `[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]` snapshot-store keys with `${FORECAST_STORE_*}` placeholders
 - Panel options stay on the dashboard. Do not put unsigned-plugin allowlist or datasource provisioning in this template
 

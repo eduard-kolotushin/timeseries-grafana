@@ -48,8 +48,10 @@ It mirrors the CI Go steps (`.github/workflows/ci.yml`) with `GOMODCACHE` pointe
 (`$TEMP/forecast-gate-mod-timeseries-grafana` on Windows, `/tmp/…` elsewhere), which the target empties
 first, so the module cache starts empty and the repo tree stays free of it: `go mod download all`,
 `go test ./pkg/... ./cmd/...`, the three Linux builds (`./pkg`, `./cmd/migrate`, `./cmd/compute`), and
-`go vet -tags mage .`. CI keeps `-race`; this target does not, because it has to run on the Windows dev
-box, which has no gcc.
+`go vet -tags mage .`. Two CI steps are deliberately not mirrored: the Format check (the Windows dev
+tree's CRLF-only files would always flag; CI checks out LF) and the Postgres-gated tests (they skip
+unless `FORECAST_TEST_PG` is exported — point it at the sandbox Postgres to run them). CI keeps
+`-race`; this target does not, because it has to run on the Windows dev box, which has no gcc.
 
 `go mod download all` also records a hash for every module in the graph, so the first run on a tree
 whose `go.sum` only carried the build subset adds those lines. Commit them: they are the same versions
@@ -79,8 +81,9 @@ make deps-report   # -> .gate-cache/deps-report.md
 
 One row per module: the version the build resolves, whether that version is a `tag`, a `pseudo`-version
 (the upstream publishes no tagged release at all — `golang.org/x/exp`, `google.golang.org/genproto`,
-`github.com/jackc/pgservicefile`, …), or an `incompatible` tag (a release that predates Go modules,
-such as `v2.1.0+incompatible`). A `pseudo` row with 0 upstream tagged releases cannot be pinned to a
+`github.com/jackc/pgservicefile`, …), or an `incompatible` tag — a major version whose module path
+has no `/vN` suffix: a pre-modules release (`v2.1.0+incompatible`) or a modern major that never
+declared one (`v25.12.19+incompatible`). A `pseudo` row with 0 upstream tagged releases cannot be pinned to a
 tag by any consumer; moving one means changing the shared module graph, which is a separate change with
 its own verification. Attach the report to the security ticket.
 
@@ -96,8 +99,11 @@ A module the proxy refuses is fixed in the proxy allow-list, never by editing th
 and returns `wrapJenkinsfile(this)`, so the build steps themselves live in that library, not here. Its
 `onDistrib` step fetches the commit id recorded beside the published distribution from Nexus and compares it
 with `git rev-parse HEAD`, failing the job when they differ, so a distribution and the source tree it records
-stay paired. The comparison is byte-exact (`cmp`), so the recorded file has to match `git rev-parse HEAD`
-including its trailing newline. `make build` copies `docs/` into `dist/` for that distribution (`make docs`).
+stay paired. The comparison strips trailing newline styles (`tr -d ' \r'` on both sides), so a recorded
+file without a trailing newline — or a CRLF one — still compares equal to `git rev-parse HEAD`, and only
+a real hash mismatch fails it; `curl -fsS --max-time 60` turns an HTTP or SSO failure into the build
+error instead of feeding the page body to the compare. `make build` copies `docs/` into `dist/` for
+that distribution (`make docs`).
 
 ## 7. Not covered
 

@@ -27,7 +27,7 @@ GATE_CACHE ?= .gate-cache
 # The module cache is deliberately outside the repo: an in-tree cache is walked by gofmt-style
 # recursive tools (which do not honour the go tool's dot-directory rule), while a temp dir keeps
 # `gofmt -l .` exactly the check CI runs.
-GATE_MODCACHE ?= $(if $(TEMP),$(TEMP),/tmp)/forecast-gate-mod-$(notdir $(CURDIR))
+GATE_MODCACHE ?= $(subst \,/,$(if $(TEMP),$(TEMP),/tmp))/forecast-gate-mod-$(notdir $(CURDIR))
 
 # node/npm on PATH are nvm shims and can point at an install that is gone ("Node.js
 # v22.x.x is not installed or cannot be found"), so resolve a runtime that starts: the
@@ -93,6 +93,7 @@ compute:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$(DIST_COMPUTE_BIN)" ./cmd/compute
 
 ini-template:
+	mkdir -p "dist"
 	cp "conf/forecast.ini.template" "dist/forecast.ini.template"
 
 # The corporate distribution carries the guide, so `docs/` ships inside dist/. The destination is
@@ -104,8 +105,11 @@ docs:
 	cp -r "docs" "dist/docs"
 
 # Cold-cache replica of the CI Go steps behind whatever module proxy is configured: a build that
-# only works from a warm local module cache fails here instead of in the pipeline. `-race` stays in
-# CI (this dev box has no gcc). See docs/COMPANY-BUILD.md.
+# only works from a warm local module cache fails here instead of in the pipeline. Two CI steps
+# are deliberately not mirrored: the Format check (this Windows tree's CRLF-only files would
+# always flag; CI checks out LF) and the store-gated tests, which skip unless FORECAST_TEST_PG
+# is exported — point it at the sandbox Postgres to run them. `-race` stays in CI (this dev box
+# has no gcc). See docs/COMPANY-BUILD.md.
 gate-check:
 	@go env GOPROXY GOSUMDB GOPRIVATE HTTP_PROXY HTTPS_PROXY NO_PROXY
 	rm -rf "$(GATE_MODCACHE)"

@@ -122,3 +122,29 @@ describe('toTrainingFrames', () => {
     ).toEqual(want);
   });
 });
+
+describe('toTrainingFrames invariants', () => {
+  it('rebuilds a frame that carries string times and leaves the caller’s copy untouched', () => {
+    const input = toDataFrame({
+      refId: 'A',
+      fields: [
+        { name: 'time', type: FieldType.time, values: ['2026-10-07 18:00:00'] },
+        { name: 'avg', type: FieldType.number, values: [1] },
+      ],
+    });
+    const frames = toTrainingFrames([input]);
+
+    // Rebuilt, not written into: `getProcessedDataFrames` hands back the caller's own object for an
+    // already-a-frame reply, so the conversion must build the new frame beside it.
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).not.toBe(input);
+    expect(frames[0].fields[0].values).toEqual([new Date(2026, 9, 7, 18, 0, 0).getTime()]);
+    // The shape the mutation hazard hides in: the input's time values are still the strings it was built with.
+    expect(input.fields[0].values).toEqual(['2026-10-07 18:00:00']);
+  });
+
+  it('answers a reply with a null item, and a non-array reply, with no frames', () => {
+    expect(toTrainingFrames([null as unknown as DataQueryResponseData])).toEqual([]);
+    expect(toTrainingFrames(undefined as unknown as DataQueryResponseData[])).toEqual([]);
+  });
+});

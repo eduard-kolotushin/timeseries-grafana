@@ -26,6 +26,7 @@ run against a fresh Grafana 13.1.0 while writing it.
 | `gpx_forecast_migrate_linux_amd64` | schema migration CLI (section 8) |
 | `gpx_forecast_compute_linux_amd64` | optional standalone fit/tick service (section 10) |
 | `forecast.ini.template` | the `grafana.ini` snippet used in section 6c |
+| `docs/` | the guide you are reading and the other docs, copied by `make docs` |
 
 The Go binaries are built for **linux/amd64**. Copy the tree whole: Grafana loads the panel and the
 datasource from those subdirectories, so flattening the directory registers only the app.
@@ -327,7 +328,7 @@ store and point the app at it. The service reads **process env only** (no ini, n
 | `FORECAST_STORE_*` | the same snapshot store as the plugin |
 | `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` | for the retrain ticker it owns |
 | `FORECAST_RETRAIN_*`, `FORECAST_SNAPSHOT_TTL` | the ticker and retention, unchanged |
-| `FORECAST_MAX_INFLIGHT` | concurrent fits in this service, default `32` |
+| `FORECAST_MAX_INFLIGHT` | concurrent fits in this service, default `4` (the forwarding plugin process's own slots default to `32`) |
 
 Then set `computeUrl: http://<service>:8080` and `computeToken` (jsonData / `secureJsonData`) on the app,
 or `compute_url` / `compute_token` in its ini section. The app then forwards `POST /forecast` verbatim,
@@ -357,7 +358,7 @@ curl -s localhost:3000/api/datasources/uid/forecast/health
 
 Then in the UI:
 
-1. **Administration → Plugins → Timeseries Forecast** shows the app enabled, with the panel and the
+1. **Administration → Plugins and data → Timeseries Forecast** shows the app enabled, with the panel and the
    datasource listed as included plugins.
 2. Add a **Forecast overlay** panel to a dashboard, pick a metric query and a training query: the panel
    draws history plus forecast and, with `showInterval`, the band. Its status reads `Using saved model`

@@ -78,6 +78,14 @@ describe('trainRejectReason', () => {
       [prometheus({ instant: true, range: false }), druid],
       undefined,
     ],
+    [
+      // A ref the rewrite cannot type is classified by the registry in the fit path: a rawSql
+      // table target behind a legacy string ref is Abyss, not Postgres, so the pre-check stays
+      // silent instead of refusing a fit the fit path performs.
+      'a rawSql table target behind a string ref',
+      [{ refId: 'A', datasource: 'abyss-uid', rawSql: 'SELECT …', format: 'table' }],
+      undefined,
+    ],
   ];
 
   it.each(cases)('%s → %s', (_name, targets, want) => {
@@ -243,6 +251,28 @@ describe('queryTrainingFrames', () => {
       new Date(2026, 9, 7, 19, 0, 0).getTime(),
     ]);
     expect(series[0].values).toEqual([13319.2099, 1.5]);
+  });
+
+  it('does not spend the single-source claim on a group whose reply converts to nothing', async () => {
+    // A junk reply is non-empty but converts to no frames. Before the conversion moved ahead of
+    // the `source` claim this group claimed the one trainSource, the real group after it was
+    // dropped as a second datasource, and the load ended without frames at all.
+    const junk = datasource([{ nonsense: true } as unknown as DataFrame]);
+    const real = datasource([frame('up')]);
+    mockGet.mockResolvedValueOnce(junk.ds).mockResolvedValueOnce(real.ds);
+
+    const result = await queryTrainingFrames(
+      request([
+        { uid: 'junk', type: 'prometheus' },
+        { uid: 'prom', type: 'prometheus' },
+      ]),
+      { fromMs, toMs, intervalMs: 60_000 }
+    );
+
+    expect(result.frames).toHaveLength(1);
+    expect(result.source?.datasourceUid).toBe('prom');
+    expect(result.source?.queries).toBe(real.seen[0]);
+    expect(result.droppedReason).toBeUndefined();
   });
 
   it('omits the source when no group returned frames', async () => {
