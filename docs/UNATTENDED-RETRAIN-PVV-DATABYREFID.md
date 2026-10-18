@@ -37,11 +37,31 @@ org/panel params, mints a **per-org Grafana service-account token**, calls Grafa
 `/api/ds/query` with it, and returns that one `refId`'s `DataResponse`. So the plugin
 provides **no datasource credential at all** — it only needs its client-cert CN allowlisted.
 
-**The change:** add a DataByRefId fetch mode to the poster; capture `refId` + `queryHash`
-per series; keep each request's window under PVV's max range (default **24h**) by chunking;
-parse the returned frames with the SDK; leave the existing `/api/ds/query` mode for the other
-datasources. Everything from `seriesFromFrames` down (`pickSeries`, `frameFields`, fit,
-retention, leases) is unchanged.
+**The change:** add a DataByRefId fetch mode to the poster; capture `refId` per series; keep
+each request's window under PVV's max range (default **24h**) by chunking; parse the returned
+frames with the SDK; leave the existing `/api/ds/query` mode available when no PVV client
+certificate is configured. Everything from `seriesFromFrames` down (`pickSeries`,
+`frameFields`, fit, retention, leases) is unchanged.
+
+## Implementation decisions
+
+These supersede the earlier inference where they differ:
+
+- **The transport is selected by configuration, not by datasource type.** PVV mode is on when
+  `FORECAST_PVV_CLIENT_CERT` and `FORECAST_PVV_CLIENT_KEY` are configured; otherwise the
+  existing Grafana `/api/ds/query` mode runs unchanged. `pkg/` contains no datasource type or
+  field name.
+- **PVV mode does not call `/orgs` or `/api/org`.** It claims every due `scope='panel'` row
+  regardless of org and sends that row's `org_id` with the request. There is no per-row
+  `/api/ds/query` fallback: a PVV failure is the row's failure.
+- **Windows chunk at `24h`**, not `4h`; `FORECAST_RETRAIN_WINDOW_CHUNK` can lower the slice but
+  a value above the 24h server cap falls back to 24h.
+- **`queryHash` is not sent in v1.** The live panel query is retrained as-is; drift pinning is
+  deferred.
+- **`refId` is captured per series at fit time.** A row written by an older frontend derives it
+  only when exactly one query is stored; otherwise the row asks for a panel reload.
+- The endpoint and its response are PVV's, not Grafana's own `/api/ds/query`: the request is
+  `POST {FORECAST_PVV_URL}/gse/data/v1/DataByRefId` with mTLS and no bearer token.
 
 ## What `DataByRefId` actually does (server flow)
 
@@ -154,46 +174,45 @@ keeps each slice under the 24h server cap.
 
 | `aiom` (`pvv.py`) | this repo |
 |---|---|
-| `_execute_query` → `{PVV}/gse/data/v1/DataByRefId` | new `fetchFrames` strategy (alongside `/api/ds/query`) |
+| `_execute_query` → `{PVV}/gse/data/v1/DataByRefId` | new `fetchSeries` strategy (alongside `/api/ds/query`) |
 | builds `{org_id,dashboardUID,panelId,refId,from,to}` (int ms) | same builder, fed from `TrainSource` + resolved window |
 | auth = mTLS client cert | **client cert with allowlisted CN** (not a bearer token) |
 | parses `frames[].data.values` | unmarshal the bare `DataResponse` frames via the SDK `data.Frame` |
-| metric key `org_id+dashboard_uid+panel_id+refId+rawSql` | `TrainSource` must gain `refId` (+ `queryHash`) |
-| chunks long windows (4h) | chunk to ≤ PVV `max_time_range_sec` (default 24h) — **mandatory** |
+| metric key `org_id+dashboard_uid+panel_id+refId+rawSql` | `TrainSource` must gain `refId` (`queryHash` deferred) |
+| chunks long windows (4h) | chunk to ≤ PVV `max_time_range_sec` (default 24h), sequentially |
 
 ## Concrete requirements
 
 1. **Add a DataByRefId fetch strategy** on the poster (`pkg/plugin/retrain.go`), posting the
-   exact `models.Panel` body to `{PVV_URL}/gse/data/v1/DataByRefId` over mTLS. Select per
-   datasource type the way the frontend `rewriteTrainTargets` does — Abyss → DataByRefId,
-   Prometheus/Postgres keep `/api/ds/query`. This stays **datasource-agnostic in `pkg/`**: the
-   call is to Grafana's own API, and the Abyss-specific work (param injection, credential,
+   exact `models.Panel` body to `{PVV_URL}/gse/data/v1/DataByRefId` over mTLS. The mode is
+   selected by configuration — PVV client certificate/key present → DataByRefId, absent →
+   `/api/ds/query` — not by datasource type. This stays **datasource-agnostic in `pkg/`**: the
+   call is to PVV, a b2b service, and the Abyss-specific work (param injection, credential,
    SQL/macro expansion) is done inside PVV/Abyss.
-2. **Capture `refId` (+ `queryHash`) per series** into `TrainSource` and the fit's series
-   identity (`forecast.go:28`). `org_id` is the row's org; `dashboardUID`/`panelId` already
-   ship. Optionally call `/gse/data/v1/RefIdList` at fit time to record the hash for pinning.
+2. **Capture `refId` per series** into `TrainSource` and the fit's series identity
+   (`forecast.go:28`). `org_id` is the row's org; `dashboardUID`/`panelId` already ship. A row
+   written by an older frontend derives `refId` from its single stored query.
 3. **A `DataResponse` parser**: unmarshal the `201` body and feed its `frames` to the SDK
    `data.Frame` unmarshaller so `seriesFromFrames`/`pickSeries`/`frameFields`
    (`retrain.go:481/526/742`) work unchanged. Treat a non-empty `DataResponse.error` as a
    fetch failure.
 4. **Chunk every window to ≤ `max_time_range_sec` (default 24h).** Add
-   `FORECAST_RETRAIN_WINDOW_CHUNK` (default `4h`) and issue one DataByRefId call per slice,
-   concatenating frames, applying the existing reply bound per slice. Without this, a
-   7d/14d/56d lookback is rejected `400 panel time range exceeded`.
-5. **Send `queryHash`** when known so a changed panel query fails loudly (`400`) instead of
-   silently retraining on a different query.
+   `FORECAST_RETRAIN_WINDOW_CHUNK` (default and maximum `24h`) and issue one DataByRefId call
+   per slice, merging the chunk series and applying the existing reply and train-point bounds.
+   Without this, a 7d/14d/56d lookback is rejected `400 panel time range exceeded`.
+5. **Do not send `queryHash` in v1.** Deferred; the live panel query is fetched as-is.
 6. **One call per `refId`/series.** DataByRefId returns exactly one `refId`'s result; the
    overlay already fits one series per request, so map each fitted series to its query's
    `refId`.
 7. **Config, same precedence as the store** (v7/v16): `FORECAST_*` → `GF_PLUGIN_*` → grafana.ini
-   → jsonData for the plugin; **process env only** for the compute service. Reuse
-   `FORECAST_GRAFANA_URL` as the PVV base URL; add `FORECAST_RETRAIN_FETCH = dsquery (default) |
-   databyrefid`, `FORECAST_RETRAIN_WINDOW_CHUNK`, and mTLS material
-   `FORECAST_PVV_CLIENT_CERT` / `FORECAST_PVV_CLIENT_KEY` / `FORECAST_PVV_CA_CERT`
-   (+ `FORECAST_PVV_TLS_SKIP_VERIFY`). **No bearer token / API key is sent to this endpoint** —
-   drop the earlier idea of reusing `FORECAST_GRAFANA_TOKEN` here. Cert/secret material is
-   deployment config, never rendered on the plugin's config pages. The CN itself must be added
-   to PVV's `AllowedCNs` (a PVV-side deployment step).
+   → jsonData for the plugin; **process env only** for the compute service. Add
+   `FORECAST_PVV_URL` (defaulting to `FORECAST_GRAFANA_URL`), `FORECAST_RETRAIN_WINDOW_CHUNK`,
+   and mTLS material `FORECAST_PVV_CLIENT_CERT` / `FORECAST_PVV_CLIENT_KEY` /
+   `FORECAST_PVV_CA_CERT` (+ `FORECAST_PVV_TLS_SKIP_VERIFY`). **No bearer token / API key is
+   sent to this endpoint** — drop the earlier idea of reusing `FORECAST_GRAFANA_TOKEN` here.
+   There is no `FORECAST_RETRAIN_FETCH` switch: the cert pair is the switch. Cert/secret
+   material is deployment config, never rendered on the plugin's config pages. The CN itself
+   must be added to PVV's `AllowedCNs` (a PVV-side deployment step).
 8. **Tolerate transient failures** the existing way (v15 lease + `attempts` backoff): Abyss /
    the `/gse/data` API can be briefly down; a failed fetch burns no fit and the row retries —
    do not lose the row (cf. aiom's `PVM-185894` "keep pushing baselines while the Abyss API is
@@ -203,8 +222,8 @@ keeps each slice under the 24h server cap.
 
 - **The panel and its `refId` must exist at retrain time** (the query is read from the live
   dashboard, `dashboard.go:48`); a deleted panel or removed refId → `404`.
-- **A panel query edit changes what a retrain fetches.** Pin with `queryHash`, or accept the
-  drift. DataByRefId does **not** take SQL from the caller.
+- **A panel query edit changes what a retrain fetches.** v1 does not send `queryHash`, so it
+  accepts that drift. DataByRefId does **not** take SQL from the caller.
 - **Window width ≤ 24h (default cap)** — chunk. (`Panel.Validate`, `metro.go:89`.)
 - **`panelId` must be ≥ 1** — `0` is rejected as missing. (Overlay panels are normally ≥ 1.)
 - **Exactly one result, `refId` must match** the request (`api.go:114-123`).
@@ -220,7 +239,7 @@ keeps each slice under the 24h server cap.
   does not hold in the PVV ST deployment (Abyss forwards the panel **user's** credential). This
   brief supersedes it: fetch via PVV `/gse/data/v1/DataByRefId`, which **supplies the
   datasource credential itself** (per-org token + Abyss-param injection). The plugin only needs
-  its **client-cert CN allowlisted**, the `refId`/`queryHash` identity, and window chunking.
+  its **client-cert CN allowlisted**, the `refId` identity, and window chunking.
 - There is **no user token for the plugin to provide** — that earlier framing was wrong. PVV
   resolves it (`tokenService.GetToken(org)`).
 - The `aiom` client and its `PVM-196761` throttle corroborate chunking/gentleness, and confirm
@@ -229,17 +248,17 @@ keeps each slice under the 24h server cap.
 ## Verification
 
 1. **Unit (Go, table-driven):** the `models.Panel` body builder (exact keys, integer ms, all
-   required fields present); the bare-`DataResponse` → `data.Frames` parse (columnar
-   `schema.fields`/`data.values`; a null/NaN value dropped; `error` treated as failure); chunk
-   split of a 7d window at 4h; fetch-mode selection by datasource type; `queryHash` sent when
-   set.
+   required fields present, no bearer token or `queryHash`); the bare-`DataResponse` →
+   `data.Frames` parse (columnar `schema.fields`/`data.values`; a null/NaN value dropped;
+   `error` treated as failure); chunk split of a 7d window at 24h; mode selection by client
+   certificate presence; no `/api/ds/query` fallback from PVV mode.
 2. **Live (ST):** provision the plugin's client cert on PVV's `AllowedCNs`, set
-   `FORECAST_RETRAIN_FETCH=databyrefid` + PVV URL + cert paths. Train an Abyss overlay once
-   (creates the `panel` row with `refId`/`queryHash`), force a retrain tick, and confirm the
-   row's `last_status` is `ok`. Map failures: `401`→cert/CN, `403`→CN-not-listed / block,
-   `404`→panel/refId missing, `400`→field/range/hash, `DataResponse.error`→datasource.
-3. **Regression:** Prometheus/Postgres overlays keep `/api/ds/query` when the mode is left at
-   the default.
+   `FORECAST_PVV_CLIENT_CERT` / `FORECAST_PVV_CLIENT_KEY` and the PVV URL. Train an overlay
+   once (creates the `panel` row with `refId`), force a retrain tick, and confirm the row's
+   `last_status` is `ok`. Map failures: `401`→cert/CN, `403`→CN-not-listed / block,
+   `404`→panel/refId missing, `400`→field/range, `DataResponse.error`→datasource.
+3. **Regression:** with no PVV client certificate configured, the existing `/api/org` +
+   `/api/ds/query` behavior is unchanged.
 
 ## Appendix — code references
 
@@ -268,10 +287,10 @@ keeps each slice under the 24h server cap.
   mTLS, token headers commented) 305-357; `_parse_pvv_response` 239; `split_time_window` 436.
 
 This repo (`timeseries-grafana`):
-- `pkg/plugin/retrain.go` — `fetchFrames` 401 (add the strategy); request 416-435;
+- `pkg/plugin/retrain.go` — `fetchSeries` (add the strategy); `fetchFrames` 401; request 416-435;
   `dsQueryResponse` 393-472; `seriesFromFrames`/`pickSeries`/`frameFields` 481/526/742; window
   resolution 406-414.
-- `pkg/plugin/forecast.go` — `TrainSource` 28 / `PanelProvenance` 83 (add `refId` + `queryHash`).
+- `pkg/plugin/forecast.go` — `TrainSource` 28 / `PanelProvenance` 83 (add `refId`; `queryHash` deferred).
 - `pkg/plugin/limits.go` / `resources.go` — reply/train-source bounds (apply per chunk).
 - See [ABYSS_TRAINING_BUG_REPORT.md](ABYSS_TRAINING_BUG_REPORT.md) for the frontend
   frame-shape fix and Abyss datasource internals.

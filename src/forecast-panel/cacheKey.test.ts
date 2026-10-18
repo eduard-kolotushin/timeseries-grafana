@@ -259,6 +259,7 @@ describe('cacheKey', () => {
         from: visFrom,
         to: visTo,
         seriesName: 'value train',
+        refId: 'A',
         panelId: 7,
         panelTitle: 'CPU',
         dashboardUid: 'dash-1',

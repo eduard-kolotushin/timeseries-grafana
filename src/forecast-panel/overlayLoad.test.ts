@@ -8,6 +8,7 @@ const visible = [{ name: 'up', fieldName: 'up', times: [1, 2], values: [1, 2] }]
 
 function frame(): MutableDataFrame {
   const f = new MutableDataFrame();
+  f.refId = 'A';
   f.addField({ name: 'Time', type: FieldType.time, values: [1, 2] });
   f.addField({ name: 'up', type: FieldType.number, values: [10, 20] });
   return f;
@@ -222,6 +223,7 @@ describe('loadOverlayForecasts', () => {
       queries: [{ refId: 'A', datasource: { uid: 'druid' }, intervalMs: 60_000, maxDataPoints: 20_000 }],
       from: 1,
       to: 2,
+      refId: 'A',
     };
     const queryTrain = jest.fn(async () => ({ frames: [frame()], source }));
     const post = jest
@@ -244,6 +246,37 @@ describe('loadOverlayForecasts', () => {
     expect(post).toHaveBeenCalledTimes(2);
     expect(post.mock.calls[1][0].trainSource).toEqual({ ...source, seriesName: 'up' });
     expect(post.mock.calls[1][0].times).toEqual([1, 2]);
+  });
+
+  it.each([1, 2])('does not fabricate a refId when the training frame carries none (%i query)', async (queryCount) => {
+    const bare = new MutableDataFrame();
+    bare.addField({ name: 'Time', type: FieldType.time, values: [1, 2] });
+    bare.addField({ name: 'up', type: FieldType.number, values: [10, 20] });
+    const source = {
+      datasourceUid: 'druid',
+      queries: Array.from({ length: queryCount }, (_, i) => ({ refId: String.fromCharCode(65 + i) })),
+      from: 1,
+      to: 2,
+    };
+    const queryTrain = jest.fn(async () => ({ frames: [bare], source }));
+    const post = jest
+      .fn<Promise<ForecastResponse>, [Record<string, unknown>]>()
+      .mockResolvedValueOnce({ needTrain: true })
+      .mockResolvedValueOnce({ times: [3], values: [30] });
+    await loadOverlayForecasts({
+      visible,
+      fromMs: 3,
+      toMs: 4,
+      level: 0,
+      retrain: false,
+      fitBody: { model: 'naive' },
+      cacheKeyFor: async () => 'aa'.repeat(32),
+      queryTrain,
+      post,
+    });
+    const trainSource = post.mock.calls[1][0].trainSource as Record<string, unknown>;
+    expect(trainSource).toEqual({ ...source, seriesName: 'up' });
+    expect('refId' in trainSource).toBe(false);
   });
 
   it('identifies the panel on the probe as well as the fit', async () => {

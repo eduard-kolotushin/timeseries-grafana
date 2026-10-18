@@ -16,6 +16,7 @@ describe('extractSeries', () => {
         fieldName: 'A-series',
         times: [0, 1000, 2000],
         values: [1, 2, 3],
+        refId: 'A',
       },
     ]);
   });
@@ -28,6 +29,7 @@ describe('extractSeries', () => {
       ],
     });
     expect(extractSeries(frame)[0]?.values).toEqual([1, null]);
+    expect(extractSeries(frame)[0]?.refId).toBeUndefined();
   });
 
   it('returns no series without a time field', () => {

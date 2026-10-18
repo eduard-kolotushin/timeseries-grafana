@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+	"github.com/jackc/pgx/v5"
 	"github.com/robfig/cron/v3"
 )
 
@@ -56,7 +57,8 @@ type ScheduleRow struct {
 
 // ScheduleStore is the forecast.retrain table as the plugin uses it. Claim and
 // Finish are scope-agnostic because the worker shares the table, but the plugin's
-// own claim is restricted to scope='panel' rows of one org (see panelClaimSQL).
+// own claim is restricted to scope='panel' rows of the orgs named by Claim (see
+// panelClaimSQL/panelClaimAllSQL).
 //
 // Finish is owner-guarded: only the owner that took the claim may release it, so a
 // retrain that outlives its lease can neither clear a newer owner's claim nor
@@ -67,7 +69,10 @@ type ScheduleStore interface {
 	Upsert(ctx context.Context, orgID int64, row ScheduleRow) error
 	Delete(ctx context.Context, orgID int64, scope, key string) error
 	Due(ctx context.Context, orgID int64, key string, now time.Time) (bool, error)
-	Claim(ctx context.Context, orgID int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error)
+	// Claim takes the orgs whose panel rows may be claimed. A nil/empty slice
+	// means every org (PVV mode); a non-empty slice restricts the claim to those
+	// orgs (Grafana mode, one org).
+	Claim(ctx context.Context, orgs []int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error)
 	Finish(ctx context.Context, owner string, orgID int64, scope, key string, next time.Time, status string, attempts int) error
 	// Extend pushes a held claim's lease out to now+lease and reports whether the
 	// caller still owns it. A false answer is not an error: a retrain that
@@ -146,15 +151,40 @@ func provenanceJSON(prov PanelProvenance) ([]byte, error) {
 // WHERE clauses are not evaluated left to right, so a scalar `"queries":null` can
 // reach jsonb_array_length and abort the whole claim with SQLSTATE 22023.
 // A superseded row is the panel's old cache key: it is kept for its history but
-// must never be refit. The org restriction is not cosmetic — Grafana resolves a
-// datasourceUid inside the requesting org, and the scheduler holds one credential,
-// so a row of another org would be fetched as the wrong org's series (or fail) and
-// stored as this org's snapshot. FOR UPDATE SKIP LOCKED makes concurrent Grafana
-// replicas safe without a coordinator.
+// must never be refit. In Grafana mode the org restriction is not cosmetic —
+// Grafana resolves a datasourceUid inside the requesting org, and the scheduler
+// holds one credential, so a row of another org would be fetched as the wrong
+// org's series (or fail) and stored as this org's snapshot. PVV mode instead
+// claims every org (panelClaimAllSQL) and sends each row's own org_id, so the
+// restriction does not apply there. FOR UPDATE SKIP LOCKED makes concurrent
+// Grafana replicas safe without a coordinator.
 const panelClaimSQL = `
 WITH due AS (
   SELECT scope, org_id, key FROM forecast.retrain
-  WHERE scope = 'panel' AND org_id = $4 AND enabled AND spec IS NOT NULL
+  WHERE scope = 'panel' AND org_id = ANY($4::bigint[]) AND enabled AND spec IS NOT NULL
+    AND jsonb_typeof(spec->'queries') = 'array'
+    AND spec->'queries' <> '[]'::jsonb
+    AND superseded_at IS NULL
+    AND next_run_at IS NOT NULL AND next_run_at <= now()
+    AND (claimed_until IS NULL OR claimed_until < now())
+  ORDER BY next_run_at
+  LIMIT $1
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE forecast.retrain r
+SET claimed_by = $2, claimed_until = now() + $3::interval, updated_at = now()
+FROM due
+WHERE r.scope = due.scope AND r.org_id = due.org_id AND r.key = due.key
+RETURNING r.scope, r.key, r.org_id, r.cron, r.timezone, r.spec, r.attempts
+`
+
+// panelClaimAllSQL is panelClaimSQL without the org predicate: PVV mode fetches
+// each claimed row with its own org_id, so every org's due panel row is eligible
+// exactly once across the fleet.
+const panelClaimAllSQL = `
+WITH due AS (
+  SELECT scope, org_id, key FROM forecast.retrain
+  WHERE scope = 'panel' AND enabled AND spec IS NOT NULL
     AND jsonb_typeof(spec->'queries') = 'array'
     AND spec->'queries' <> '[]'::jsonb
     AND superseded_at IS NULL
@@ -383,11 +413,19 @@ SELECT EXISTS (
 	return due, err
 }
 
-func (s *postgresStore) Claim(ctx context.Context, orgID int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error) {
+func (s *postgresStore) Claim(ctx context.Context, orgs []int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error) {
 	if err := s.ensureSchedules(ctx); err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, panelClaimSQL, limit, owner, intervalSeconds(lease), orgID)
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if len(orgs) == 0 {
+		rows, err = s.pool.Query(ctx, panelClaimAllSQL, limit, owner, intervalSeconds(lease))
+	} else {
+		rows, err = s.pool.Query(ctx, panelClaimSQL, limit, owner, intervalSeconds(lease), orgs)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +517,7 @@ func (s errScheduleStore) Due(context.Context, int64, string, time.Time) (bool, 
 	return false, s.err
 }
 
-func (s errScheduleStore) Claim(context.Context, int64, string, time.Duration, int) ([]ScheduleRow, error) {
+func (s errScheduleStore) Claim(context.Context, []int64, string, time.Duration, int) ([]ScheduleRow, error) {
 	return nil, s.err
 }
 

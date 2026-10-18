@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Unattended retraining can fetch training frames through PVV's `/gse/data/v1/DataByRefId` when
+  Abyss needs a per-org credential a headless tick does not have.** Setting either
+  `FORECAST_PVV_CLIENT_CERT` or `FORECAST_PVV_CLIENT_KEY` selects mTLS PVV mode (both are required
+  to make requests; `FORECAST_PVV_CA_CERT` is optional and `FORECAST_PVV_URL` defaults to the
+  Grafana URL). It claims every due
+  `scope='panel'` row across orgs, sends each row's `org_id`, dashboard UID, panel ID and stored
+  `refId`, and chunks windows at `FORECAST_RETRAIN_WINDOW_CHUNK` (default and maximum `24h`); a PVV
+  failure is the row's failure, with no hidden `/api/ds/query` fallback. Without a client certificate the
+  existing `/api/org` + single-org `/api/ds/query` path is unchanged. Every fit now records the
+  per-series `refId` in `trainSource`, outside the `cacheKey`.
+
 - **The store settings a `grafana.ini` snippet configures now reach the plugin on Grafana 13.** Grafana
   exports a plugin process's own `[plugin.<id>]` section id-less (`GF_PLUGIN_STORE_HOST`, …), but the
   lookup only read the id-qualified spellings, so an installation configured purely through the mergeable

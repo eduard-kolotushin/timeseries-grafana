@@ -16,6 +16,8 @@ export type SeriesPoints = {
   config?: FieldConfig;
   /** The source frame's meta, likewise carried over by a rebuild. */
   meta?: QueryResultMeta;
+  /** The source frame's Grafana refId, when it carries one; retrain identity, not a cacheKey input. */
+  refId?: string;
 };
 
 /** Every numeric field on a timeseries frame. Skips logs/trace frames. */
@@ -65,6 +67,7 @@ export function extractSeries(frame: DataFrame, allFrames?: DataFrame[]): Series
       labels,
       config,
       meta: frame.meta,
+      refId: typeof frame.refId === 'string' && frame.refId !== '' ? frame.refId : undefined,
     });
   }
   return out;

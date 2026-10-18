@@ -223,15 +223,28 @@ func specHasQueries(raw []byte) bool {
 	return hasQueries(spec.Queries)
 }
 
-// Claim mirrors panelClaimSQL: panel rows of this org only, enabled, with a
-// non-empty query array, not superseded, due, and not leased by anyone else.
-func (m *memSchedules) Claim(_ context.Context, orgID int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error) {
+func containsOrg(orgs []int64, orgID int64) bool {
+	for _, org := range orgs {
+		if org == orgID {
+			return true
+		}
+	}
+	return false
+}
+
+// Claim mirrors panelClaimSQL/panelClaimAllSQL: a nil/empty org set means every
+// org, otherwise only the named orgs; panel rows only, enabled, with a non-empty
+// query array, not superseded, due, and not leased by anyone else.
+func (m *memSchedules) Claim(_ context.Context, orgs []int64, owner string, lease time.Duration, limit int) ([]ScheduleRow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
 	due := make([]ScheduleRow, 0, limit)
 	for _, row := range m.rows {
-		if row.OrgID != orgID || row.Scope != scopePanel || !row.Enabled || !specHasQueries(row.Spec) {
+		if len(orgs) > 0 && !containsOrg(orgs, row.OrgID) {
+			continue
+		}
+		if row.Scope != scopePanel || !row.Enabled || !specHasQueries(row.Spec) {
 			continue
 		}
 		if !row.SupersededAt.IsZero() {

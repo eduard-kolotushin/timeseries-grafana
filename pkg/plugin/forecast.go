@@ -31,6 +31,10 @@ type TrainSource struct {
 	From          int64           `json:"from"`
 	To            int64           `json:"to"`
 	SeriesName    string          `json:"seriesName,omitempty"`
+	// RefID is the training query's Grafana refId. It is generic query identity,
+	// not a datasource field: PVV's DataByRefId resolves the panel's query by it,
+	// and it stays out of the cacheKey fingerprint.
+	RefID string `json:"refId,omitempty"`
 	// Relative marks From/To as "the browser resolved a lookback against the
 	// panel's own now": a cron retrain re-resolves [now - LookbackMs, now] at
 	// claim time, so the window moves with the clock instead of refetching one

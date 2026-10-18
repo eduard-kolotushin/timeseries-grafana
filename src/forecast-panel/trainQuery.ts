@@ -35,6 +35,11 @@ export type TrainQuerySource = {
   relative?: boolean;
   lookbackMs?: number;
   /**
+   * The matched training frame's Grafana refId. PVV's DataByRefId resolves the
+   * panel query by it; it is retrain identity and stays out of cacheKey.
+   */
+  refId?: string;
+  /**
    * Which panel trained this row and on what query. Identification only, for the
    * Retrain schedules table: none of it enters the cacheKey, so adding it cannot
    * orphan a stored snapshot.

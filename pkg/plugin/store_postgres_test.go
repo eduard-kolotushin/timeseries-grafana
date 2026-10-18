@@ -421,7 +421,7 @@ UPDATE forecast.retrain SET superseded_at = now() WHERE scope = 'panel' AND org_
 	if due {
 		t.Fatal("a superseded row was answered as due: it would be refit and un-retire itself")
 	}
-	claimed, err := s.Claim(ctx, orgID, "due-owner", time.Minute, 100)
+	claimed, err := s.Claim(ctx, []int64{orgID}, "due-owner", time.Minute, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +554,7 @@ func TestPostgresScheduleOrgKey(t *testing.T) {
 		if mine := panelRows(mustList(t, ctx, s, org)); len(mine) != 1 || mine[0].OrgID != org {
 			t.Fatalf("org %d lists %+v", org, mine)
 		}
-		claimed, err := s.Claim(ctx, org, "org-key-owner", time.Minute, 100)
+		claimed, err := s.Claim(ctx, []int64{org}, "org-key-owner", time.Minute, 100)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -743,7 +743,7 @@ func TestPostgresSchedule(t *testing.T) {
 		t.Fatalf("due=%v err=%v", due, err)
 	}
 
-	claimed, err := s.Claim(ctx, orgID, "test-owner", time.Minute, 100)
+	claimed, err := s.Claim(ctx, []int64{orgID}, "test-owner", time.Minute, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +757,7 @@ func TestPostgresSchedule(t *testing.T) {
 		t.Fatalf("claim did not return our row: %+v", claimed)
 	}
 	// The lease holds the row out of the next claim.
-	again, err := s.Claim(ctx, orgID, "test-owner-2", time.Minute, 100)
+	again, err := s.Claim(ctx, []int64{orgID}, "test-owner-2", time.Minute, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -785,7 +785,7 @@ func TestPostgresSchedule(t *testing.T) {
 			t.Fatalf("a stale owner moved the row: %+v", mine[0])
 		}
 	}
-	if claimed, err := s.Claim(ctx, orgID, "test-owner-4", time.Minute, 100); err != nil {
+	if claimed, err := s.Claim(ctx, []int64{orgID}, "test-owner-4", time.Minute, 100); err != nil {
 		t.Fatal(err)
 	} else {
 		for _, row := range claimed {
@@ -802,7 +802,7 @@ func TestPostgresSchedule(t *testing.T) {
 		t.Fatalf("due after finish=%v err=%v", due, err)
 	}
 	// Finish must have released the claim outright, not merely parked it.
-	if claimed, err := s.Claim(ctx, orgID, "test-owner-3", time.Minute, 100); err != nil {
+	if claimed, err := s.Claim(ctx, []int64{orgID}, "test-owner-3", time.Minute, 100); err != nil {
 		t.Fatal(err)
 	} else {
 		for _, row := range claimed {
@@ -949,7 +949,7 @@ func TestPostgresClaimRequiresFetchableQueries(t *testing.T) {
 		}
 	})
 
-	claimed, err := s.Claim(ctx, orgID, "claim-test-owner", time.Minute, 1000)
+	claimed, err := s.Claim(ctx, []int64{orgID}, "claim-test-owner", time.Minute, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -964,6 +964,93 @@ func TestPostgresClaimRequiresFetchableQueries(t *testing.T) {
 	}
 	if claimedKeys[prefix+"-null"] || claimedKeys[prefix+"-empty"] {
 		t.Fatalf("an unfetchable row was claimed: %+v", claimedKeys)
+	}
+}
+
+// TestPostgresClaimAllOrgs pins the PVV claim mode: a nil org slice claims due
+// panel rows from every org, while a one-org slice stays restricted to that org.
+// Both rows carry the row's own org, which is what DataByRefId sends.
+func TestPostgresClaimAllOrgs(t *testing.T) {
+	dsn := os.Getenv("FORECAST_TEST_PG")
+	if dsn == "" {
+		t.Skip("FORECAST_TEST_PG not set")
+	}
+	ctx := context.Background()
+	s, err := openPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	prefix := "test-claim-all-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	const (
+		org1 int64 = 987656
+		org2 int64 = 987657
+	)
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
+	keys := []string{prefix + "-one", prefix + "-two"}
+	for i, org := range []int64{org1, org2} {
+		if err := s.Upsert(ctx, org, ScheduleRow{
+			Scope: scopePanel, Key: keys[i], Cron: "*/5 * * * *", Timezone: "UTC",
+			Enabled: true, Spec: json.RawMessage(`{"queries":[{"refId":"A"}],"model":"baseline"}`), NextRunAt: past,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, org := range []int64{org1, org2} {
+			for _, key := range keys {
+				_ = s.Delete(context.Background(), org, scopePanel, key)
+			}
+		}
+	})
+
+	claimed, err := s.Claim(ctx, nil, "all-orgs-owner", time.Millisecond, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	for _, row := range claimed {
+		if strings.HasPrefix(row.Key, prefix) {
+			got[row.Key] = row.OrgID
+		}
+	}
+	for i, key := range keys {
+		want := []int64{org1, org2}[i]
+		if got[key] != want {
+			t.Fatalf("all-org claim: key %s org=%d want %d (claimed=%+v)", key, got[key], want, got)
+		}
+	}
+
+	restrictedKey := prefix + "-restricted"
+	otherOrgKey := prefix + "-other-org"
+	for _, tc := range []struct {
+		org int64
+		key string
+	}{{org1, restrictedKey}, {org2, otherOrgKey}} {
+		if err := s.Upsert(ctx, tc.org, ScheduleRow{
+			Scope: scopePanel, Key: tc.key, Cron: "*/5 * * * *", Timezone: "UTC",
+			Enabled: true, Spec: json.RawMessage(`{"queries":[{"refId":"A"}],"model":"baseline"}`), NextRunAt: past,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Delete(context.Background(), tc.org, scopePanel, tc.key) })
+	}
+	restricted, err := s.Claim(ctx, []int64{org1}, "one-org-owner", time.Minute, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, leaked := false, false
+	for _, row := range restricted {
+		if row.Key == restrictedKey {
+			found = true
+		}
+		if row.Key == otherOrgKey {
+			leaked = true
+		}
+	}
+	if !found || leaked {
+		t.Fatalf("one-org claim found=%v leaked=%v rows=%+v", found, leaked, restricted)
 	}
 }
 
@@ -1047,7 +1134,7 @@ func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
 
 	// A retired row is history, not work: the claim must skip it while the current
 	// key stays claimable.
-	claimed, err := s.Claim(ctx, orgID, "supersede-owner", time.Minute, 1000)
+	claimed, err := s.Claim(ctx, []int64{orgID}, "supersede-owner", time.Minute, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1136,7 +1223,7 @@ func TestPostgresReclaimsAnExpiredLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim := func(owner string) bool {
-		rows, err := s.Claim(ctx, orgID, owner, time.Minute, 100)
+		rows, err := s.Claim(ctx, []int64{orgID}, owner, time.Minute, 100)
 		if err != nil {
 			t.Fatal(err)
 		}

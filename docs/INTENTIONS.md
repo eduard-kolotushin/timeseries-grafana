@@ -16,8 +16,8 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 | Sandbox | sibling `timeseries-grafana-sandbox` (Compose) |
 | Kubernetes | sibling `timeseries-k8s` (Helm + images) |
 | Baseline publisher | sibling `timeseries-baselines` (standalone process, not Grafana-hosted) |
-| Train adapters | frontend only (Prometheus, OpenSearch, Postgres, existing Druid/SQL rewrite). No Prom/OS/PG HTTP clients in `pkg/`. The v12 scheduler replays the frontend's query objects through Grafana's own `/api/ds/query`, which is not a datasource client |
-| Compute placement | inline in the Grafana-managed `gpx_forecast` process by default; the standalone `gpx_forecast_compute` service when `FORECAST_COMPUTE_URL` is set (v16). Either way frames come from Grafana's own `/api/ds/query` |
+| Train adapters | frontend only (Prometheus, OpenSearch, Postgres, existing Druid/SQL rewrite). No Prom/OS/PG HTTP clients in `pkg/`. The v12 scheduler replays the frontend's query objects through Grafana's own `/api/ds/query`, or through PVV's `/gse/data/v1/DataByRefId` in v18 (a b2b retrain transport, not a datasource client) |
+| Compute placement | inline in the Grafana-managed `gpx_forecast` process by default; the standalone `gpx_forecast_compute` service when `FORECAST_COMPUTE_URL` is set (v16). Either way frames come from Grafana's own `/api/ds/query`, or PVV's `/gse/data/v1/DataByRefId` when the v18 PVV transport is configured |
 
 ## v1 must-have
 
@@ -170,7 +170,7 @@ Fitting capacity scales on its own. One deployment variable moves the fit and th
 
 - **Compute mode**: `FORECAST_COMPUTE_URL` (env `FORECAST_*` → `GF_PLUGIN_*` → ini `compute_url` → jsonData `computeUrl`) selects where fitting runs. Unset — the default — keeps every fit and the retrain ticker in the Grafana-managed `gpx_forecast` process, so an existing installation is unchanged. Set, that process forwards `POST /forecast` verbatim to the standalone compute service and runs **no** ticker, so one implementation of the dispatch semantics (`due`, `needTrain`, provenance merges, the store writes) serves both modes and the panel's resource URL, body and answer shape are untouched
 - **Compute service**: `cmd/compute` → `gpx_forecast_compute` (`make compute`), the same `pkg/plugin` handlers over plain HTTP, with the Grafana SDK's request identity replaced by two things the trusted plugin sends: `Authorization: Bearer FORECAST_COMPUTE_TOKEN` (constant-time compared) and `X-Forecast-Org`, which the plugin takes from the org Grafana authenticated and the service injects as the SDK plugin context, so a browser user cannot name another org and the store keys stay org-scoped exactly as inline. It reads its configuration from the process env only (like `gpx_forecast_migrate`), refuses to start without the token, **ignores** `FORECAST_COMPUTE_URL` (its mode is fixed at "no forwarding", so a shared env block cannot make one compute service forward to another), and mounts only `/forecast`, `/ping` and an unauthenticated, coarse `/healthz`. Replicas share one Postgres, so the v12 claim queue makes N tickers safe: each due row is claimed once, and the v15 lease/extension/owner-guarded finish keep it that way
-- **Training data still comes from Grafana's own `/api/ds/query`** (`FORECAST_GRAFANA_URL` / `FORECAST_GRAFANA_TOKEN`, which a split deployment must point at Grafana's service rather than the plugin's default loopback), so no datasource client enters `pkg/` and a templated or datasource-specific query stays opaque
+- **Training data comes from Grafana's own `/api/ds/query`, or from PVV's `/gse/data/v1/DataByRefId` when the v18 PVV transport is configured** (`FORECAST_GRAFANA_URL` / `FORECAST_GRAFANA_TOKEN`, which a split deployment must point at Grafana's service rather than the plugin's default loopback), so no datasource client enters `pkg/` and a templated or datasource-specific query stays opaque
 - **Unchanged in remote mode**: the panel and its resource URL, alerting `QueryData` (a local store Restore, so alerting and the schedules page keep working from the same Postgres while the compute service is down), `GET|PUT|DELETE /schedules` and `POST /schedules/default`, and the plugin's body cap on the forwarded path (413 before any decode or upstream call). A forwarding slot is a socket rather than a fit, so the remote limiter default is wider (`defaultMaxProxyInflight`, 32) where the inline default is unchanged; `FORECAST_MAX_INFLIGHT` overrides either
 - **Failure is explicit**: an unreachable compute service is a 502 naming the failure — never a silent local fit, which would hide a split deployment whose compute half is down while the plugin quietly burns Grafana CPU. `CheckHealth` in remote mode additionally probes the compute service's `/healthz`, so the split is observable from Grafana
 - **Config**: `FORECAST_COMPUTE_URL` / `FORECAST_COMPUTE_TOKEN` (`COMPUTE_URL` / `COMPUTE_TOKEN`, ini `compute_url` / `compute_token`, jsonData `computeUrl` / `computeToken` + `secureJsonData.computeToken`), plus `FORECAST_COMPUTE_LISTEN` (default `:8080`, `--listen` overrides) and `FORECAST_COMPUTE_TOKEN` on the service. Sharing one env block with the plugin is safe: the service ignores the URL
@@ -214,14 +214,38 @@ A complete alert rule is one click away on a trained overlay panel, and it compa
   alert on series the operator did not choose)
 - Do not ship alert rules or contact points
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 non-goals
+## v18 must-have
+
+Unattended retraining fetches a panel's training frames through either Grafana's
+`/api/ds/query` or PVV's `/gse/data/v1/DataByRefId`, selected by deployment
+configuration, with no datasource type or datasource field name in `pkg/`.
+
+- Every fit stores the per-series `refId` in `trainSource`. `refId` is a generic Grafana
+  query field; it stays out of `cacheKey`.
+- PVV mode is selected by either `FORECAST_PVV_CLIENT_CERT` or `FORECAST_PVV_CLIENT_KEY`;
+  both are required to make requests. The pair uses mTLS, with optional
+  `FORECAST_PVV_CA_CERT` / `FORECAST_PVV_TLS_SKIP_VERIFY`. `FORECAST_PVV_URL` defaults to
+  `FORECAST_GRAFANA_URL`. In PVV mode the ticker does not call `/api/org` or
+  `/orgs`; it claims every due `scope='panel'` row regardless of org and
+  fetches each through DataByRefId with that row's `org_id`. A PVV failure is the row's
+  failure; there is no `/api/ds/query` fallback inside PVV mode.
+- Grafana mode (no PVV client certificate/key) is the existing behavior: `/api/org`, claim
+  that org, `/api/ds/query`.
+- Windows are split into `FORECAST_RETRAIN_WINDOW_CHUNK` slices (default and maximum
+  `24h`, sequential) for PVV's range cap; chunk series are merged, deduplicated and bounded
+  by `MAX_TRAIN_POINTS`.
+- `queryHash` is not sent; a changed panel query is fetched as the live query.
+- The PVV client is a b2b retrain transport, not a datasource client. It never interprets
+  datasource-specific query content and is not a second scheduler or fit implementation.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18 non-goals
 
 Do not add these without first updating this document:
 
 - Docker Compose / TestData sandbox (those live in `timeseries-grafana-sandbox`)
 - Kubernetes Helm / container images (those live in `timeseries-k8s`)
 - Publishing or signing on grafana.com
-- Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (pgx snapshot store is v6)
+- Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (pgx snapshot store is v6). The v18 PVV `/gse/data/v1/DataByRefId` client is the named exception: it is a b2b retrain transport selected by configuration, not a datasource client
 - Elasticsearch plugin type
 - Shipping Grafana alert rules or contact points
 - Extra app pages beyond the landing page, the existing Configuration page, and the Retrain schedules page

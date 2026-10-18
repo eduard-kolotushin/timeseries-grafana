@@ -964,7 +964,7 @@ func TestForecastSupersedesOlderPanelRows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	claimed, err := sched.Claim(ctx, 1, "test-owner", time.Minute, 10)
+	claimed, err := sched.Claim(ctx, []int64{1}, "test-owner", time.Minute, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

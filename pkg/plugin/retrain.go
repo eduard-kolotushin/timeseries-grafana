@@ -3,6 +3,8 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +33,13 @@ const (
 	defaultRetrainCron    = "0 3 * * *"
 	defaultGrafanaURL     = "http://127.0.0.1:3000"
 
+	// defaultRetrainWindowChunk is the largest window one PVV DataByRefId
+	// request may carry. PVV's server cap is 24h by default; a configured value
+	// above it is refused and this default kept, and a smaller value is obeyed.
+	defaultRetrainWindowChunk = 24 * time.Hour
+	pvvChunkMax               = 24 * time.Hour
+	pvvDataByRefIDPath        = "/gse/data/v1/DataByRefId"
+
 	// defaultSnapshotTTL is the retention window for fitted snapshots: three daily
 	// retrain cycles, so a healthy metric is never collected between two of them.
 	// FORECAST_SNAPSHOT_TTL overrides it; 0 turns the sweep off.
@@ -44,16 +53,20 @@ const (
 	// datasource query plus a fit, and the compute limiter is the tighter bound
 	// anyway (a busy slot retries on the next tick).
 	retrainClaimBatch = 4
-	// frameFetchTimeout bounds one /api/ds/query call, so a hung Grafana query
-	// cannot hold a claim for the whole lease. The /api/org lookup that precedes a
-	// tick runs through the same client, so it shares the bound.
+	// frameFetchTimeout bounds one /api/ds/query call or one PVV DataByRefId
+	// chunk, so a hung fetch cannot hold a claim for the whole lease. The
+	// /api/org lookup that precedes a Grafana-mode tick runs through the same
+	// client, so it shares the bound.
 	frameFetchTimeout = 60 * time.Second
 	// defaultRetrainLease is derived from the work one claim covers, not picked: a
 	// tick retrains up to retrainClaimBatch rows sequentially, each costing at most
-	// frameFetchTimeout for its fetch, plus one frameFetchTimeout for the /api/org
-	// lookup before the claim, plus a minute of margin. A lease shorter than that
-	// lets a second replica steal a row that is still being retrained — both would
-	// then store a snapshot under the same key and publish duplicate work.
+	// frameFetchTimeout for a Grafana-mode fetch, plus one frameFetchTimeout for
+	// the /api/org lookup before the claim, plus a minute of margin. PVV mode runs
+	// its whole 24h-chunk sequence for one row under the same lease deadline, so a
+	// very long lookback needs a larger FORECAST_RETRAIN_LEASE. A lease shorter
+	// than the work lets a second replica steal a row that is still being
+	// retrained — both would then store a snapshot under the same key and publish
+	// duplicate work.
 	defaultRetrainLease = retrainClaimBatch*frameFetchTimeout + frameFetchTimeout + time.Minute
 	// defaultRetrainRetryMax caps the exponential retry backoff: a failed retrain
 	// is due again after lease*2^(attempts-1), clamped here. Without a cap a
@@ -96,6 +109,15 @@ type retrainConfig struct {
 	Timezone   string
 	GrafanaURL string
 	Token      string
+	// PVVURL is the PVV base URL; it defaults to GrafanaURL. A configured client
+	// certificate/key pair selects PVV mode, where the ticker claims every org's
+	// panel rows and fetches each by refId.
+	PVVURL             string
+	PVVClientCert      string
+	PVVClientKey       string
+	PVVCA              string
+	PVVTLSSkipVerify   bool
+	RetrainWindowChunk time.Duration
 	// SnapshotTTL is how long a fitted snapshot survives with nothing refreshing
 	// it. Zero turns the sweep off; the default is three retrain cycles.
 	SnapshotTTL time.Duration
@@ -123,6 +145,19 @@ func computeRetrain(ctx context.Context, settings backend.AppInstanceSettings) r
 	if url == "" {
 		url = defaultGrafanaURL
 	}
+	pvvURL := look.Get("FORECAST_PVV_URL", "PVV_URL", "pvv_url", "pvvUrl")
+	if pvvURL == "" {
+		pvvURL = url
+	}
+	pvvCert := look.Get("FORECAST_PVV_CLIENT_CERT", "PVV_CLIENT_CERT", "pvv_client_cert", "pvvClientCert")
+	pvvKey := look.Get("FORECAST_PVV_CLIENT_KEY", "PVV_CLIENT_KEY", "pvv_client_key", "pvvClientKey")
+	pvvCA := look.Get("FORECAST_PVV_CA_CERT", "PVV_CA_CERT", "pvv_ca_cert", "pvvCaCert")
+	pvvSkipVerify := parseBool(look.Get("FORECAST_PVV_TLS_SKIP_VERIFY", "PVV_TLS_SKIP_VERIFY", "pvv_tls_skip_verify", "pvvTlsSkipVerify"), false)
+	chunk := parseDuration(look.Get("FORECAST_RETRAIN_WINDOW_CHUNK", "RETRAIN_WINDOW_CHUNK", "retrain_window_chunk", "retrainWindowChunk"), defaultRetrainWindowChunk)
+	if chunk < time.Millisecond || chunk > pvvChunkMax {
+		slog.Warn("forecast: ignoring the retrain window chunk", "chunk", chunk, "default", defaultRetrainWindowChunk)
+		chunk = defaultRetrainWindowChunk
+	}
 	snapshotTTL, err := parseSnapshotTTL(look.Get("FORECAST_SNAPSHOT_TTL", "SNAPSHOT_TTL", "snapshot_ttl", "snapshotTtl"), defaultSnapshotTTL)
 	if err != nil {
 		// A window too short to trust is refused, not obeyed: obeying it would start
@@ -144,15 +179,21 @@ func computeRetrain(ctx context.Context, settings backend.AppInstanceSettings) r
 		retryMax = 2 * lease
 	}
 	return retrainConfig{
-		Enabled:     parseBool(look.Get("FORECAST_RETRAIN_ENABLED", "RETRAIN_ENABLED", "retrain_enabled", "retrainEnabled"), defaultRetrainEnabled),
-		Tick:        parseDuration(look.Get("FORECAST_RETRAIN_TICK", "RETRAIN_TICK", "retrain_tick", "retrainTick"), defaultRetrainTick),
-		Lease:       lease,
-		RetryMax:    retryMax,
-		Cron:        cronSpec,
-		Timezone:    jsonField(jd, "retrainTimezone"),
-		GrafanaURL:  url,
-		Token:       token,
-		SnapshotTTL: snapshotTTL,
+		Enabled:            parseBool(look.Get("FORECAST_RETRAIN_ENABLED", "RETRAIN_ENABLED", "retrain_enabled", "retrainEnabled"), defaultRetrainEnabled),
+		Tick:               parseDuration(look.Get("FORECAST_RETRAIN_TICK", "RETRAIN_TICK", "retrain_tick", "retrainTick"), defaultRetrainTick),
+		Lease:              lease,
+		RetryMax:           retryMax,
+		Cron:               cronSpec,
+		Timezone:           jsonField(jd, "retrainTimezone"),
+		GrafanaURL:         url,
+		Token:              token,
+		PVVURL:             pvvURL,
+		PVVClientCert:      pvvCert,
+		PVVClientKey:       pvvKey,
+		PVVCA:              pvvCA,
+		PVVTLSSkipVerify:   pvvSkipVerify,
+		RetrainWindowChunk: chunk,
+		SnapshotTTL:        snapshotTTL,
 	}
 }
 
@@ -300,22 +341,39 @@ func hasQueries(raw json.RawMessage) bool {
 	return len(list) > 0
 }
 
-// framePoster fetches one schedule row's training frames through Grafana. It is
-// a seam so the scheduler can be exercised without a Grafana.
+// framePoster fetches one schedule row's training series. It is a seam so the
+// scheduler can be exercised without a Grafana.
 type framePoster interface {
 	fetchFrames(ctx context.Context, row ScheduleRow) (data.Frames, error)
+	// fetchSeries resolves the row's training window and returns the series the
+	// fit consumes: through /api/ds/query in Grafana mode, or PVV DataByRefId in
+	// PVV mode.
+	fetchSeries(ctx context.Context, row ScheduleRow, spec retrainSpec) (timeseries.Series[float64], error)
 	// orgID is the Grafana org this process's credential belongs to, and the only
 	// one its queries can resolve datasources in.
 	orgID(ctx context.Context) (int64, error)
+	// pvvMode selects the claim scope and the fetch transport. It is fixed by
+	// configuration, never by a runtime probe: a PVV outage fails rows, it does
+	// not silently switch a tick to Grafana mode.
+	pvvMode() bool
 }
 
-// grafanaPoster posts the stored query objects to Grafana's own query API. It
-// never inspects them: pkg/ carries no datasource-specific field or type name,
-// and the type-keyed rewrite stays in the overlay frontend.
+// grafanaPoster posts the stored query objects to Grafana's own query API, or
+// resolves the same panel query through PVV's DataByRefId. It never inspects the
+// query objects: pkg/ carries no datasource-specific field or type name, and the
+// type-keyed rewrite stays in the overlay frontend.
 type grafanaPoster struct {
 	url    string
 	token  string
 	client *http.Client
+	// pvvURL/pvvClient/pvvInitErr/pvvEnabled are the DataByRefId transport. The
+	// mode is enabled by a configured client certificate or key; an unloadable
+	// pair is an init error that fails every fetch, never a fallback.
+	pvvURL     string
+	pvvClient  *http.Client
+	pvvInitErr error
+	pvvEnabled bool
+	chunk      time.Duration
 	// now is the claim-time clock a relative train window is resolved against.
 	// NewGrafanaPoster leaves it nil and clock() falls back to time.Now.
 	now func() time.Time
@@ -326,11 +384,83 @@ type grafanaPoster struct {
 }
 
 func newGrafanaPoster(cfg retrainConfig) *grafanaPoster {
-	return &grafanaPoster{
+	p := &grafanaPoster{
 		url:    strings.TrimRight(cfg.GrafanaURL, "/"),
 		token:  cfg.Token,
 		client: &http.Client{Timeout: frameFetchTimeout},
+		pvvURL: strings.TrimRight(cfg.PVVURL, "/"),
+		chunk:  cfg.RetrainWindowChunk,
 	}
+	if p.pvvURL == "" {
+		p.pvvURL = p.url
+	}
+	if p.chunk < time.Millisecond || p.chunk > pvvChunkMax {
+		p.chunk = defaultRetrainWindowChunk
+	}
+	p.pvvEnabled = cfg.PVVClientCert != "" || cfg.PVVClientKey != ""
+	if !p.pvvEnabled {
+		return p
+	}
+	if cfg.PVVClientCert == "" || cfg.PVVClientKey == "" {
+		p.pvvInitErr = errors.New("forecast: pvv retrain requires both FORECAST_PVV_CLIENT_CERT and FORECAST_PVV_CLIENT_KEY")
+		return p
+	}
+	pair, err := tls.LoadX509KeyPair(cfg.PVVClientCert, cfg.PVVClientKey)
+	if err != nil {
+		p.pvvInitErr = fmt.Errorf("forecast: pvv tls: %w", err)
+		return p
+	}
+	tlsCfg := &tls.Config{
+		Certificates:       []tls.Certificate{pair},
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: cfg.PVVTLSSkipVerify,
+	}
+	if cfg.PVVCA != "" {
+		pem, err := os.ReadFile(cfg.PVVCA)
+		if err != nil {
+			p.pvvInitErr = fmt.Errorf("forecast: pvv ca: %w", err)
+			return p
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			p.pvvInitErr = errors.New("forecast: pvv ca contains no certificates")
+			return p
+		}
+		tlsCfg.RootCAs = pool
+	}
+	p.pvvClient = &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   frameFetchTimeout,
+	}
+	return p
+}
+
+func (p *grafanaPoster) pvvMode() bool { return p.pvvEnabled }
+
+// fetchSeries is the one seam the fit uses. Grafana mode keeps the existing
+// /api/ds/query path; PVV mode never falls back to it, because that call would
+// resolve datasource UIDs in this process's org and could store another org's
+// data under the row's key.
+func (p *grafanaPoster) fetchSeries(ctx context.Context, row ScheduleRow, spec retrainSpec) (timeseries.Series[float64], error) {
+	if p.pvvEnabled {
+		return p.fetchPVVSeries(ctx, row, spec)
+	}
+	frames, err := p.fetchFrames(ctx, row)
+	if err != nil {
+		return timeseries.Series[float64]{}, err
+	}
+	return seriesFromFrames(frames, spec)
+}
+
+// trainWindow resolves the stored trainSource into the window this fetch uses.
+// A relative row is re-resolved against the claim clock; an absolute pair is
+// replayed verbatim.
+func (p *grafanaPoster) trainWindow(spec retrainSpec) (from, to int64, kind string) {
+	if spec.Relative && spec.LookbackMs > 0 {
+		now := p.clock().UTC().UnixMilli()
+		return now - spec.LookbackMs, now, "relative"
+	}
+	return spec.From, spec.To, "stored"
 }
 
 func (p *grafanaPoster) clock() time.Time {
@@ -403,15 +533,7 @@ func (p *grafanaPoster) fetchFrames(ctx context.Context, row ScheduleRow) (data.
 	if err != nil {
 		return nil, err
 	}
-	from, to, kind := spec.From, spec.To, "stored"
-	if spec.Relative && spec.LookbackMs > 0 {
-		// The browser trained on a lookback it resolved against the panel's own
-		// now, so this retrain resolves the same lookback against the claim
-		// clock: replaying the stored absolute pair would refetch the identical
-		// range every cron tick and republish the same model forever.
-		now := p.clock().UTC().UnixMilli()
-		from, to, kind = now-spec.LookbackMs, now, "relative"
-	}
+	from, to, kind := p.trainWindow(spec)
 	log.DefaultLogger.Debug("retrain train window", "key", row.Key, "window", kind, "from", from, "to", to)
 	body, err := json.Marshal(struct {
 		Queries json.RawMessage `json:"queries"`
@@ -472,6 +594,344 @@ func (p *grafanaPoster) fetchFrames(ctx context.Context, row ScheduleRow) (data.
 	return frames, nil
 }
 
+// pvvDataResponse is PVV's DataByRefId reply: one DataResponse, not Grafana's
+// {results:…} envelope. Error/status describe a datasource-level failure that
+// arrived with HTTP 200/201.
+type pvvDataResponse struct {
+	Frames json.RawMessage `json:"frames"`
+	Status int             `json:"status"`
+	Error  string          `json:"error"`
+}
+
+// pvvFrameJSON is PVV's DataResponse frame: Grafana's columnar schema. It may
+// carry only the frontend `type` string ({"type":"number"}), not the SDK's
+// `typeInfo`, so it is decoded here rather than handed straight to
+// data.Frames' unmarshaller, which panics on the former.
+type pvvFrameJSON struct {
+	Schema struct {
+		Name   string     `json:"name"`
+		RefID  string     `json:"refId"`
+		Fields []pvvField `json:"fields"`
+	} `json:"schema"`
+	Data struct {
+		Values []json.RawMessage `json:"values"`
+	} `json:"data"`
+}
+
+type pvvField struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	TypeInfo struct {
+		Frame    string `json:"frame"`
+		Nullable bool   `json:"nullable"`
+	} `json:"typeInfo"`
+	Labels data.Labels       `json:"labels"`
+	Config *data.FieldConfig `json:"config"`
+}
+
+// decodePVVFrames decodes the columnar payload into SDK frames. Time and numeric
+// columns become nullable pointers so a null point drops itself, exactly as a
+// /api/ds/query reply does. Other field kinds are not needed by the fit and are
+// skipped, which also keeps a string column from aborting the fetch.
+func decodePVVFrames(raw json.RawMessage) (data.Frames, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	var frames []pvvFrameJSON
+	if err := json.Unmarshal(trimmed, &frames); err != nil {
+		return nil, fmt.Errorf("forecast: pvv DataByRefId frames: %w", err)
+	}
+	out := make(data.Frames, 0, len(frames))
+	for _, src := range frames {
+		fr := data.NewFrame(src.Schema.Name)
+		fr.RefID = src.Schema.RefID
+		for i, sf := range src.Schema.Fields {
+			kind := sf.TypeInfo.Frame
+			if kind == "" {
+				kind = sf.Type
+			}
+			kind = strings.TrimPrefix(kind, "*")
+			switch {
+			case kind == "time" || kind == "time.Time":
+				if i >= len(src.Data.Values) {
+					return nil, fmt.Errorf("forecast: pvv frame field %q has no values", sf.Name)
+				}
+				values, err := pvvTimeValues(src.Data.Values[i])
+				if err != nil {
+					return nil, fmt.Errorf("forecast: pvv frame field %q: %w", sf.Name, err)
+				}
+				field := data.NewField(sf.Name, sf.Labels, values)
+				field.Config = sf.Config
+				fr.Fields = append(fr.Fields, field)
+			case kind == "number" || kind == "double" || strings.Contains(kind, "float") || strings.Contains(kind, "int") || strings.Contains(kind, "uint"):
+				if i >= len(src.Data.Values) {
+					return nil, fmt.Errorf("forecast: pvv frame field %q has no values", sf.Name)
+				}
+				values, err := pvvFloatValues(src.Data.Values[i])
+				if err != nil {
+					return nil, fmt.Errorf("forecast: pvv frame field %q: %w", sf.Name, err)
+				}
+				field := data.NewField(sf.Name, sf.Labels, values)
+				field.Config = sf.Config
+				fr.Fields = append(fr.Fields, field)
+			}
+		}
+		if len(fr.Fields) > 0 {
+			out = append(out, fr)
+		}
+	}
+	return out, nil
+}
+
+func pvvTimeValues(raw json.RawMessage) ([]*time.Time, error) {
+	var cells []json.RawMessage
+	if err := json.Unmarshal(raw, &cells); err != nil {
+		return nil, err
+	}
+	out := make([]*time.Time, 0, len(cells))
+	for _, cell := range cells {
+		if pvvNull(cell) {
+			out = append(out, nil)
+			continue
+		}
+		var n json.Number
+		if err := json.Unmarshal(cell, &n); err != nil {
+			return nil, err
+		}
+		ms, err := n.Int64()
+		if err != nil {
+			f, ferr := n.Float64()
+			if ferr != nil {
+				return nil, err
+			}
+			ms = int64(f)
+		}
+		t := time.UnixMilli(ms).UTC()
+		out = append(out, &t)
+	}
+	return out, nil
+}
+
+func pvvFloatValues(raw json.RawMessage) ([]*float64, error) {
+	var cells []json.RawMessage
+	if err := json.Unmarshal(raw, &cells); err != nil {
+		return nil, err
+	}
+	out := make([]*float64, 0, len(cells))
+	for _, cell := range cells {
+		if pvvNull(cell) {
+			out = append(out, nil)
+			continue
+		}
+		var n json.Number
+		if err := json.Unmarshal(cell, &n); err != nil {
+			return nil, err
+		}
+		v, err := n.Float64()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &v)
+	}
+	return out, nil
+}
+
+func pvvNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// pvvRefID returns the stored per-series refId, or derives it from a row an
+// older frontend wrote. A multi-query row without one cannot be resolved by
+// DataByRefId: the row needs one panel load/Retrain to record it.
+func pvvRefID(spec retrainSpec) (string, error) {
+	if spec.RefID != "" {
+		return spec.RefID, nil
+	}
+	var queries []struct {
+		RefID string `json:"refId"`
+	}
+	if err := json.Unmarshal(spec.Queries, &queries); err != nil {
+		return "", fmt.Errorf("forecast: pvv retrain needs a refId; reload the panel to record it: %w", err)
+	}
+	if len(queries) == 1 && queries[0].RefID != "" {
+		return queries[0].RefID, nil
+	}
+	return "", errors.New("forecast: pvv retrain needs a refId; reload the panel to record it")
+}
+
+// pvvIdentity resolves the identity PVV keys a panel query on.
+func pvvIdentity(spec retrainSpec, row ScheduleRow) (orgID int64, dashboardUID, refID string, panelID int, err error) {
+	if row.OrgID <= 0 {
+		return 0, "", "", 0, errors.New("forecast: pvv retrain row has no org; reload the panel to record it")
+	}
+	if spec.DashboardUID == "" {
+		return 0, "", "", 0, errors.New("forecast: pvv retrain needs a dashboardUid; reload the panel to record it")
+	}
+	if spec.PanelID <= 0 {
+		return 0, "", "", 0, errors.New("forecast: pvv retrain needs a panelId; reload the panel to record it")
+	}
+	refID, err = pvvRefID(spec)
+	if err != nil {
+		return 0, "", "", 0, err
+	}
+	return row.OrgID, spec.DashboardUID, refID, spec.PanelID, nil
+}
+
+// pvvErrorDetail reads PVV's {"message":…} error shape, falling back to a
+// bounded body excerpt. The detail is logged into a row's last_status, so it is
+// capped rather than echoed whole.
+func pvvErrorDetail(raw []byte) string {
+	var out struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &out); err == nil && out.Message != "" {
+		return out.Message
+	}
+	detail := strings.TrimSpace(string(raw))
+	if len(detail) > 200 {
+		detail = detail[:200]
+	}
+	return detail
+}
+
+// pvvPanelRequest is exactly the PVV models.Panel body. from/to are integer
+// unix-ms, not Grafana's string spelling, and there is deliberately no
+// queryHash in v1.
+type pvvPanelRequest struct {
+	OrgID        int64  `json:"org_id"`
+	DashboardUID string `json:"dashboardUID"`
+	PanelID      int    `json:"panelId"`
+	RefID        string `json:"refId"`
+	From         int64  `json:"from"`
+	To           int64  `json:"to"`
+}
+
+// fetchPVVFrames posts one bounded window to PVV. The route is authenticated by
+// the client certificate, so no Authorization header is sent.
+func (p *grafanaPoster) fetchPVVFrames(ctx context.Context, orgID int64, dashboardUID string, panelID int, refID string, from, to int64) (data.Frames, error) {
+	if p.pvvClient == nil {
+		return nil, errors.New("forecast: pvv client is not configured")
+	}
+	body, err := json.Marshal(pvvPanelRequest{
+		OrgID:        orgID,
+		DashboardUID: dashboardUID,
+		PanelID:      panelID,
+		RefID:        refID,
+		From:         from,
+		To:           to,
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.pvvURL+pvvDataByRefIDPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.pvvClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDSQueryReplyBytes))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) >= maxDSQueryReplyBytes {
+		return nil, fmt.Errorf("forecast: pvv DataByRefId reply exceeds %d bytes", int64(maxDSQueryReplyBytes))
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("forecast: pvv DataByRefId status %d: %s", resp.StatusCode, pvvErrorDetail(raw))
+	}
+	var out pvvDataResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("forecast: pvv DataByRefId: %w", err)
+	}
+	if out.Error != "" {
+		return nil, fmt.Errorf("forecast: pvv DataByRefId: %s", out.Error)
+	}
+	if out.Status >= http.StatusBadRequest {
+		detail := out.Error
+		if detail == "" {
+			detail = pvvErrorDetail(raw)
+		}
+		return nil, fmt.Errorf("forecast: pvv DataByRefId status %d: %s", out.Status, detail)
+	}
+	return decodePVVFrames(out.Frames)
+}
+
+// fetchPVVSeries fetches a row through DataByRefId in sequential bounded
+// chunks, then merges them into the one series the fit consumes. Exact boundary
+// duplicates are skipped; a descending boundary is a reply error, not a sort,
+// because it means PVV answered a different window than the one requested.
+func (p *grafanaPoster) fetchPVVSeries(ctx context.Context, row ScheduleRow, spec retrainSpec) (timeseries.Series[float64], error) {
+	if p.pvvInitErr != nil {
+		return timeseries.Series[float64]{}, p.pvvInitErr
+	}
+	orgID, dashboardUID, refID, panelID, err := pvvIdentity(spec, row)
+	if err != nil {
+		return timeseries.Series[float64]{}, err
+	}
+	from, to, kind := p.trainWindow(spec)
+	if from == 0 || to == 0 || to <= from {
+		return timeseries.Series[float64]{}, errors.New("forecast: pvv train window is empty")
+	}
+	log.DefaultLogger.Debug("retrain train window", "key", row.Key, "window", kind, "transport", "pvv", "from", from, "to", to)
+	chunk := p.chunk
+	if chunk < time.Millisecond || chunk > pvvChunkMax {
+		chunk = defaultRetrainWindowChunk
+	}
+	chunkMs := chunk.Milliseconds()
+	chunkCount := int((to - from + chunkMs - 1) / chunkMs)
+	times := make([]time.Time, 0)
+	values := make([]float64, 0)
+	for start := from; start < to; {
+		end := min(start+chunkMs, to)
+		frames, err := p.fetchPVVFrames(ctx, orgID, dashboardUID, panelID, refID, start, end)
+		if err != nil {
+			return timeseries.Series[float64]{}, err
+		}
+		if len(frames) == 0 {
+			start = end
+			continue
+		}
+		part, err := seriesFromFrames(frames, spec)
+		if err != nil {
+			return timeseries.Series[float64]{}, err
+		}
+		pt, pv := part.Times(), part.Values()
+		if len(times)+len(pt) > maxTrainPoints {
+			return timeseries.Series[float64]{}, errTrainTooLong
+		}
+		if len(times) == 0 && len(pt) > 0 {
+			capacity := min(maxTrainPoints, len(pt)*chunkCount)
+			times = make([]time.Time, 0, capacity)
+			values = make([]float64, 0, capacity)
+		}
+		for i := range pt {
+			if len(times) > 0 {
+				if pt[i].Equal(times[len(times)-1]) {
+					continue
+				}
+				if pt[i].Before(times[len(times)-1]) {
+					return timeseries.Series[float64]{}, errors.New("forecast: pvv chunks are not ascending")
+				}
+			}
+			times = append(times, pt[i])
+			values = append(values, pv[i])
+		}
+		start = end
+	}
+	if len(times) == 0 {
+		return timeseries.Series[float64]{}, errors.New("forecast: pvv returned no points")
+	}
+	if err := checkMinuteWeekStep(times, spec); err != nil {
+		return timeseries.Series[float64]{}, err
+	}
+	return timeseries.New(times, values)
+}
+
 // seriesFromFrames extracts the training series. The spec's seriesName picks the
 // field when the reply carries more than one; otherwise the first numeric field
 // of the first frame that has a time field wins. Null and NaN points are dropped,
@@ -504,12 +964,24 @@ func seriesFromFrames(frames data.Frames, spec retrainSpec) (timeseries.Series[f
 		times = append(times, ts.UTC())
 		values = append(values, v)
 	}
-	if len(times) >= 2 && parseSeason(spec.Season) == forecast.SeasonMinuteOfWeek {
-		if step := times[len(times)-1].Sub(times[len(times)-2]); step != time.Minute {
-			return timeseries.Series[float64]{}, fmt.Errorf("forecast: minute-week retrain needs a 1m series, last step is %s", step)
-		}
+	if err := checkMinuteWeekStep(times, spec); err != nil {
+		return timeseries.Series[float64]{}, err
 	}
 	return timeseries.New(times, values)
+}
+
+// checkMinuteWeekStep refuses a minute-of-week series whose last step is not one
+// minute. That seasonality is indexed by minute, so any other grid would be
+// fitted into the wrong slots. It runs on a whole reply and, for PVV, after the
+// chunks are merged.
+func checkMinuteWeekStep(times []time.Time, spec retrainSpec) error {
+	if len(times) < 2 || parseSeason(spec.Season) != forecast.SeasonMinuteOfWeek {
+		return nil
+	}
+	if step := times[len(times)-1].Sub(times[len(times)-2]); step != time.Minute {
+		return fmt.Errorf("forecast: minute-week retrain needs a 1m series, last step is %s", step)
+	}
+	return nil
 }
 
 // pickSeries resolves the time and value fields to fit. A spec that names a
@@ -913,18 +1385,22 @@ func (a *App) retrainDue(ctx context.Context) tickResult {
 	// happens on a tick whose Grafana lookup fails.
 	a.sweepRetention(ctx)
 	owner := retrainOwner()
-	// One credential, one org: Grafana resolves the stored queries' datasourceUids
-	// inside the org the credential belongs to, so a claim that reached another
+	// Grafana mode holds one credential and one org: Grafana resolves the stored
+	// queries' datasourceUids inside that org, so a claim that reached another
 	// org's row would fetch that row's frames as this org's series — or fail — and
-	// then store the result under the other org's key. Only this org's rows are
-	// claimed; another org's row stays due and is refreshed by the overlay's
-	// needTrain path, which runs with that org's own request context.
-	org, err := a.poster.orgID(ctx)
-	if err != nil {
-		log.DefaultLogger.Error("retrain org", "err", err.Error())
-		return tickFromErr(err)
+	// then store the result under the other org's key. PVV mode instead claims
+	// every org's panel rows and sends each row's org_id, so it needs no /api/org
+	// lookup and no per-process org restriction.
+	var orgs []int64
+	if !a.poster.pvvMode() {
+		org, err := a.poster.orgID(ctx)
+		if err != nil {
+			log.DefaultLogger.Error("retrain org", "err", err.Error())
+			return tickFromErr(err)
+		}
+		orgs = []int64{org}
 	}
-	rows, err := a.sched.Claim(ctx, org, owner, a.retrain.Lease, retrainClaimBatch)
+	rows, err := a.sched.Claim(ctx, orgs, owner, a.retrain.Lease, retrainClaimBatch)
 	if err != nil {
 		log.DefaultLogger.Error("retrain claim", "err", err.Error())
 		return tickResult{}
@@ -1003,7 +1479,13 @@ func (a *App) retrainOne(ctx context.Context, owner string, row ScheduleRow) tic
 	} else {
 		log.DefaultLogger.Info("retrain", "scope", row.Scope, "key", row.Key, "status", status, "attempts", attempts, "dur", time.Since(started).Round(time.Millisecond).String())
 	}
-	out := tickFromErr(err)
+	// Only Grafana-mode attempts are evidence about the Grafana credential. A PVV
+	// 401/403 means its client certificate or CN allowlist is wrong, which must
+	// not feed the Grafana auth guard (and a PVV failure must not reset it).
+	out := tickResult{}
+	if !a.poster.pvvMode() {
+		out = tickFromErr(err)
+	}
 	if err == nil {
 		out.ok = 1
 	} else {
@@ -1038,11 +1520,7 @@ func (a *App) trainFromSpec(ctx context.Context, row ScheduleRow) error {
 	if err != nil {
 		return err
 	}
-	frames, err := a.poster.fetchFrames(ctx, row)
-	if err != nil {
-		return err
-	}
-	series, err := seriesFromFrames(frames, spec)
+	series, err := a.poster.fetchSeries(ctx, row, spec)
 	if err != nil {
 		return err
 	}

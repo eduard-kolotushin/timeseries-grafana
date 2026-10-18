@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eduard-kolotushin/timeseries"
 	"github.com/eduard-kolotushin/timeseries-grafana/pkg/store"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
@@ -83,6 +84,12 @@ func clearRetrainEnv(t *testing.T) {
 		"FORECAST_RETRAIN_CRON",
 		"FORECAST_GRAFANA_URL",
 		"FORECAST_GRAFANA_TOKEN",
+		"FORECAST_PVV_URL",
+		"FORECAST_PVV_CLIENT_CERT",
+		"FORECAST_PVV_CLIENT_KEY",
+		"FORECAST_PVV_CA_CERT",
+		"FORECAST_PVV_TLS_SKIP_VERIFY",
+		"FORECAST_RETRAIN_WINDOW_CHUNK",
 		store.PluginEnvPrefixApp + "RETRAIN_ENABLED",
 		store.PluginEnvPrefixApp + "RETRAIN_TICK",
 		store.PluginEnvPrefixApp + "RETRAIN_LEASE",
@@ -217,8 +224,15 @@ func TestComputeRetrain(t *testing.T) {
 			if tc.cfg != nil {
 				ctx = backend.WithGrafanaConfig(ctx, backend.NewGrafanaCfg(tc.cfg))
 			}
-			if got := computeRetrain(ctx, tc.settings); got != tc.want {
-				t.Fatalf("got %+v want %+v", got, tc.want)
+			want := tc.want
+			if want.PVVURL == "" {
+				want.PVVURL = want.GrafanaURL
+			}
+			if want.RetrainWindowChunk == 0 {
+				want.RetrainWindowChunk = defaultRetrainWindowChunk
+			}
+			if got := computeRetrain(ctx, tc.settings); got != want {
+				t.Fatalf("got %+v want %+v", got, want)
 			}
 		})
 	}
@@ -762,6 +776,9 @@ type fakePoster struct {
 	// seed their rows. orgErr makes the lookup itself fail.
 	org    int64
 	orgErr error
+	// pvv selects PVV mode for scheduler tests; fetchSeries still uses the fake
+	// frames, so the claim/org behavior is what the test observes.
+	pvv bool
 }
 
 func (p *fakePoster) orgID(context.Context) (int64, error) {
@@ -772,6 +789,16 @@ func (p *fakePoster) orgID(context.Context) (int64, error) {
 		return p.org, nil
 	}
 	return 1, nil
+}
+
+func (p *fakePoster) pvvMode() bool { return p.pvv }
+
+func (p *fakePoster) fetchSeries(ctx context.Context, row ScheduleRow, spec retrainSpec) (timeseries.Series[float64], error) {
+	frames, err := p.fetchFrames(ctx, row)
+	if err != nil {
+		return timeseries.Series[float64]{}, err
+	}
+	return seriesFromFrames(frames, spec)
 }
 
 func (p *fakePoster) fetchFrames(_ context.Context, _ ScheduleRow) (data.Frames, error) {
@@ -987,6 +1014,51 @@ func TestRetrainDueClaimsOnlyItsOwnOrg(t *testing.T) {
 	}
 	if due, err := sched.Due(ctx, 1, otherKey, time.Now()); err != nil || !due {
 		t.Fatalf("the other org's row is no longer due (due=%v err=%v): its overlay would never refresh it", due, err)
+	}
+}
+
+// TestRetrainDuePVVClaimsEveryOrg pins the PVV claim scope: no /api/org lookup
+// (orgErr would fail the tick), both orgs' due rows claimed, and each snapshot
+// stored under its own row's org.
+func TestRetrainDuePVVClaimsEveryOrg(t *testing.T) {
+	const (
+		key1 = "9999999999999999999999999999999999999999999999999999999999999999"
+		key2 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	ctx := context.Background()
+	past := time.Now().Add(-time.Minute)
+	row := func(org int64, key string) ScheduleRow {
+		return ScheduleRow{OrgID: org, Scope: scopePanel, Key: key, Cron: "*/5 * * * *", Timezone: "UTC", Enabled: true, Spec: testTrainSpec(), NextRunAt: past}
+	}
+	poster := &fakePoster{points: 6, step: time.Minute, pvv: true, orgErr: errors.New("pvv mode must not ask for an org")}
+	store, sched := newMemoryStore(), newMemSchedules()
+	app := &App{
+		store: store, sched: sched, poster: poster,
+		retrain: retrainConfig{Enabled: true, Cron: "*/5 * * * *", Timezone: "UTC", Lease: time.Minute, RetryMax: time.Hour, Tick: time.Second},
+		limit:   newWorkLimiter(1),
+	}
+	sched.seed(row(1, key1))
+	sched.seed(row(2, key2))
+
+	out := app.retrainDue(ctx)
+
+	if out.claimed != 2 || out.ok != 2 || out.failed != 0 {
+		t.Fatalf("out=%+v, want both orgs claimed and retrained", out)
+	}
+	if poster.calls != 2 {
+		t.Fatalf("fetched %d rows, want both orgs'", poster.calls)
+	}
+	for _, tc := range []struct {
+		org int64
+		key string
+	}{{1, key1}, {2, key2}} {
+		if _, ok, err := store.Get(ctx, tc.org, tc.key); err != nil || !ok {
+			t.Fatalf("org %d key %s snapshot ok=%v err=%v", tc.org, tc.key, ok, err)
+		}
+	}
+	finishes := sched.finished()
+	if len(finishes) != 2 {
+		t.Fatalf("finishes=%+v, want both rows", finishes)
 	}
 }
 

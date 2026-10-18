@@ -13,7 +13,8 @@ run against a fresh Grafana 13.1.0 while writing it.
   retrains on every panel load and the Forecast datasource cannot serve alerting queries.
 - **The datasources your dashboards query** (Prometheus, Druid, OpenSearch, Postgres, TestData). The
   plugin overlays a query result; it never fetches metric series itself, with one exception: the
-  unattended retrainer pulls training frames from Grafana's own `/api/ds/query` (section 9).
+  unattended retrainer pulls training frames from Grafana's own `/api/ds/query`, or from PVV's
+  `/gse/data/v1/DataByRefId` when configured (section 9).
 
 ## 2. What `make build` produces
 
@@ -232,16 +233,26 @@ anonymous auth is off, a Viewer service-account token:
 | `retrainCron` / `retrain_cron` / `FORECAST_RETRAIN_CRON` | `0 3 * * *` | next run per model; the model's own cron wins once a schedule row exists |
 | `grafanaUrl` / `grafana_url` / `FORECAST_GRAFANA_URL` | `http://127.0.0.1:3000` | where training frames come from |
 | `grafanaToken` / `grafana_token` / `FORECAST_GRAFANA_TOKEN` | — | Viewer service-account token for `/api/org` and `/api/ds/query` |
+| `pvvUrl` / `pvv_url` / `FORECAST_PVV_URL` | `FORECAST_GRAFANA_URL` | PVV base URL; the route is `/gse/data/v1/DataByRefId` |
+| `pvvClientCert` / `pvv_client_cert` / `FORECAST_PVV_CLIENT_CERT` | — | client certificate path; with the key, switches the scheduler to PVV mode |
+| `pvvClientKey` / `pvv_client_key` / `FORECAST_PVV_CLIENT_KEY` | — | client private key path |
+| `pvvCaCert` / `pvv_ca_cert` / `FORECAST_PVV_CA_CERT` | system roots | CA bundle for the PVV server |
+| `pvvTlsSkipVerify` / `pvv_tls_skip_verify` / `FORECAST_PVV_TLS_SKIP_VERIFY` | `false` | test only; skip server certificate verification |
+| `retrainWindowChunk` / `retrain_window_chunk` / `FORECAST_RETRAIN_WINDOW_CHUNK` | `24h` | maximum PVV request range; values above `24h` fall back to `24h` |
 | `FORECAST_SNAPSHOT_TTL` / `snapshot_ttl` | `72h` | delete snapshots nothing refreshed; `0` disables, below `1h` is refused |
 | `FORECAST_RETRAIN_TICK` / `retrain_tick` | `30s` | claim loop interval |
 | `FORECAST_RETRAIN_LEASE` / `retrain_lease` | `6m` | claim lease; a fit that would outlive it is dropped, not duplicated |
 | `FORECAST_RETRAIN_RETRY_MAX` / `retrain_retry_max` | `1h` | cap on the retry backoff; not longer than the lease is refused |
 
+**PVV mode** is selected when either `pvvClientCert` (or `FORECAST_PVV_CLIENT_CERT`) or the key is set; both are required to make requests. It claims every due panel row across all orgs, sends each row's `org_id` to `<pvvUrl>/gse/data/v1/DataByRefId` over mTLS, and calls neither `/api/org` nor `/orgs`; a PVV failure is the row's failure, with no `/api/ds/query` fallback. The client certificate's CN must be in PVV's `AllowedCNs` (a PVV-side deployment step). The compute service reads these keys from its process env only, like every other setting.
+
 ### 9a. Which URL, and which token
 
-The scheduler calls two endpoints of that URL, each with `Authorization: Bearer <grafanaToken>`:
-`GET <url>/api/org` once per process (the org its claims are scoped to) and `POST <url>/api/ds/query` once
-per due row. Both must be **Grafana itself, reached directly** by the process that ticks:
+In **Grafana mode** (no PVV client certificate/key), the scheduler calls two endpoints of that URL, each
+with `Authorization: Bearer <grafanaToken>`: `GET <url>/api/org` once per process (the org its claims are
+scoped to) and `POST <url>/api/ds/query` once per due row. Both must be **Grafana itself, reached
+directly** by the process that ticks. In **PVV mode** this section does not apply: no Grafana token is
+sent to PVV and neither `/api/org` nor `/orgs` is called.
 
 - plugin in Grafana's process (the normal case): `http://127.0.0.1:3000` — the default, and correct as long
   as Grafana listens there on the same host.
@@ -297,15 +308,19 @@ service-account token of its own in `secureJsonData.grafanaToken`. The `FORECAST
 one org's credential to every org's instance — leave them unset in a multi-org deployment. An org with no
 token of its own still has its overlay and its Retrain button; only its unattended retraining is missing, and
 that never touches another org's models. Datasources are per org as well, so every org whose alerts should
-restore a snapshot needs its own **Forecast** datasource (section 7).
+restore a snapshot needs its own **Forecast** datasource (section 7). **PVV mode is the exception**: its
+claim is not org-scoped, so one configured process retrains every org's due panel rows and sends each row's
+`org_id`; no per-org Grafana token is involved.
 
 The datasource's own credentials are not this key's business: Grafana applies them when it runs the stored
 query, so the plugin never talks to Abyss or to IAM. That has one consequence worth knowing: a datasource
 that authorizes *per user* (an IAM token forwarded with the request, as Abyss does in the browser) has no
-user on an unattended fetch — it needs its own credential in its datasource settings for retrains to work.
+user on an unattended fetch — it needs its own credential in its datasource settings for retrains to work,
+or the deployment selects PVV mode, which supplies the per-org credential itself.
 
-How a misconfiguration shows up: `401`/`403` counts as a refusal and three consecutive ticks end the ticker
-with one Error log naming `FORECAST_GRAFANA_URL` / `FORECAST_GRAFANA_TOKEN`; a URL that is unreachable, or
+How a misconfiguration shows up: in Grafana mode, `401`/`403` counts as a refusal and three consecutive
+ticks end the ticker with one Error log naming `FORECAST_GRAFANA_URL` / `FORECAST_GRAFANA_TOKEN`; a URL
+that is unreachable, or
 wrong but answering (a `404` path), leaves the ticker running — it logs `retrain tick … failed=N` and the
 row's `lastStatus` carries the error, which is where to look first.
 
@@ -326,7 +341,8 @@ store and point the app at it. The service reads **process env only** (no ini, n
 | `FORECAST_COMPUTE_LISTEN` | listen address, default `:8080` (`--listen` overrides) |
 | `FORECAST_COMPUTE_TOKEN` | shared secret, required — the service refuses to start without it |
 | `FORECAST_STORE_*` | the same snapshot store as the plugin |
-| `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` | for the retrain ticker it owns |
+| `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` | for the retrain ticker it owns (Grafana mode) |
+| `FORECAST_PVV_*`, `FORECAST_RETRAIN_WINDOW_CHUNK` | PVV mode, when the client certificate/key are set |
 | `FORECAST_RETRAIN_*`, `FORECAST_SNAPSHOT_TTL` | the ticker and retention, unchanged |
 | `FORECAST_MAX_INFLIGHT` | concurrent fits in this service, default `4` (the forwarding plugin process's own slots default to `32`) |
 

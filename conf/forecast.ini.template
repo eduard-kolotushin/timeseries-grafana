@@ -41,8 +41,10 @@ compute_token = ${FORECAST_COMPUTE_TOKEN}
 ; Unattended retrain scheduler. Only this process (the app) runs it, unless
 ; compute_url above moves it to the compute service; the datasource section below
 ; never runs it, because alerting QueryData only Restores.
-; The scheduler claims due rows from forecast.retrain and calls GET /api/org once
-; and POST /api/ds/query per row, both with its own Grafana token. Point this at
+; The scheduler claims due rows from forecast.retrain. In Grafana mode it calls
+; GET /api/org once and POST /api/ds/query per row, both with its own Grafana
+; token; PVV mode (pvv_client_cert/key below) instead claims every org's panel
+; rows and posts DataByRefId over mTLS. Point this at
 ; Grafana itself, reached directly by whichever process ticks: 127.0.0.1:3000 for
 ; this process, Grafana's service name from a compute-service container (and the
 ; sub-path Grafana serves under, when serve_from_sub_path is on). Never at an
@@ -61,6 +63,16 @@ grafana_url = ${FORECAST_GRAFANA_URL}
 ; Viewer service-account token of the org that owns the panels, for /api/org and
 ; /api/ds/query. Not an IAM user token: those expire with a browser session.
 grafana_token = ${FORECAST_GRAFANA_TOKEN}
+; PVV DataByRefId retrain transport. Set both the client certificate and key to
+; switch the scheduler to PVV; it then claims panel rows across all orgs and
+; fetches each with that row's org_id. pvv_url defaults to grafana_url. The
+; endpoint is /gse/data/v1/DataByRefId; no Grafana token is sent to PVV.
+; pvv_url = ${FORECAST_PVV_URL}
+; pvv_client_cert = ${FORECAST_PVV_CLIENT_CERT}
+; pvv_client_key = ${FORECAST_PVV_CLIENT_KEY}
+; pvv_ca_cert = ${FORECAST_PVV_CA_CERT}
+; pvv_tls_skip_verify = ${FORECAST_PVV_TLS_SKIP_VERIFY}
+; retrain_window_chunk = ${FORECAST_RETRAIN_WINDOW_CHUNK}
 
 [plugin.eduardkolotushin-forecast-datasource]
 ; Same keys as the app. Alerting QueryData does not receive app jsonData.
