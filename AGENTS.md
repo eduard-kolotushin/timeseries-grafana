@@ -31,6 +31,7 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots and schedules; `POST /api/ds/query` on Grafana's own API is not a datasource client
 - Stay within v1–v17 unless `docs/INTENTIONS.md` is updated first
 - The compute service (`cmd/compute`, `gpx_forecast_compute`) runs the same `pkg/plugin` `/forecast` handler and the same retrain ticker over plain HTTP: no second fit or dispatch implementation, no datasource client, and it reads process env only (never grafana.ini or jsonData)
+- `Jenkinsfile` is the **corporate pipeline template**, delivered by the platform team and working as delivered. Never modify it — not for lint, naming, an audit finding or a CI tweak; any change goes to the platform team. GitHub Actions does not run it
 
 ## v1 in scope
 

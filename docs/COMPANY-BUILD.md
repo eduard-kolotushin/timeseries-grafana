@@ -95,15 +95,17 @@ A module the proxy refuses is fixed in the proxy allow-list, never by editing th
 
 ## 6. The corporate pipeline
 
-`Jenkinsfile` at the repo root is the company pipeline: it imports the shared library (`ru.sbrf.devops.Globals`)
-and returns `wrapJenkinsfile(this)`, so the build steps themselves live in that library, not here. Its
-`onDistrib` step fetches the commit id recorded beside the published distribution from Nexus and compares it
-with `git rev-parse HEAD`, failing the job when they differ, so a distribution and the source tree it records
-stay paired. The comparison strips trailing newline styles (`tr -d ' \r'` on both sides), so a recorded
-file without a trailing newline — or a CRLF one — still compares equal to `git rev-parse HEAD`, and only
-a real hash mismatch fails it; `curl -fsS --max-time 60` turns an HTTP or SSO failure into the build
-error instead of feeding the page body to the compare. `make build` copies `docs/` into `dist/` for
-that distribution (`make docs`).
+`Jenkinsfile` at the repo root is the **corporate pipeline template**, delivered by the platform team and
+working as delivered. It is corporate-owned: **do not modify it** — not for style, not for an audit finding,
+not for a CI tweak; any change goes to the platform team. GitHub Actions does not read it, and a repo change
+must leave it byte-for-byte as delivered (the audit pass of 2026-10-18 reverted its edits and the file is
+marked read-only in `AGENTS.md` and the cursor rule).
+
+As delivered, it imports the shared library (`ru.sbrf.devops.Globals`) and returns `wrapJenkinsfile(this)`, so
+the build steps themselves live in that library, not here. Its `onDistrib` step fetches the commit id recorded
+beside the published distribution from Nexus and compares it with the local commit id, failing the job when
+they differ, so a distribution and the source tree it records stay paired. `make build` copies `docs/` into
+`dist/` for that distribution (`make docs`).
 
 ## 7. Not covered
 
