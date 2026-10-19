@@ -37,8 +37,8 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/eduard-kolotushin/timeseries v0.2.1 h1:eHhnfRgR3aejv0zBTH8GKb3x6dJlM7HDvuxEK9ea5+M=
 github.com/eduard-kolotushin/timeseries v0.2.1/go.mod h1:5rkS0OXN++bnaK6D/NtSMlT9scIEOj0eTMmVX7i2XiI=
-github.com/eduard-kolotushin/timeseries-forecast v0.5.3 h1:QySB4MuDlUAi9X9GYXk8ujn28YS5fkPs64ATaP5Tzkk=
-github.com/eduard-kolotushin/timeseries-forecast v0.5.3/go.mod h1:5ciqNNh/jfOzCfjno4a2IqWVY4SybCH67h6r+pcKjn8=
+github.com/eduard-kolotushin/timeseries-forecast v0.5.4 h1:K1CLTaZ/RS0y+klWKMibWAAyh2jetduJHO4A5MemVJQ=
+github.com/eduard-kolotushin/timeseries-forecast v0.5.4/go.mod h1:XCWtI91zeX3w7Mr5xZjjsCYBX4QJCxEvwVQ0er41YNY=
 github.com/elazarl/goproxy v1.8.4 h1:tIHKhYHXf8gQracfoHl8Zy7PG/jhvmIMUR5j8OlPUIM=
 github.com/elazarl/goproxy v1.8.4/go.mod h1:b5xm6W48AUHNpRTCvlnd0YVh+JafCCtsLsJZvvNTz+E=
 github.com/envoyproxy/go-control-plane v0.9.0/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
