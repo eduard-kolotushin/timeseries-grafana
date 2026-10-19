@@ -510,6 +510,11 @@ func TestPostgresDropModelRoute(t *testing.T) {
 	if len(row.Spec) != 0 || row.Cron != "0 3 * * *" {
 		t.Fatalf("the re-created row is not the unclaimable default: %+v", row)
 	}
+	// The re-created row is unclaimable, so it must not make the probe refit: the
+	// snapshot is the only thing that can answer this cacheKey.
+	if due, err := s.Due(ctx, orgID, key, time.Now()); err != nil || due {
+		t.Fatalf("an unclaimable re-created row forced needTrain: due=%v err=%v", due, err)
+	}
 }
 
 // TestScheduleRoutesBodyCap: a schedule DTO is a few hundred bytes, so both routes

@@ -556,7 +556,9 @@ tick logged `msg="forecast retention" recreated=1 rows=2 snapshots=2` — a snap
 went, the four-day-idle *superseded* key `2e827911…` went with its snapshot, the fresh snapshot whose row had been
 idle for three hours survived **with the admin's `*/9 * * * *` cron** (the scheduler then retrained it), and the
 orphan snapshot was re-created as a row with the deployment default `*/5 * * * *`, `enabled true` and no `spec`
-(unclaimable, which is why the reconcile cannot resurrect a fetchable-but-unscheduled row). A later tick logged
+(unclaimable, which is why the reconcile cannot resurrect a fetchable-but-unscheduled row). Such a row is not
+treated as due — the probe predicate mirrors the claim's fetchable-spec test — so a cacheKey-only fit stays
+restorable until a panel fit writes a spec. A later tick logged
 `recreated=1 rows=0 snapshots=0` after a `drop=row` removed the row it had just given back (F5).
 
 ### F17. Scheduler credentials

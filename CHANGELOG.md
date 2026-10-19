@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **A cacheKey-only fit is restorable after the retention sweep again.** The reconcile gives an orphan
+  snapshot a row with the deployment default cron and no spec, and the probe's due check treated that
+  unclaimable row as due, so every probe answered `needTrain` and the stored model could never be read.
+  `Due` now mirrors the claim's fetchable-spec predicates; a cacheKey-only fit is served from its
+  snapshot, while a real panel row still refits on its cron.
+
 - **Unattended retraining can fetch training frames through PVV's `/gse/data/v1/DataByRefId` when
   Abyss needs a per-org credential a headless tick does not have.** Setting either
   `FORECAST_PVV_CLIENT_CERT` or `FORECAST_PVV_CLIENT_KEY` selects mTLS PVV mode (both are required

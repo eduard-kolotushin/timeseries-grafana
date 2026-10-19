@@ -397,6 +397,13 @@ func (s *postgresStore) DropModel(ctx context.Context, orgID int64, key string) 
 // sent back to refit. A refit would fall through to Supersede(keepKey=the retired
 // key), which un-retires it and stamps the panel's current row — after which the
 // live panel's snapshot freezes until that panel is next loaded.
+//
+// The spec predicates mirror panelClaimSQL for the same reason: the retention
+// reconcile gives an orphan snapshot a row with the deployment default cron and no
+// spec. That row is unclaimable, so it can never refresh the model; treating it as
+// due would instead send every probe to the training query and leave a cacheKey
+// only fit permanently unrestorable. A row is due only when the scheduler could
+// actually claim it.
 func (s *postgresStore) Due(ctx context.Context, orgID int64, key string, now time.Time) (bool, error) {
 	if err := s.ensureSchedules(ctx); err != nil {
 		return false, err
@@ -406,6 +413,9 @@ func (s *postgresStore) Due(ctx context.Context, orgID int64, key string, now ti
 SELECT EXISTS (
   SELECT 1 FROM forecast.retrain
   WHERE scope = 'panel' AND org_id = $1 AND key = $2 AND enabled
+    AND spec IS NOT NULL
+    AND jsonb_typeof(spec->'queries') = 'array'
+    AND spec->'queries' <> '[]'::jsonb
     AND superseded_at IS NULL
     AND next_run_at IS NOT NULL AND next_run_at <= $3
 )

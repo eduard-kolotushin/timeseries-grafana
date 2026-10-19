@@ -931,9 +931,10 @@ func TestPostgresClaimRequiresFetchableQueries(t *testing.T) {
 	const orgID int64 = 987655
 	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
 	specs := map[string]string{
-		"null":  `{"queries":null,"model":"baseline"}`,
-		"empty": `{"queries":[],"model":"baseline"}`,
-		"ok":    `{"queries":[{"refId":"A"}],"model":"baseline"}`,
+		"missing": ``,
+		"null":    `{"queries":null,"model":"baseline"}`,
+		"empty":   `{"queries":[],"model":"baseline"}`,
+		"ok":      `{"queries":[{"refId":"A"}],"model":"baseline"}`,
 	}
 	for name, spec := range specs {
 		if err := s.Upsert(ctx, orgID, ScheduleRow{
@@ -964,6 +965,17 @@ func TestPostgresClaimRequiresFetchableQueries(t *testing.T) {
 	}
 	if claimedKeys[prefix+"-null"] || claimedKeys[prefix+"-empty"] {
 		t.Fatalf("an unfetchable row was claimed: %+v", claimedKeys)
+	}
+	// Due and Claim must agree: a row the scheduler cannot claim must not send the
+	// probe back to training either.
+	for name := range specs {
+		due, err := s.Due(ctx, orgID, prefix+"-"+name, time.Now())
+		if err != nil {
+			t.Fatalf("due %s: %v", name, err)
+		}
+		if want := name == "ok"; due != want {
+			t.Fatalf("due %s=%v want %v", name, due, want)
+		}
 	}
 }
 
