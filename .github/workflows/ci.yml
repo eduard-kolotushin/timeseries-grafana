@@ -26,11 +26,11 @@ jobs:
     env:
       FORECAST_TEST_PG: postgres://overlay:overlay@localhost:5432/overlay?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.x"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: npm
@@ -40,6 +40,8 @@ jobs:
       # node_modules/flatted/golang, which is not this module's code.
       - name: Go test
         run: go test -race ./pkg/... ./cmd/...
+      - name: Go vulnerability check
+        run: make vulncheck
       # CI otherwise never produces the artifacts Grafana actually runs, so a
       # linux-only compile break would pass go test on the runner.
       - name: Build the linux backend
@@ -72,3 +74,5 @@ jobs:
           npm run lint
           npm run test:ci
           npm run build
+      - name: Audit JavaScript dependencies
+        run: npm audit --package-lock-only --audit-level=critical

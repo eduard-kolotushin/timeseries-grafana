@@ -13,7 +13,7 @@ SHELL := $(GIT_SH)
 endif
 endif
 
-.PHONY: all build frontend backend migrate compute gate-check deps-report ini-template docs help
+.PHONY: all build frontend backend migrate compute gate-check vulncheck deps-report ini-template docs help
 
 DIST_BIN := dist/gpx_forecast_linux_amd64
 DIST_DS_BIN := dist/forecast-datasource/gpx_forecast_linux_amd64
@@ -28,6 +28,9 @@ GATE_CACHE ?= .gate-cache
 # recursive tools (which do not honour the go tool's dot-directory rule), while a temp dir keeps
 # `gofmt -l .` exactly the check CI runs.
 GATE_MODCACHE ?= $(subst \,/,$(if $(TEMP),$(TEMP),/tmp))/forecast-gate-mod-$(notdir $(CURDIR))
+
+# Pinned so CI and `make gate-check` scan with the same tool. See docs/COMPANY-BUILD.md.
+GOVULNCHECK_VERSION ?= v1.9.0
 
 # node/npm on PATH are nvm shims and can point at an install that is gone ("Node.js
 # v22.x.x is not installed or cannot be found"), so resolve a runtime that starts: the
@@ -55,6 +58,7 @@ help:
 	@echo "make ini-template  copy conf/forecast.ini.template into dist/"
 	@echo "make docs          copy docs/ into dist/"
 	@echo "make gate-check    CI Go steps from a cold module cache behind the configured proxy"
+	@echo "make vulncheck     govulncheck ./pkg/... ./cmd/... (pinned $(GOVULNCHECK_VERSION))"
 	@echo "make deps-report   per-module version inventory -> $(GATE_CACHE)/deps-report.md"
 
 build:
@@ -115,8 +119,12 @@ gate-check:
 	rm -rf "$(GATE_MODCACHE)"
 	GOMODCACHE="$(GATE_MODCACHE)" go mod download all
 	GOMODCACHE="$(GATE_MODCACHE)" go test ./pkg/... ./cmd/...
+	GOMODCACHE="$(GATE_MODCACHE)" go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./pkg/... ./cmd/...
 	GOMODCACHE="$(GATE_MODCACHE)" sh -c 'GOOS=linux GOARCH=amd64 go build -o "$(GATE_CACHE)/gpx_forecast_linux_amd64" ./pkg && GOOS=linux GOARCH=amd64 go build -o "$(GATE_CACHE)/gpx_forecast_migrate_linux_amd64" ./cmd/migrate && GOOS=linux GOARCH=amd64 go build -o "$(GATE_CACHE)/gpx_forecast_compute_linux_amd64" ./cmd/compute'
 	GOMODCACHE="$(GATE_MODCACHE)" go vet -tags mage .
+
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./pkg/... ./cmd/...
 
 # Per-module version inventory for a security review (docs/COMPANY-BUILD.md).
 deps-report:

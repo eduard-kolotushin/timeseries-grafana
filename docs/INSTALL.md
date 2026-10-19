@@ -356,6 +356,10 @@ lease makes N tickers safe.
 The service exposes `/forecast`, `/ping` and an unauthenticated coarse `/healthz`; it deliberately does
 not serve the schedules API.
 
+> The compute hop is plain HTTP with a single shared token and trusts `X-Forecast-Org`; keep it on a
+> trusted pod network, do not expose the Service outside the cluster, and terminate TLS in front of it
+> if it crosses a host or network boundary.
+
 ## 11. End-to-end verification
 
 All of these were run against a fresh Grafana 13.1.0 with only the mounts in sections 3, 4, 6a and 7:
