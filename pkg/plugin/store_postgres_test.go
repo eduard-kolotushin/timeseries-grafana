@@ -22,7 +22,7 @@ import (
 // into a permanent error; Get/Put fail per call and retry after the backoff.
 func TestPostgresStoreLazyConnect(t *testing.T) {
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, "postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1")
+	s, err := openPostgresStore(ctx, "postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1", nil)
 	if err != nil {
 		t.Fatalf("open must only parse the DSN: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestPostgresStore(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestPostgresDueIgnoresSuperseded(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestPostgresListProjectsIdentity(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +509,7 @@ func TestPostgresScheduleOrgKey(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +605,7 @@ func TestPostgresRetrainKeyMigration(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestPostgresSchedule(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -921,7 +921,7 @@ func TestPostgresClaimRequiresFetchableQueries(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -988,7 +988,7 @@ func TestPostgresClaimAllOrgs(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1076,7 +1076,7 @@ func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn)
+	s, err := openPostgresStore(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

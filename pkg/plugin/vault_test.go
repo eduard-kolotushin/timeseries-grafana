@@ -19,36 +19,85 @@ func TestVaultConfigResolution(t *testing.T) {
 		"vaultCertTtl":  "2h",
 		"vaultPvvRole":  "json-pvv",
 	})
+	storeSettings, _ := json.Marshal(map[string]any{
+		"vaultAddr":         "http://store:8200",
+		"vaultPkiStoreRole": "forecast-pg",
+		"storeUser":         "forecast",
+	})
 	tests := []struct {
 		name        string
 		env         map[string]string
 		cfg         map[string]string
 		settings    backend.AppInstanceSettings
 		wantNil     bool
-		wantAddr    string
-		wantToken   string
+		wantErr     bool
 		wantMount   string
 		wantRole    string
 		wantPVVRole string
+		wantStore   string
+		wantStoreCN string
 		wantClient  string
 		wantTTL     time.Duration
+		wantCompute bool
+		wantPVV     bool
+		wantStoreOn bool
 	}{
 		{name: "unset", wantNil: true},
 		{
-			name:       "env defaults",
-			env:        map[string]string{"FORECAST_VAULT_ADDR": "http://vault:8200", "FORECAST_VAULT_TOKEN": "t", "FORECAST_VAULT_PKI_ROLE": "forecast"},
-			wantAddr:   "http://vault:8200",
-			wantToken:  "t",
-			wantMount:  "pki",
-			wantRole:   "forecast",
-			wantClient: defaultVaultClientCN,
-			wantTTL:    defaultVaultCertTTL,
+			name: "compute role selects compute only",
+			env: map[string]string{
+				"FORECAST_VAULT_ADDR":     "http://vault:8200",
+				"FORECAST_VAULT_TOKEN":    "t",
+				"FORECAST_VAULT_PKI_ROLE": "forecast",
+			},
+			wantMount: "pki", wantRole: "forecast", wantClient: defaultVaultClientCN,
+			wantTTL: defaultVaultCertTTL, wantCompute: true,
+			wantStoreCN: "overlay",
 		},
 		{
-			name:     "bare VAULT_ADDR and VAULT_TOKEN fallback",
-			env:      map[string]string{"VAULT_ADDR": "http://bare:8200", "VAULT_TOKEN": "bare-token", "FORECAST_VAULT_PKI_ROLE": "forecast"},
-			wantAddr: "http://bare:8200", wantToken: "bare-token",
-			wantMount: "pki", wantRole: "forecast", wantClient: defaultVaultClientCN, wantTTL: defaultVaultCertTTL,
+			name:      "bare VAULT_ADDR and VAULT_TOKEN fallback",
+			env:       map[string]string{"VAULT_ADDR": "http://bare:8200", "VAULT_TOKEN": "bare-token", "FORECAST_VAULT_PKI_ROLE": "forecast"},
+			wantMount: "pki", wantRole: "forecast", wantClient: defaultVaultClientCN,
+			wantTTL: defaultVaultCertTTL, wantCompute: true, wantStoreCN: "overlay",
+		},
+		{
+			name: "store role alone keeps compute and pvv off",
+			env: map[string]string{
+				"FORECAST_VAULT_ADDR":  "http://vault:8200",
+				"FORECAST_VAULT_TOKEN": "t",
+			},
+			settings:    backend.AppInstanceSettings{JSONData: storeSettings},
+			wantMount:   "pki",
+			wantStore:   "forecast-pg",
+			wantStoreCN: "forecast",
+			wantClient:  defaultVaultClientCN,
+			wantTTL:     defaultVaultCertTTL,
+			wantStoreOn: true,
+		},
+		{
+			name: "explicit false wins over a configured role",
+			env: map[string]string{
+				"FORECAST_VAULT_ADDR":         "http://vault:8200",
+				"FORECAST_VAULT_TOKEN":        "t",
+				"FORECAST_VAULT_PKI_ROLE":     "forecast",
+				"FORECAST_COMPUTE_MTLS":       "false",
+				"FORECAST_VAULT_PKI_PVV_ROLE": "pvv",
+				"FORECAST_PVV_MTLS":           "false",
+			},
+			wantMount: "pki", wantRole: "forecast", wantPVVRole: "pvv", wantClient: defaultVaultClientCN,
+			wantTTL: defaultVaultCertTTL, wantStoreCN: "overlay",
+		},
+		{
+			name: "flag true without its role still resolves when another component has one",
+			env: map[string]string{
+				"FORECAST_VAULT_ADDR":           "http://vault:8200",
+				"FORECAST_VAULT_TOKEN":          "t",
+				"FORECAST_COMPUTE_MTLS":         "true",
+				"FORECAST_VAULT_PKI_STORE_ROLE": "forecast-pg",
+			},
+			wantMount: "pki", wantClient: defaultVaultClientCN, wantTTL: defaultVaultCertTTL,
+			wantStore: "forecast-pg", wantStoreCN: "overlay",
+			wantCompute: true, wantStoreOn: true,
 		},
 		{
 			name: "jsonData plus secure token plus ini mount",
@@ -58,14 +107,14 @@ func TestVaultConfigResolution(t *testing.T) {
 				JSONData:                jsonSettings,
 				DecryptedSecureJSONData: map[string]string{"vaultToken": "secure-token"},
 			},
-			wantAddr: "http://json:8200", wantToken: "secure-token",
 			wantMount: "ini-pki", wantRole: "json-role", wantPVVRole: "json-pvv",
 			wantClient: "json-client", wantTTL: 2 * time.Hour,
+			wantCompute: true, wantPVV: true, wantStoreCN: "overlay",
 		},
 		{
-			name:    "addr without a role",
+			name:    "addr without any role",
 			env:     map[string]string{"FORECAST_VAULT_ADDR": "http://vault:8200", "FORECAST_VAULT_TOKEN": "t"},
-			wantNil: false,
+			wantErr: true,
 		},
 	}
 	for _, tc := range tests {
@@ -79,9 +128,9 @@ func TestVaultConfigResolution(t *testing.T) {
 				ctx = backend.WithGrafanaConfig(ctx, backend.NewGrafanaCfg(tc.cfg))
 			}
 			got, err := vaultFrom(ctx, tc.settings)
-			if tc.name == "addr without a role" {
+			if tc.wantErr {
 				if err == nil {
-					t.Fatal("expected a role error")
+					t.Fatal("expected a vault configuration error")
 				}
 				return
 			}
@@ -94,8 +143,10 @@ func TestVaultConfigResolution(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.client == nil || got.pkiMount != tc.wantMount || got.pkiRole != tc.wantRole ||
-				got.pvvRole != tc.wantPVVRole || got.clientCN != tc.wantClient || got.certTTL != tc.wantTTL {
+			if got.Client == nil || got.PKIMount != tc.wantMount || got.ComputeRole != tc.wantRole ||
+				got.PVVRole != tc.wantPVVRole || got.StoreRole != tc.wantStore ||
+				got.StoreCN != tc.wantStoreCN || got.ClientCN != tc.wantClient || got.CertTTL != tc.wantTTL ||
+				got.ComputeMTLS != tc.wantCompute || got.PVVMTLS != tc.wantPVV || got.StoreMTLS != tc.wantStoreOn {
 				t.Fatalf("config = %+v", got)
 			}
 		})

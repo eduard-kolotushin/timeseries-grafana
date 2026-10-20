@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/eduard-kolotushin/timeseries"
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 )
 
@@ -28,13 +31,14 @@ const (
 var errUnknownKind = errors.New("forecast: unknown query kind")
 
 type Datasource struct {
-	mu       sync.Mutex
-	store    SnapshotStore
-	close    func()
-	jsonData []byte
-	secure   map[string]string
-	connect  func(context.Context, string) (SnapshotStore, func())
-	limit    *workLimiter
+	mu          sync.Mutex
+	store       SnapshotStore
+	close       func()
+	vaultCancel func()
+	jsonData    []byte
+	secure      map[string]string
+	connect     func(context.Context, string, *vault.Manager) (SnapshotStore, func())
+	limit       *workLimiter
 }
 
 var (
@@ -56,16 +60,51 @@ func newDatasource(ctx context.Context, settings backend.DataSourceInstanceSetti
 		limit:    newWorkLimiter(maxInflightFrom(ctx, settings.JSONData)),
 	}
 	if store == nil {
-		ds.store, ds.close = ds.connectFn()(ctx, storeDSNFrom(ctx, settings.JSONData, settings.DecryptedSecureJSONData))
+		mgr, cancel := ds.storeManager(ctx, settings.JSONData, settings.DecryptedSecureJSONData)
+		ds.vaultCancel = cancel
+		ds.store, ds.close = ds.connectFn()(ctx, storeDSNFrom(ctx, settings.JSONData, settings.DecryptedSecureJSONData), mgr)
 	}
 	return ds, nil
 }
 
-func (d *Datasource) connectFn() func(context.Context, string) (SnapshotStore, func()) {
+func (d *Datasource) connectFn() func(context.Context, string, *vault.Manager) (SnapshotStore, func()) {
 	if d.connect != nil {
 		return d.connect
 	}
 	return connectStore
+}
+
+// storeManager resolves the same Vault settings the DSN uses and starts a
+// certificate manager when the store component's switch is on. A manager whose
+// first issue fails keeps retrying; connections fail loudly until it succeeds.
+func (d *Datasource) storeManager(ctx context.Context, jsonData []byte, secure map[string]string) (*vault.Manager, func()) {
+	jd := map[string]any{}
+	if len(jsonData) > 0 {
+		_ = json.Unmarshal(jsonData, &jd)
+	}
+	look := storeLookup{
+		getenv: os.Getenv,
+		cfg:    backend.GrafanaConfigFromContext(ctx),
+		json:   jd,
+	}
+	vc, err := vaultFromLookup(look, backend.AppInstanceSettings{JSONData: jsonData, DecryptedSecureJSONData: secure})
+	if err != nil {
+		log.DefaultLogger.Error("forecast datasource: vault configuration refused", "err", err.Error())
+		return nil, nil
+	}
+	if vc == nil || !vc.StoreMTLS {
+		return nil, nil
+	}
+	if vc.StoreRole == "" {
+		log.DefaultLogger.Error("forecast datasource: store mTLS needs a role", "err", "FORECAST_VAULT_PKI_STORE_ROLE is required with FORECAST_STORE_MTLS=true")
+		return nil, nil
+	}
+	mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	mgr := vault.NewManager(vc.Client, vc.PKIMount, vc.StoreRole, vc.StoreCN, vc.CertTTL)
+	if err := mgr.Start(mgrCtx); err != nil {
+		log.DefaultLogger.Error("forecast datasource: vault store issue failed", "err", err.Error())
+	}
+	return mgr, cancel
 }
 
 func (d *Datasource) ensureStore(ctx context.Context, pCtx backend.PluginContext) SnapshotStore {
@@ -75,7 +114,9 @@ func (d *Datasource) ensureStore(ctx context.Context, pCtx backend.PluginContext
 		return d.store
 	}
 	jsonData, secure := storeJSONFromContext(d.jsonData, d.secure, pCtx.AppInstanceSettings)
-	d.store, d.close = d.connectFn()(ctx, storeDSNFrom(ctx, jsonData, secure))
+	mgr, cancel := d.storeManager(ctx, jsonData, secure)
+	d.vaultCancel = cancel
+	d.store, d.close = d.connectFn()(ctx, storeDSNFrom(ctx, jsonData, secure), mgr)
 	return d.store
 }
 
@@ -84,6 +125,9 @@ func (d *Datasource) Dispose() {
 	// read under it too: Dispose can run while a query is still connecting.
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.vaultCancel != nil {
+		d.vaultCancel()
+	}
 	if d.close != nil {
 		d.close()
 	}

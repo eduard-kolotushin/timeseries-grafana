@@ -227,3 +227,29 @@ func scratchDatabase(t *testing.T, name string) (adminDSN, dsn string, cleanup f
 		}
 	}
 }
+
+// TestRunStoreMTLSValidation: store mTLS is selected by its own flag and needs
+// a store role; a configured role with an unreachable Vault fails before the
+// migration runs, naming Vault rather than silently connecting in plaintext.
+func TestRunStoreMTLSValidation(t *testing.T) {
+	base := func(extra map[string]string) func(string) string {
+		env := map[string]string{
+			"FORECAST_STORE_URL":   unreachable,
+			"FORECAST_STORE_MTLS":  "true",
+			"FORECAST_VAULT_ADDR":  "http://127.0.0.1:1",
+			"FORECAST_VAULT_TOKEN": "t",
+		}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return func(key string) string { return env[key] }
+	}
+	code, _, stderr := runFor(base(nil), "--timeout", "5s")
+	if code != 1 || !strings.Contains(stderr, "FORECAST_VAULT_PKI_STORE_ROLE is required") {
+		t.Fatalf("exit=%d stderr=%q, want a missing store role", code, stderr)
+	}
+	code, _, stderr = runFor(base(map[string]string{"FORECAST_VAULT_PKI_STORE_ROLE": "forecast-pg"}), "--timeout", "5s")
+	if code != 1 || !strings.Contains(stderr, "gpx_forecast_migrate: vault:") {
+		t.Fatalf("exit=%d stderr=%q, want a vault failure", code, stderr)
+	}
+}

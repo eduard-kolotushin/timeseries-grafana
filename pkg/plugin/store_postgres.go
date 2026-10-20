@@ -17,6 +17,8 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 )
 
 // schemaMigrations is this binary's copy of the embedded migration set, read
@@ -309,8 +311,24 @@ ON CONFLICT (org_id, cache_key) DO UPDATE SET snapshot = EXCLUDED.snapshot, upda
 // lazily; the first Get/Put pings and provisions the schema (see ensure), so a
 // database that is down at plugin start does not disable the store for the
 // life of the process.
-func openPostgresStore(ctx context.Context, dsn string) (*postgresStore, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+func openPostgresStore(ctx context.Context, dsn string, mgr *vault.Manager) (*postgresStore, error) {
+	if mgr == nil {
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			return nil, err
+		}
+		return &postgresStore{pool: pool, now: time.Now}, nil
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg, err := vault.NewClientTLSConfig(mgr, cfg.ConnConfig.Host)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ConnConfig.TLSConfig = tlsCfg
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

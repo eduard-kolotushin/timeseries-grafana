@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/eduard-kolotushin/timeseries-grafana/pkg/store"
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -57,7 +58,38 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, resolved)
+	cfg, err := pgxpool.ParseConfig(resolved)
+	if err != nil {
+		fmt.Fprintf(stderr, "gpx_forecast_migrate: %v\n", err)
+		return 1
+	}
+	resolvedVault, err := vault.ResolveEnv(getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "gpx_forecast_migrate: vault: %v\n", err)
+		return 1
+	}
+	if resolvedVault != nil && resolvedVault.StoreMTLS {
+		if resolvedVault.StoreRole == "" {
+			fmt.Fprintln(stderr, "gpx_forecast_migrate: forecast: vault: FORECAST_VAULT_PKI_STORE_ROLE is required with FORECAST_STORE_MTLS=true")
+			return 1
+		}
+		cn := resolvedVault.StoreCN
+		if cn == "" {
+			cn = cfg.ConnConfig.User
+		}
+		mgr := vault.NewManager(resolvedVault.Client, resolvedVault.PKIMount, resolvedVault.StoreRole, cn, resolvedVault.CertTTL)
+		if err := mgr.Start(ctx); err != nil {
+			fmt.Fprintf(stderr, "gpx_forecast_migrate: vault: %v\n", err)
+			return 1
+		}
+		tlsCfg, err := vault.NewClientTLSConfig(mgr, cfg.ConnConfig.Host)
+		if err != nil {
+			fmt.Fprintf(stderr, "gpx_forecast_migrate: vault: %v\n", err)
+			return 1
+		}
+		cfg.ConnConfig.TLSConfig = tlsCfg
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gpx_forecast_migrate: %v\n", err)
 		return 1

@@ -38,17 +38,21 @@ compute_url = ${FORECAST_COMPUTE_URL}
 ; service refuses to start without it; this process only warns when it is
 ; missing, because the forwarded calls are then refused with 401 upstream.
 compute_token = ${FORECAST_COMPUTE_TOKEN}
-; v19: mTLS for the compute hop. Leave vault_addr empty (the default) for plain
-; HTTP, exactly as before. With it set, this process and the compute service both
-; request short-lived certificates from Vault's PKI secrets engine; the compute
-; service then listens TLS-only and requires a client certificate, and this
-; process forwards over https. vault_pki_role is the role this process uses as a
-; client; the compute service's own role must allow the DNS name in
-; compute_tls_server_name. Auth precedence: token, then AppRole, then Kubernetes.
-; The token/secret_id are secrets; prefer secureJsonData.vaultToken /
-; secureJsonData.vaultSecretId (or the pod's Secret env) over this file.
-; The compute service reads process env only, so it takes the FORECAST_VAULT_*
-; spellings directly.
+; v19/v20: mTLS from Vault's PKI secrets engine. Leave vault_addr empty (the
+; default) for plain traffic, exactly as before. The three components are
+; switched independently: compute (plugin -> gpx_forecast_compute), PVV
+; (DataByRefId retrain transport), and the Postgres snapshot store. Each
+; *_mtls flag defaults to "that component's role is configured"; set it to
+; false to turn a component off even when its role exists (for example when
+; Istio terminates mTLS in Kubernetes). A flag set true without its role is a
+; loud per-component error, never a plaintext fallback.
+; compute_mtls turns the forwarded hop into https + a required client cert;
+; pvv_mtls selects the Vault-issued PVV client cert; store_mtls makes pgx
+; present a Vault-issued client certificate to Postgres.
+; Auth precedence: token, then AppRole, then Kubernetes. The token/secret_id are
+; secrets; prefer secureJsonData.vaultToken / secureJsonData.vaultSecretId (or
+; the pod's Secret env) over this file. The compute service and the migration
+; CLI read process env only, so they take the FORECAST_VAULT_* spellings.
 ; vault_addr = ${FORECAST_VAULT_ADDR}
 ; vault_namespace = ${FORECAST_VAULT_NAMESPACE}
 ; vault_token = ${FORECAST_VAULT_TOKEN}
@@ -59,17 +63,24 @@ compute_token = ${FORECAST_COMPUTE_TOKEN}
 ; vault_k8s_mount = ${FORECAST_VAULT_K8S_MOUNT}
 ; vault_k8s_jwt_path = ${FORECAST_VAULT_K8S_JWT_PATH}
 ; vault_pki_mount = ${FORECAST_VAULT_PKI_MOUNT}
+; compute_mtls = ${FORECAST_COMPUTE_MTLS}
 ; vault_pki_role = ${FORECAST_VAULT_PKI_ROLE}
+; pvv_mtls = ${FORECAST_PVV_MTLS}
 ; Optional: issue the PVV client certificate from Vault instead of the
 ; pvv_client_cert/key files. Setting this role also selects PVV mode.
 ; vault_pki_pvv_role = ${FORECAST_VAULT_PKI_PVV_ROLE}
+; store_mtls = ${FORECAST_STORE_MTLS}
+; Role used to issue the store's client certificate. The certificate CN defaults
+; to the resolved store user (store_user below), or vault_store_cn when set.
+; vault_pki_store_role = ${FORECAST_VAULT_PKI_STORE_ROLE}
+; vault_store_cn = ${FORECAST_VAULT_STORE_CN}
 ; vault_cert_ttl = ${FORECAST_VAULT_CERT_TTL}
 ; vault_client_cn = ${FORECAST_VAULT_CLIENT_CN}
 ; vault_pvv_cn = ${FORECAST_VAULT_PVV_CN}
 ; vault_ca_cert = ${FORECAST_VAULT_CA_CERT}
 ; vault_tls_skip_verify = ${FORECAST_VAULT_TLS_SKIP_VERIFY}
 ; DNS name the compute service's certificate is issued for and the client
-; verifies. Required on the service when vault_addr is set; defaults to the
+; verifies. Required on the service when compute_mtls is on; defaults to the
 ; compute URL's hostname in this process.
 ; compute_tls_server_name = ${FORECAST_COMPUTE_TLS_SERVER_NAME}
 ; Unattended retrain scheduler. Only this process (the app) runs it, unless

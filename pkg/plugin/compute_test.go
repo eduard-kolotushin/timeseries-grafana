@@ -39,6 +39,11 @@ func clearComputeEnv(t *testing.T) {
 		"FORECAST_VAULT_PKI_MOUNT",
 		"FORECAST_VAULT_PKI_ROLE",
 		"FORECAST_VAULT_PKI_PVV_ROLE",
+		"FORECAST_VAULT_PKI_STORE_ROLE",
+		"FORECAST_COMPUTE_MTLS",
+		"FORECAST_PVV_MTLS",
+		"FORECAST_STORE_MTLS",
+		"FORECAST_VAULT_STORE_CN",
 		"FORECAST_VAULT_CERT_TTL",
 		"FORECAST_VAULT_CLIENT_CN",
 		"FORECAST_VAULT_PVV_CN",
@@ -831,23 +836,32 @@ func TestComputeMTLSForward(t *testing.T) {
 
 func TestComputeMTLSConfigurationErrors(t *testing.T) {
 	tests := []struct {
-		name    string
-		url     string
-		role    string
-		pvvRole string
-		wantErr error
+		name        string
+		url         string
+		role        string
+		pvvRole     string
+		computeFlag string
+		wantErr     error
+		wantPlain   bool
 	}{
 		{
-			name:    "http url with vault",
+			name:    "http url with compute mTLS on",
 			url:     "http://compute:8080",
 			role:    "forecast",
 			wantErr: errComputeHTTPS,
 		},
 		{
-			name:    "vault without a pki role",
-			url:     "https://compute:8080",
-			pvvRole: "pvv",
-			wantErr: errComputeVaultRole,
+			name:      "PVV role only leaves compute plain",
+			url:       "http://compute:8080",
+			pvvRole:   "pvv",
+			wantPlain: true,
+		},
+		{
+			name:        "explicit flag without a compute role",
+			url:         "https://compute:8080",
+			pvvRole:     "pvv",
+			computeFlag: "true",
+			wantErr:     errComputeVaultRole,
 		},
 	}
 	for _, tc := range tests {
@@ -857,6 +871,7 @@ func TestComputeMTLSConfigurationErrors(t *testing.T) {
 			t.Setenv("FORECAST_VAULT_TOKEN", "t")
 			t.Setenv("FORECAST_VAULT_PKI_ROLE", tc.role)
 			t.Setenv("FORECAST_VAULT_PKI_PVV_ROLE", tc.pvvRole)
+			t.Setenv("FORECAST_COMPUTE_MTLS", tc.computeFlag)
 			t.Setenv("FORECAST_COMPUTE_URL", tc.url)
 			mode := computeFrom(context.Background(), backend.AppInstanceSettings{})
 			if mode == nil {
@@ -864,6 +879,22 @@ func TestComputeMTLSConfigurationErrors(t *testing.T) {
 			}
 			if mode.cancel != nil {
 				t.Cleanup(mode.cancel)
+			}
+			if tc.wantPlain {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = io.WriteString(w, `{"plain":true}`)
+				}))
+				defer srv.Close()
+				resp, err := mode.client.Get(srv.URL)
+				if err != nil {
+					t.Fatalf("plain client: %v", err)
+				}
+				defer resp.Body.Close()
+				body, _ := io.ReadAll(resp.Body)
+				if resp.StatusCode != http.StatusOK || string(body) != `{"plain":true}` {
+					t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+				}
+				return
 			}
 			req, _ := http.NewRequest(http.MethodPost, mode.url+computeURLPath, strings.NewReader(`{}`))
 			_, err := mode.client.Do(req)
@@ -874,19 +905,35 @@ func TestComputeMTLSConfigurationErrors(t *testing.T) {
 	}
 }
 
-// TestServeComputeVaultValidation: the service refuses to start when Vault is
-// configured but its mTLS inputs are incomplete, before it opens a listener.
+// TestServeComputeVaultValidation: the service listens plain when compute mTLS
+// is off (even with another component's role configured) and refuses to start
+// only when the compute component is enabled without its role or server name.
 func TestServeComputeVaultValidation(t *testing.T) {
 	clearComputeEnv(t)
 	t.Setenv("FORECAST_COMPUTE_TOKEN", "t")
 	t.Setenv("FORECAST_VAULT_ADDR", "http://vault:8200")
 	t.Setenv("FORECAST_VAULT_TOKEN", "t")
 
-	if err := ServeCompute(context.Background(), "127.0.0.1:0"); err == nil {
-		t.Fatal("expected a missing-role error")
+	// A store role alone does not turn the compute listener TLS on.
+	t.Setenv("FORECAST_VAULT_PKI_STORE_ROLE", "forecast-pg")
+	t.Setenv("FORECAST_STORE_MTLS", "false")
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- ServeCompute(ctx, "127.0.0.1:0") }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("plain install: %v", err)
+	}
+
+	// Compute mTLS on requires both its role and the server name.
+	t.Setenv("FORECAST_COMPUTE_MTLS", "true")
+	err := ServeCompute(context.Background(), "127.0.0.1:0")
+	if !errors.Is(err, errComputeVaultRole) {
+		t.Fatalf("err = %v, want %v", err, errComputeVaultRole)
 	}
 	t.Setenv("FORECAST_VAULT_PKI_ROLE", "forecast-compute")
-	err := ServeCompute(context.Background(), "127.0.0.1:0")
+	err = ServeCompute(context.Background(), "127.0.0.1:0")
 	if !errors.Is(err, errComputeVaultServer) {
 		t.Fatalf("err = %v, want %v", err, errComputeVaultServer)
 	}

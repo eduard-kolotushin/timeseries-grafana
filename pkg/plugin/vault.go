@@ -15,27 +15,13 @@ import (
 
 const (
 	defaultVaultPKIMount = vault.DefaultPKIMount
-	defaultVaultCertTTL  = 24 * time.Hour
-	defaultVaultClientCN = "gpx-forecast"
-	defaultVaultPVVCN    = "gpx-forecast-pvv"
+	defaultVaultCertTTL  = vault.DefaultCertTTL
+	defaultVaultClientCN = vault.DefaultClientCN
+	defaultVaultPVVCN    = vault.DefaultPVVCN
 )
 
-// vaultConfig is the resolved Vault PKI configuration shared by the compute
-// client, the compute listener and the PVV retrain transport. A nil *vaultConfig
-// means Vault is not configured, so every caller keeps its pre-v19 shape.
-type vaultConfig struct {
-	client     *vault.Client
-	pkiMount   string
-	pkiRole    string
-	pvvRole    string
-	clientCN   string
-	pvvCN      string
-	certTTL    time.Duration
-	serverName string
-}
-
 // vaultFrom resolves Vault settings from the app instance settings.
-func vaultFrom(ctx context.Context, settings backend.AppInstanceSettings) (*vaultConfig, error) {
+func vaultFrom(ctx context.Context, settings backend.AppInstanceSettings) (*vault.Resolved, error) {
 	jd := map[string]any{}
 	if len(settings.JSONData) > 0 {
 		_ = json.Unmarshal(settings.JSONData, &jd)
@@ -51,8 +37,10 @@ func vaultFrom(ctx context.Context, settings backend.AppInstanceSettings) (*vaul
 // vaultFromLookup resolves Vault settings through storeLookup's ordinary chain,
 // with the bare VAULT_ADDR / VAULT_TOKEN variables as a last env fallback (they
 // are the names Vault's own tooling exports). Secure JSON values are consulted
-// only for the two secrets, like computeToken and grafanaToken.
-func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*vaultConfig, error) {
+// only for the two secrets, like computeToken and grafanaToken. The three
+// component switches default to "that component's role is configured"; an
+// explicit false disables a component even when its role is set.
+func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*vault.Resolved, error) {
 	getenv := look.getenv
 	if getenv == nil {
 		getenv = os.Getenv
@@ -96,25 +84,41 @@ func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*v
 	if err != nil {
 		return nil, err
 	}
-	pkiRole := look.Get("FORECAST_VAULT_PKI_ROLE", "VAULT_PKI_ROLE", "vault_pki_role", "vaultPkiRole")
+	computeRole := look.Get("FORECAST_VAULT_PKI_ROLE", "VAULT_PKI_ROLE", "vault_pki_role", "vaultPkiRole")
 	pvvRole := look.Get("FORECAST_VAULT_PKI_PVV_ROLE", "VAULT_PKI_PVV_ROLE", "vault_pki_pvv_role", "vaultPvvRole")
-	if pkiRole == "" && pvvRole == "" {
-		return nil, errors.New("forecast: vault: FORECAST_VAULT_PKI_ROLE is required when FORECAST_VAULT_ADDR is set")
+	storeRole := look.Get("FORECAST_VAULT_PKI_STORE_ROLE", "VAULT_PKI_STORE_ROLE", "vault_pki_store_role", "vaultPkiStoreRole")
+	computeMTLS := parseBool(look.Get("FORECAST_COMPUTE_MTLS", "COMPUTE_MTLS", "compute_mtls", "computeMtls"), computeRole != "")
+	pvvMTLS := parseBool(look.Get("FORECAST_PVV_MTLS", "PVV_MTLS", "pvv_mtls", "pvvMtls"), pvvRole != "")
+	storeMTLS := parseBool(look.Get("FORECAST_STORE_MTLS", "STORE_MTLS", "store_mtls", "storeMtls"), storeRole != "")
+	if computeRole == "" && pvvRole == "" && storeRole == "" && !computeMTLS && !pvvMTLS && !storeMTLS {
+		return nil, errors.New("forecast: vault: no component role is configured (compute, pvv, store)")
 	}
 	ttl := parseDuration(look.Get("FORECAST_VAULT_CERT_TTL", "VAULT_CERT_TTL", "vault_cert_ttl", "vaultCertTtl"), defaultVaultCertTTL)
 	if ttl < time.Minute {
 		log.DefaultLogger.Warn("forecast: ignoring the Vault certificate TTL", "ttl", ttl, "default", defaultVaultCertTTL)
 		ttl = defaultVaultCertTTL
 	}
-	return &vaultConfig{
-		client:     client,
-		pkiMount:   defaultString(look.Get("FORECAST_VAULT_PKI_MOUNT", "VAULT_PKI_MOUNT", "vault_pki_mount", "vaultPkiMount"), defaultVaultPKIMount),
-		pkiRole:    pkiRole,
-		pvvRole:    pvvRole,
-		clientCN:   defaultString(look.Get("FORECAST_VAULT_CLIENT_CN", "VAULT_CLIENT_CN", "vault_client_cn", "vaultClientCn"), defaultVaultClientCN),
-		pvvCN:      defaultString(look.Get("FORECAST_VAULT_PVV_CN", "VAULT_PVV_CN", "vault_pvv_cn", "vaultPvvCn"), defaultVaultPVVCN),
-		certTTL:    ttl,
-		serverName: look.Get("FORECAST_COMPUTE_TLS_SERVER_NAME", "COMPUTE_TLS_SERVER_NAME", "compute_tls_server_name", "computeTlsServerName"),
+	storeCN := look.Get("FORECAST_VAULT_STORE_CN", "VAULT_STORE_CN", "vault_store_cn", "vaultStoreCn")
+	if storeCN == "" {
+		storeCN = look.Get("FORECAST_STORE_USER", "STORE_USER", "store_user", "storeUser")
+	}
+	if storeCN == "" {
+		storeCN = "overlay"
+	}
+	return &vault.Resolved{
+		Client:      client,
+		PKIMount:    defaultString(look.Get("FORECAST_VAULT_PKI_MOUNT", "VAULT_PKI_MOUNT", "vault_pki_mount", "vaultPkiMount"), defaultVaultPKIMount),
+		ComputeRole: computeRole,
+		PVVRole:     pvvRole,
+		StoreRole:   storeRole,
+		ClientCN:    defaultString(look.Get("FORECAST_VAULT_CLIENT_CN", "VAULT_CLIENT_CN", "vault_client_cn", "vaultClientCn"), defaultVaultClientCN),
+		PVVCN:       defaultString(look.Get("FORECAST_VAULT_PVV_CN", "VAULT_PVV_CN", "vault_pvv_cn", "vaultPvvCn"), defaultVaultPVVCN),
+		StoreCN:     storeCN,
+		ServerName:  look.Get("FORECAST_COMPUTE_TLS_SERVER_NAME", "COMPUTE_TLS_SERVER_NAME", "compute_tls_server_name", "computeTlsServerName"),
+		CertTTL:     ttl,
+		ComputeMTLS: computeMTLS,
+		PVVMTLS:     pvvMTLS,
+		StoreMTLS:   storeMTLS,
 	}, nil
 }
 

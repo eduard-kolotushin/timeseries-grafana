@@ -109,6 +109,7 @@ type fakeVault struct {
 
 	forbidFirstIssue bool
 	loginToken       string
+	nextPKI          *testPKI
 }
 
 func (f *fakeVault) handler(t *testing.T) http.Handler {
@@ -163,6 +164,10 @@ func (f *fakeVault) handler(t *testing.T) http.Handler {
 		f.mu.Lock()
 		f.issues++
 		forbid := f.forbidFirstIssue && f.issues == 1
+		pki := f.pki
+		if f.nextPKI != nil && f.issues > 1 {
+			pki = *f.nextPKI
+		}
 		f.mu.Unlock()
 		if forbid {
 			http.Error(w, `{"errors":["permission denied"]}`, http.StatusForbidden)
@@ -173,9 +178,9 @@ func (f *fakeVault) handler(t *testing.T) http.Handler {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
-			"certificate": f.pki.certPEM,
-			"private_key": f.pki.keyPEM,
-			"ca_chain":    []string{f.pki.caPEM},
+			"certificate": pki.certPEM,
+			"private_key": pki.keyPEM,
+			"ca_chain":    []string{pki.caPEM},
 		}})
 	})
 	return mux

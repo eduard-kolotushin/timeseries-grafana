@@ -6,6 +6,7 @@ import (
 	"time"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 )
 
@@ -20,11 +21,11 @@ const (
 	snapshotCacheMax = 256
 )
 
-func connectStore(ctx context.Context, dsn string) (SnapshotStore, func()) {
+func connectStore(ctx context.Context, dsn string, mgr *vault.Manager) (SnapshotStore, func()) {
 	if dsn == "" {
 		return nil, nil
 	}
-	pg, err := openPostgresStore(ctx, dsn)
+	pg, err := openPostgresStore(ctx, dsn, mgr)
 	if err != nil {
 		log.DefaultLogger.Error("forecast store", "err", err.Error())
 		return errStore{err: err}, nil
@@ -36,11 +37,11 @@ func connectStore(ctx context.Context, dsn string) (SnapshotStore, func()) {
 // the schedule store, so the app process never dials Postgres twice for the same
 // database. A DSN that cannot even be parsed yields error stores rather than nil:
 // the scheduler keeps ticking and logging per attempt instead of silently idling.
-func connectStores(ctx context.Context, dsn string) (SnapshotStore, ScheduleStore, func()) {
+func connectStores(ctx context.Context, dsn string, mgr *vault.Manager) (SnapshotStore, ScheduleStore, func()) {
 	if dsn == "" {
 		return nil, nil, nil
 	}
-	pg, err := openPostgresStore(ctx, dsn)
+	pg, err := openPostgresStore(ctx, dsn, mgr)
 	if err != nil {
 		log.DefaultLogger.Error("forecast store", "err", err.Error())
 		return errStore{err: err}, errScheduleStore{err: err}, nil

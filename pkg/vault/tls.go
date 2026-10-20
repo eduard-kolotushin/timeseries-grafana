@@ -3,6 +3,7 @@ package vault
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"net/http"
 	"sync/atomic"
 )
@@ -97,4 +98,35 @@ func (t *RotatingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, ErrNoCertificate
 	}
 	return tr.RoundTrip(req)
+}
+
+// NewClientTLSConfig is for TLS clients that take a *tls.Config instead of an
+// http.RoundTripper, such as pgx. The client certificate rotates with the
+// manager (every new connection picks up the current leaf); the root pool is the
+// CA chain of the current issue, so rotating the Vault CA itself needs a
+// restart. Call after Manager.Start's first successful issue.
+func NewClientTLSConfig(m *Manager, serverName string) (*tls.Config, error) {
+	if m == nil {
+		return nil, ErrNoCertificate
+	}
+	_, caPEM, ok := m.snapshotPEM()
+	if !ok {
+		return nil, ErrNoCertificate
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("forecast: vault: CA chain contains no certificates")
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: serverName,
+		RootCAs:    pool,
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			cert, _, ok := m.Snapshot()
+			if !ok || cert == nil {
+				return nil, ErrNoCertificate
+			}
+			return cert, nil
+		},
+	}, nil
 }

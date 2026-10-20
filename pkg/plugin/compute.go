@@ -51,8 +51,8 @@ var (
 	errComputeNoToken      = errors.New("forecast compute: FORECAST_COMPUTE_TOKEN is required: the service refuses unauthenticated requests")
 	errComputeHealthMethod = errors.New("forecast compute: health probe is GET-only")
 	errComputeHTTPS        = errors.New("forecast: compute url must be https when vault mTLS is configured")
-	errComputeVaultRole    = errors.New("forecast: vault: FORECAST_VAULT_PKI_ROLE is required for compute mTLS")
-	errComputeVaultServer  = errors.New("forecast compute: FORECAST_COMPUTE_TLS_SERVER_NAME is required when FORECAST_VAULT_ADDR is set")
+	errComputeVaultRole    = errors.New("forecast: vault: FORECAST_VAULT_PKI_ROLE is required with FORECAST_COMPUTE_MTLS=true")
+	errComputeVaultServer  = errors.New("forecast compute: FORECAST_COMPUTE_TLS_SERVER_NAME is required with FORECAST_COMPUTE_MTLS=true")
 )
 
 // errorTransport fails every request with one configuration reason. It lets the
@@ -111,8 +111,8 @@ func computeFrom(ctx context.Context, settings backend.AppInstanceSettings) *com
 	case verr != nil:
 		log.DefaultLogger.Error("forecast: vault configuration refused; forwarded calls will fail", "err", verr.Error())
 		mode.client.Transport = errorTransport{verr}
-	case vc != nil:
-		if vc.pkiRole == "" {
+	case vc != nil && vc.ComputeMTLS:
+		if vc.ComputeRole == "" {
 			log.DefaultLogger.Error("forecast: compute mTLS needs a PKI role", "err", errComputeVaultRole.Error())
 			mode.client.Transport = errorTransport{errComputeVaultRole}
 			break
@@ -123,12 +123,12 @@ func computeFrom(ctx context.Context, settings backend.AppInstanceSettings) *com
 			mode.client.Transport = errorTransport{errComputeHTTPS}
 			break
 		}
-		serverName := vc.serverName
+		serverName := vc.ServerName
 		if serverName == "" {
 			serverName = parsed.Hostname()
 		}
 		mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		mgr := vault.NewManager(vc.client, vc.pkiMount, vc.pkiRole, vc.clientCN, vc.certTTL)
+		mgr := vault.NewManager(vc.Client, vc.PKIMount, vc.ComputeRole, vc.ClientCN, vc.CertTTL)
 		if err := mgr.Start(mgrCtx); err != nil {
 			// The manager keeps retrying in the background; until it succeeds the
 			// transport answers ErrNoCertificate, which the forwarding path turns
@@ -137,7 +137,9 @@ func computeFrom(ctx context.Context, settings backend.AppInstanceSettings) *com
 		}
 		mode.cancel = cancel
 		mode.client.Transport = vault.NewClientTransport(mgr, serverName, nil, false)
-		log.DefaultLogger.Info("forecast: compute mTLS enabled", "server_name", serverName, "pki_role", vc.pkiRole)
+		log.DefaultLogger.Info("forecast: compute mTLS enabled", "server_name", serverName, "pki_role", vc.ComputeRole)
+	case vc != nil:
+		log.DefaultLogger.Info("forecast: compute mTLS disabled", "url", baseURL)
 	}
 	return mode
 }
@@ -276,14 +278,14 @@ func ServeCompute(ctx context.Context, addr string) error {
 		return err
 	}
 	var mgr *vault.Manager
-	if vc != nil {
-		if vc.pkiRole == "" {
+	if vc != nil && vc.ComputeMTLS {
+		if vc.ComputeRole == "" {
 			return errComputeVaultRole
 		}
-		if vc.serverName == "" {
+		if vc.ServerName == "" {
 			return errComputeVaultServer
 		}
-		mgr = vault.NewManager(vc.client, vc.pkiMount, vc.pkiRole, vc.serverName, vc.certTTL)
+		mgr = vault.NewManager(vc.Client, vc.PKIMount, vc.ComputeRole, vc.ServerName, vc.CertTTL)
 		if err := mgr.Start(ctx); err != nil {
 			return fmt.Errorf("forecast compute: vault: %w", err)
 		}

@@ -29,10 +29,10 @@ type App struct {
 	retrain retrainConfig
 	close   func()
 	cancel  func()
-	// vaultCancel stops the PVV certificate manager. It is nil without Vault.
-	vaultCancel func()
-	limit       *workLimiter
-	maxBody     int64
+	// vaultCancels stop the per-component certificate managers (PVV, store).
+	vaultCancels []func()
+	limit        *workLimiter
+	maxBody      int64
 }
 
 // NewApp creates a new *App instance.
@@ -70,23 +70,47 @@ func newAppWith(ctx context.Context, settings backend.AppInstanceSettings, store
 		maxBody: maxForecastBodyBytes,
 	}
 	log.DefaultLogger.Info("forecast compute mode", "mode", mode, "url", url)
-	if store == nil {
-		app.store, app.sched, app.close = connectStores(ctx, storeDSN(ctx, settings))
-	}
-	if vc, verr := vaultFrom(ctx, settings); verr != nil {
+	// Vault is resolved before the store is opened: the store's pgx TLS config
+	// needs a signed client certificate, and each component's manager is
+	// independent so one switch can be off while another is on.
+	vc, verr := vaultFrom(ctx, settings)
+	if verr != nil {
 		log.DefaultLogger.Error("forecast: vault configuration refused", "err", verr.Error())
-	} else if vc != nil && vc.pvvRole != "" && app.compute == nil {
-		// The ticker (and therefore PVV) runs in this process only in inline mode;
-		// in remote mode the compute service issues its own PVV certificate.
-		mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		mgr := vault.NewManager(vc.client, vc.pkiMount, vc.pvvRole, vc.pvvCN, vc.certTTL)
-		if err := mgr.Start(mgrCtx); err != nil {
-			// The manager keeps retrying; until it succeeds PVV fetches fail with
-			// ErrNoCertificate rather than falling back to Grafana mode.
-			log.DefaultLogger.Error("forecast: vault pvv issue failed", "err", err.Error())
+	}
+	var storeMgr *vault.Manager
+	if vc != nil && vc.StoreMTLS {
+		if vc.StoreRole == "" {
+			log.DefaultLogger.Error("forecast: vault store mTLS needs a role", "err", "FORECAST_VAULT_PKI_STORE_ROLE is required with FORECAST_STORE_MTLS=true")
+		} else {
+			mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+			storeMgr = vault.NewManager(vc.Client, vc.PKIMount, vc.StoreRole, vc.StoreCN, vc.CertTTL)
+			if err := storeMgr.Start(mgrCtx); err != nil {
+				// The manager retries in the background; until it succeeds the pool
+				// reports ErrNoCertificate and health stays red.
+				log.DefaultLogger.Error("forecast: vault store issue failed", "err", err.Error())
+			}
+			app.vaultCancels = append(app.vaultCancels, cancel)
 		}
-		app.retrain.PVVManager = mgr
-		app.vaultCancel = cancel
+	}
+	if store == nil {
+		app.store, app.sched, app.close = connectStores(ctx, storeDSN(ctx, settings), storeMgr)
+	}
+	if vc != nil && vc.PVVMTLS && app.compute == nil {
+		if vc.PVVRole == "" {
+			log.DefaultLogger.Error("forecast: vault pvv mTLS needs a role", "err", "FORECAST_VAULT_PKI_PVV_ROLE is required with FORECAST_PVV_MTLS=true")
+		} else {
+			// The ticker (and therefore PVV) runs in this process only in inline
+			// mode; in remote mode the compute service issues its own certificate.
+			mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+			mgr := vault.NewManager(vc.Client, vc.PKIMount, vc.PVVRole, vc.PVVCN, vc.CertTTL)
+			if err := mgr.Start(mgrCtx); err != nil {
+				// The manager keeps retrying; until it succeeds PVV fetches fail
+				// with ErrNoCertificate rather than falling back to Grafana mode.
+				log.DefaultLogger.Error("forecast: vault pvv issue failed", "err", err.Error())
+			}
+			app.retrain.PVVManager = mgr
+			app.vaultCancels = append(app.vaultCancels, cancel)
+		}
 	}
 	if app.poster == nil {
 		app.poster = newGrafanaPoster(app.retrain)
@@ -120,8 +144,8 @@ func (a *App) Dispose() {
 	if a.compute != nil && a.compute.cancel != nil {
 		a.compute.cancel()
 	}
-	if a.vaultCancel != nil {
-		a.vaultCancel()
+	for _, cancel := range a.vaultCancels {
+		cancel()
 	}
 	if a.close != nil {
 		a.close()

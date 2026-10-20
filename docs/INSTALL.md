@@ -166,6 +166,20 @@ section's `compute_url` taking effect.
 Defaults when a key is absent: port `5432`, database `overlay`, user `overlay`, sslmode `disable`. An
 empty host (and no URL) means "no store": the overlay then retrains on every load.
 
+**Postgres mTLS (v20)** is a separate switch from the compute hop and PVV. Set `FORECAST_STORE_MTLS=true`
+(the app, the datasource instance, the compute service and `gpx_forecast_migrate` all honor it), configure
+Vault as for the other components, and set `FORECAST_VAULT_PKI_STORE_ROLE` to the PKI role that issues the
+store's client certificate. The CN defaults to the resolved `store_user` (override with
+`FORECAST_VAULT_STORE_CN`); the Vault CA from the issue response is the pgx root. `pgx` presents the
+certificate through a `GetClientCertificate` callback, so a renewed certificate is used by new pool
+connections without a restart; a rotation of the Vault CA itself needs a rolling restart. `sslmode` in the
+DSN is superseded when the switch is on. With the switch off (the default when no store role is set), the
+connection is exactly the pre-v20 `sslmode`-only behavior.
+
+A component's flag can be set to `false` even when its role exists — that is the Kubernetes/Istio shape,
+where the sidecar terminates mTLS and the application talks plain. A flag set `true` without its role is
+an error naming the missing key.
+
 ## 7. The Forecast datasource (for Grafana alerting)
 
 Alert rules that plot forecast or interval series query the nested datasource, which **Restores** a
@@ -356,11 +370,16 @@ lease makes N tickers safe.
 
 ### mTLS from Vault PKI
 
-Set `FORECAST_VAULT_ADDR` on both the app and the service to turn the hop into mTLS. The service then
-refuses to start without `FORECAST_VAULT_PKI_ROLE` and `FORECAST_COMPUTE_TLS_SERVER_NAME` and a working
-initial issue, and listens TLS-only with `RequireAndVerifyClientCert`; the app forwards over `https`
-only. Certificates are issued by `pki/issue/<role>` and re-issued at half their remaining lifetime, so
-rotation needs no restart. Auth is tried in the order static token (`FORECAST_VAULT_TOKEN`, then bare
+Each component has its own switch (v20): `FORECAST_COMPUTE_MTLS` for the hop, `FORECAST_PVV_MTLS` for the
+retrain transport, `FORECAST_STORE_MTLS` for Postgres. Each defaults to "its Vault role is configured";
+an explicit `false` disables that component even when the role exists, which is how a Kubernetes install
+running under Istio keeps plain traffic while a VM install enforces mTLS in app config.
+
+With compute mTLS on, set `FORECAST_VAULT_ADDR` and `FORECAST_VAULT_PKI_ROLE` on both the app and the
+service. The service then refuses to start without `FORECAST_COMPUTE_TLS_SERVER_NAME` and a working
+initial issue, and listens TLS-only with `RequireAndVerifyClientCert`; the app forwards over `https` only.
+Certificates are issued by `pki/issue/<role>` and re-issued at half their remaining lifetime, so rotation
+needs no restart. Auth is tried in the order static token (`FORECAST_VAULT_TOKEN`, then bare
 `VAULT_TOKEN`), AppRole (`FORECAST_VAULT_ROLE_ID` + `FORECAST_VAULT_SECRET_ID`), Kubernetes
 (`FORECAST_VAULT_K8S_ROLE`, JWT re-read from the service-account file). `FORECAST_VAULT_CERT_TTL`
 (default `24h`) requests the TTL; `FORECAST_VAULT_PKI_MOUNT` defaults to `pki`. On the app, the plain
@@ -368,9 +387,10 @@ keys may also be jsonData (`vaultAddr`, `vaultPkiRole`, …) and the two secrets
 / `vaultSecretId`; the service reads process env only.
 
 To move the v18 PVV client certificate to Vault as well, set `FORECAST_VAULT_PKI_PVV_ROLE` (on the app,
-the compute service, or both): the PVV transport then presents a Vault-issued certificate with CN
-`FORECAST_VAULT_PVV_CN` (default `gpx-forecast-pvv`), and PVV mode is selected by that role even without
-the file pair. PVV's server CA stays `FORECAST_PVV_CA_CERT`.
+the compute service, or both) and leave `FORECAST_PVV_MTLS` true: the PVV transport then presents a
+Vault-issued certificate with CN `FORECAST_VAULT_PVV_CN` (default `gpx-forecast-pvv`), and PVV mode is
+selected by that role even without the file pair. Setting `FORECAST_PVV_MTLS=false` keeps the file pair as
+the only possible source. PVV's server CA stays `FORECAST_PVV_CA_CERT`.
 
 The service exposes `/forecast`, `/ping` and an unauthenticated coarse `/healthz`; it deliberately does
 not serve the schedules API.

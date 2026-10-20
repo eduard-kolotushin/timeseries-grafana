@@ -29,8 +29,8 @@ Grafana app plugin that overlays univariate forecasts on dashboard queries. The 
 - Nested datasource `QueryData` Restores snapshots; alerting uses Grafana `refId`s (metric vs forecast / interval)
 - Do not host a Druid/Kafka ticker here (see `timeseries-baselines`)
 - No Prometheus, OpenSearch, or Postgres **datasource HTTP** in `pkg/` (`gpx_forecast` stays datasource-agnostic). pgx may store fitted snapshots and schedules; `POST /api/ds/query` on Grafana's own API is not a datasource client. The PVV `/gse/data/v1/DataByRefId` client is the named exception: it is a b2b retrain transport selected by configuration, not a datasource client, and no datasource type or field name enters `pkg/`
-- Stay within v1–v19 unless `docs/INTENTIONS.md` is updated first
-- The compute service (`cmd/compute`, `gpx_forecast_compute`) runs the same `pkg/plugin` `/forecast` handler and the same retrain ticker over plain HTTP (or TLS requiring a Vault-PKI client certificate when `FORECAST_VAULT_ADDR` is set): no second fit or dispatch implementation, no datasource client, and it reads process env only (never grafana.ini or jsonData)
+- Stay within v1–v20 unless `docs/INTENTIONS.md` is updated first
+- The compute service (`cmd/compute`, `gpx_forecast_compute`) runs the same `pkg/plugin` `/forecast` handler and the same retrain ticker over plain HTTP, or TLS requiring a Vault-PKI client certificate when compute mTLS is enabled (`FORECAST_COMPUTE_MTLS`): no second fit or dispatch implementation, no datasource client, and it reads process env only (never grafana.ini or jsonData)
 - `Jenkinsfile` is the **corporate pipeline template**, delivered by the platform team and working as delivered. Never modify it — not for lint, naming, an audit finding or a CI tweak; any change goes to the platform team. GitHub Actions does not run it
 
 ## v1 in scope
@@ -109,7 +109,11 @@ Unattended retraining can fetch a panel's training frames through Grafana's `/ap
 
 mTLS on the plugin→compute hop from Vault PKI-issued dynamic certs (`pkg/vault`, stdlib client; token/AppRole/Kubernetes auth; re-issue at half the leaf lifetime; PVV client certs optionally from Vault). Default without Vault is v16's plain HTTP.
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19 out of scope
+## v20 in scope
+
+Per-component mTLS switches (`COMPUTE_MTLS` / `PVV_MTLS` / `STORE_MTLS`, default = that component's Vault role), and Postgres snapshot-store mTLS with Vault-issued rotating client certs (`FORECAST_VAULT_PKI_STORE_ROLE`, CN default the store user) wired through pgx for app, datasource, compute service and migrate CLI. A flag off keeps that component's pre-v19 plain shape.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20 out of scope
 
 Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see `timeseries-k8s`), Grafana.com signing/publish, Prom/OS/PG **datasource HTTP** in `pkg/`, Elasticsearch plugin type, shipping Grafana alert rules or contact points, extra app pages beyond the landing, Configuration, and Retrain schedules pages, baseline publisher process, a job queue, a second migration tool (Flyway, goose, golang-migrate) or a schema-diff ORM, an integer surrogate key on any table this plugin owns, retention outside the retrain ticker (a second scheduler, a Grafana-side cron, a separate collector process, or a table the worker owns). `gpx_forecast_compute` is the named exception to "a separate process": it is the same ticker and the same `/forecast` handler, so it is not a second scheduler, a second dispatch implementation, a second compute transport, or a service that reads grafana.ini / jsonData (process env only, like `gpx_forecast_migrate`). A panel that talks to the compute service directly, and a silent local fit when it is unreachable, are out of scope too. So is a remote **plugin backend** (Grafana dialing another host's plugin gRPC port through the SDK's standalone client mode, `GF_PLUGIN_GRPC_ADDRESS_*` + `standalone.txt`/`pid.txt`): it is reachable but is a debugging facility whose hop carries no credential of its own — see the v16 non-goals in `docs/INTENTIONS.md`, and [ARCHITECTURE](docs/ARCHITECTURE.md)'s "Why an HTTP service and not a remote plugin backend".
 
@@ -118,7 +122,7 @@ Docker Compose sandbox (see `timeseries-grafana-sandbox`), Kubernetes Helm (see 
 - Table-driven Go tests for the forecast resource, datasource `QueryData`, and the schedule resource
 - Table-driven Go tests for the compute boundary: mode resolution across every spelling, the token/org middleware (401/400 and the injected org), the verbatim forward (status, content type, body; 502 when unreachable; 413 before the upstream call), the `/forecast`+`/ping`+`/healthz` route subset, and that remote mode starts no ticker
 - Table-driven Go tests for the PVV boundary: mode selection by client-cert presence, mTLS DataByRefId request shape (no bearer/queryHash), 24h chunk split and merged deduped series, `org_id` from the row, all-org claim in PVV mode, and no per-row dsquery fallback
-- Table-driven Go tests for the v19 Vault boundary: auth precedence (token/AppRole/Kubernetes), PKI issue parse, 403 re-login, half-life refresh, server TLS requiring a client cert, the forwarding client's mTLS handshake, PVV certificate sourcing, and the compute service's startup refusals
+- Table-driven Go tests for the v19/v20 Vault boundary: auth precedence (token/AppRole/Kubernetes), PKI issue parse, 403 re-login, half-life refresh, server TLS requiring a client cert, the forwarding client's mTLS handshake, PVV certificate sourcing, per-component flag resolution (explicit off wins, role-presence default), the pgx TLS config's rotating client certificate, and the compute service's startup refusals
 - Table-driven frontend tests for train rewrite, extract/match, cache fingerprint, `trainSource` capture, mixed frames, forecast-query `cacheKey`, the one-click alert rule synthesis (window, reduce/math/threshold chain, series choice and its reasons, and the synthesized query's `cacheKey`), overlay load limits, and the schedule API/UI
 - Depend on tagged `timeseries` and `timeseries-forecast` modules; do not add a `replace` directive
 - `make build` writes frontend + Linux backend + migration CLI + compute service to `dist/`
