@@ -1,60 +1,52 @@
-; Snapshot store for eduardkolotushin-forecast-app and the nested
-; eduardkolotushin-forecast-datasource (alerting QueryData is a second process).
+; =============================================================================
+; timeseries-grafana — grafana.ini fragment
+; =============================================================================
+; Snapshot store, compute hop, Vault and the retrain scheduler for
+;   [plugin.eduardkolotushin-forecast-app]       (gpx_forecast, the app backend)
+;   [plugin.eduardkolotushin-forecast-datasource] (gpx_forecast, alerting QueryData)
 ; Merge both sections into grafana.ini (or custom.ini). Grafana expands ${VAR}.
-; Empty store_host (and no store_url) means persist is off (always needTrain).
 ; CI/CD may substitute the placeholders instead of relying on Grafana expansion.
 ;
-; Precedence in gpx_forecast: FORECAST_STORE_* env (only if Grafana forwards host
-; env; Grafana 12.4+ does not by default), then GF_PLUGIN_* for this process's
-; plugin id, then the id-less GF_PLUGIN_<KEY> Grafana 13 exports for this same
-; section ([plugin.<id>] store_host arrives as GF_PLUGIN_STORE_HOST), then this
-; plugin section via GrafanaCfg, then jsonData
-; (provisioned app or Forecast datasource jsonData; the plugin's pages
-; render no store fields).
+; Each [plugin.<id>] section belongs to one process. Inside a section the
+; COMPONENT blocks group one peer; the FUNCTION blocks group why its keys exist.
+; INI order does not matter; this order is for operators.
+;
+; SECRETS — prefer secureJsonData or the pod's Secret env over a literal here:
+;   app:        secureJsonData.vaultToken, .vaultSecretId, .computeToken,
+;               .grafanaToken, .storePassword
+;   datasource: secureJsonData.vaultToken, .vaultSecretId, .storePassword
+;
+; CERTIFICATES ARE PATHS, NOT CONTENT. Every *_ca_cert, *_client_cert and
+; *_client_key value is a file path; a value containing a PEM block is rejected.
+;
+; PRECEDENCE in gpx_forecast: FORECAST_* env (only if Grafana forwards host env;
+; Grafana 12.4+ does not by default), then GF_PLUGIN_* for this process's plugin
+; id, then the id-less GF_PLUGIN_<KEY> Grafana 13 exports for this same section
+; ([plugin.<id>] store_host arrives as GF_PLUGIN_STORE_HOST), then this plugin
+; section via GrafanaCfg, then jsonData. The compute service and
+; gpx_forecast_migrate read process env only.
+;
+; =============================================================================
+
 
 [plugin.eduardkolotushin-forecast-app]
-; Optional full DSN. If set, the fields below are ignored.
-; store_url = ${FORECAST_STORE_URL}
-store_host = ${FORECAST_STORE_HOST}
-store_port = ${FORECAST_STORE_PORT}
-store_database = ${FORECAST_STORE_DATABASE}
-store_user = ${FORECAST_STORE_USER}
-store_ssl_mode = ${FORECAST_STORE_SSLMODE}
-store_password = ${FORECAST_STORE_PASSWORD}
-; How long a snapshot nothing refreshed may live (the retrain ticker's retention sweep;
-; default 72h, 0 disables, a value below 1h falls back to the default).
-; snapshot_ttl = ${FORECAST_SNAPSHOT_TTL}
-; Concurrent Fit / ForecastRange slots in this process (default 4; when compute_url
-; below is set, this process forwards instead of fitting and the default is 32).
-max_inflight = ${FORECAST_MAX_INFLIGHT}
-; Where fitting runs. Empty (the default) keeps every fit and the retrain ticker
-; in this process. Set it to the standalone compute service's base URL
-; (gpx_forecast_compute, env FORECAST_COMPUTE_LISTEN, default :8080) and this
-; process forwards /forecast to that service and runs no ticker; the service needs
-; FORECAST_COMPUTE_TOKEN and runs its own ticker against the same store. The
-; service reads process env only (no ini, no jsonData), and it ignores this key.
-compute_url = ${FORECAST_COMPUTE_URL}
-; Shared secret the compute service requires on every forwarded request. The
-; service refuses to start without it; this process only warns when it is
-; missing, because the forwarded calls are then refused with 401 upstream.
-compute_token = ${FORECAST_COMPUTE_TOKEN}
-; v19/v20: mTLS from Vault's PKI secrets engine. Leave vault_addr empty (the
-; default) for plain traffic, exactly as before. The three components are
-; switched independently: compute (plugin -> gpx_forecast_compute), PVV
-; (DataByRefId retrain transport), and the Postgres snapshot store. Each
-; *_mtls flag defaults to "that component's role is configured"; set it to
-; false to turn a component off even when its role exists (for example when
-; Istio terminates mTLS in Kubernetes). A flag set true without its role is a
-; loud per-component error, never a plaintext fallback.
-; compute_mtls turns the forwarded hop into https + a required client cert;
-; pvv_mtls selects the Vault-issued PVV client cert; store_mtls makes pgx
-; present a Vault-issued client certificate to Postgres.
-; Auth precedence: token, then AppRole, then Kubernetes. The token/secret_id are
-; secrets; prefer secureJsonData.vaultToken / secureJsonData.vaultSecretId (or
-; the pod's Secret env) over this file. The compute service and the migration
-; CLI read process env only, so they take the FORECAST_VAULT_* spellings.
+
+; -----------------------------------------------------------------------------
+; COMPONENT: Vault — shared PKI/authentication endpoint
+; -----------------------------------------------------------------------------
+; Leave vault_addr empty (the default) for no Vault. The compute, PVV and store
+; components then keep their plain/file behaviour. Vault is also the fourth
+; selectable mTLS hop (v21): the connection to Vault can require its own client
+; certificate, which cannot come from the same Vault.
+
+; FUNCTION: connection
 ; vault_addr = ${FORECAST_VAULT_ADDR}
 ; vault_namespace = ${FORECAST_VAULT_NAMESPACE}
+; vault_ca_cert = ${FORECAST_VAULT_CA_CERT}
+; vault_tls_skip_verify = ${FORECAST_VAULT_TLS_SKIP_VERIFY}
+
+; FUNCTION: authentication
+; Precedence: token, then AppRole, then Kubernetes. Use a Secret-backed token.
 ; vault_token = ${FORECAST_VAULT_TOKEN}
 ; vault_role_id = ${FORECAST_VAULT_ROLE_ID}
 ; vault_secret_id = ${FORECAST_VAULT_SECRET_ID}
@@ -62,72 +54,50 @@ compute_token = ${FORECAST_COMPUTE_TOKEN}
 ; vault_k8s_role = ${FORECAST_VAULT_K8S_ROLE}
 ; vault_k8s_mount = ${FORECAST_VAULT_K8S_MOUNT}
 ; vault_k8s_jwt_path = ${FORECAST_VAULT_K8S_JWT_PATH}
+
+; FUNCTION: PKI issuance defaults
+; pki_mount defaults to "pki"; cert_ttl requests the leaf lifetime (default 24h).
 ; vault_pki_mount = ${FORECAST_VAULT_PKI_MOUNT}
-; compute_mtls = ${FORECAST_COMPUTE_MTLS}
-; vault_pki_role = ${FORECAST_VAULT_PKI_ROLE}
-; pvv_mtls = ${FORECAST_PVV_MTLS}
-; Optional: issue the PVV client certificate from Vault instead of the
-; pvv_client_cert/key files. Setting this role also selects PVV mode.
-; vault_pki_pvv_role = ${FORECAST_VAULT_PKI_PVV_ROLE}
-; store_mtls = ${FORECAST_STORE_MTLS}
-; Role used to issue the store's client certificate. The certificate CN defaults
-; to the resolved store user (store_user below), or vault_store_cn when set.
-; vault_pki_store_role = ${FORECAST_VAULT_PKI_STORE_ROLE}
-; vault_store_cn = ${FORECAST_VAULT_STORE_CN}
 ; vault_cert_ttl = ${FORECAST_VAULT_CERT_TTL}
-; vault_client_cn = ${FORECAST_VAULT_CLIENT_CN}
-; vault_pvv_cn = ${FORECAST_VAULT_PVV_CN}
-; vault_ca_cert = ${FORECAST_VAULT_CA_CERT}
-; vault_tls_skip_verify = ${FORECAST_VAULT_TLS_SKIP_VERIFY}
-; Client-certificate mTLS to Vault itself. The certificate cannot come from the
-; same Vault (it is needed to reach Vault), so these are file paths. Both are
-; required when vault_mtls is on; unset defaults to "either path is set" (a
-; lone half is an error). PEM content is rejected.
+
+; FUNCTION: client certificate for the Vault connection itself (v21)
+; File paths only. Both are required when vault_mtls is on; unset defaults to
+; "either path is set" (a lone half is an error). Read once: rotate with a restart.
 ; vault_mtls = ${FORECAST_VAULT_MTLS}
 ; vault_client_cert = ${FORECAST_VAULT_CLIENT_CERT}
 ; vault_client_key = ${FORECAST_VAULT_CLIENT_KEY}
-; DNS name the compute service's certificate is issued for and the client
-; verifies. Required on the service when compute_mtls is on; defaults to the
-; compute URL's hostname in this process.
-; compute_tls_server_name = ${FORECAST_COMPUTE_TLS_SERVER_NAME}
-; Unattended retrain scheduler. Only this process (the app) runs it, unless
-; compute_url above moves it to the compute service; the datasource section below
-; never runs it, because alerting QueryData only Restores.
-; The scheduler claims due rows from forecast.retrain. In Grafana mode it calls
-; GET /api/org once and POST /api/ds/query per row, both with its own Grafana
-; token; PVV mode (pvv_client_cert/key below) instead claims every org's panel
-; rows and posts DataByRefId over mTLS. Point this at
-; Grafana itself, reached directly by whichever process ticks: 127.0.0.1:3000 for
-; this process, Grafana's service name from a compute-service container (and the
-; sub-path Grafana serves under, when serve_from_sub_path is on). Never at an
-; IAM/forward-auth URL in front of Grafana: that proxy replaces the Authorization
-; header and needs a browser session, which an unattended call has neither of.
-; Leave retrain_enabled empty (or true) to run it. Empty grafana_url means
-; http://127.0.0.1:3000.
-retrain_enabled = ${FORECAST_RETRAIN_ENABLED}
-retrain_tick = ${FORECAST_RETRAIN_TICK}
-retrain_lease = ${FORECAST_RETRAIN_LEASE}
-; Cap on the exponential retry backoff for a failed row (default 1h; a value that
-; does not exceed retrain_lease is refused and the default kept).
-retrain_retry_max = ${FORECAST_RETRAIN_RETRY_MAX}
-retrain_cron = ${FORECAST_RETRAIN_CRON}
-grafana_url = ${FORECAST_GRAFANA_URL}
-; Viewer service-account token of the org that owns the panels, for /api/org and
-; /api/ds/query. Not an IAM user token: those expire with a browser session.
-grafana_token = ${FORECAST_GRAFANA_TOKEN}
-; PVV DataByRefId retrain transport. Set both the client certificate and key to
-; switch the scheduler to PVV; it then claims panel rows across all orgs and
-; fetches each with that row's org_id. pvv_url defaults to grafana_url. The
-; endpoint is /gse/data/v1/DataByRefId; no Grafana token is sent to PVV.
-; pvv_url = ${FORECAST_PVV_URL}
-; pvv_client_cert = ${FORECAST_PVV_CLIENT_CERT}
-; pvv_client_key = ${FORECAST_PVV_CLIENT_KEY}
-; pvv_ca_cert = ${FORECAST_PVV_CA_CERT}
-; pvv_tls_skip_verify = ${FORECAST_PVV_TLS_SKIP_VERIFY}
-; retrain_window_chunk = ${FORECAST_RETRAIN_WINDOW_CHUNK}
 
-[plugin.eduardkolotushin-forecast-datasource]
-; Same keys as the app. Alerting QueryData does not receive app jsonData.
+; -----------------------------------------------------------------------------
+; COMPONENT: compute service — plugin → gpx_forecast_compute
+; -----------------------------------------------------------------------------
+
+; FUNCTION: forwarding
+; Empty keeps every fit and the retrain ticker in this process. Set the
+; standalone service's base URL and this process forwards /forecast instead,
+; running no ticker; the service then owns the ticker over the same store.
+compute_url = ${FORECAST_COMPUTE_URL}
+; Shared secret the service requires. Required by the service; this process only
+; warns when missing, because forwarded calls then fail upstream with 401.
+compute_token = ${FORECAST_COMPUTE_TOKEN}
+
+; FUNCTION: mTLS
+; compute_mtls turns the forwarded hop into https + a required client cert.
+; Unset defaults to "vault_pki_role is configured"; false keeps plain HTTP.
+; A true flag without the role is a loud per-component error.
+; compute_mtls = ${FORECAST_COMPUTE_MTLS}
+; vault_pki_role = ${FORECAST_VAULT_PKI_ROLE}
+; CN of the plugin's client certificate (default gpx-forecast).
+; vault_client_cn = ${FORECAST_VAULT_CLIENT_CN}
+; DNS name the service's certificate is issued for and verified against.
+; compute_tls_server_name = ${FORECAST_COMPUTE_TLS_SERVER_NAME}
+
+; -----------------------------------------------------------------------------
+; COMPONENT: snapshot store — Postgres
+; -----------------------------------------------------------------------------
+
+; FUNCTION: connection
+; A store_url short-circuits the field-wise keys. Empty store_host and store_url
+; means persist is off (always needTrain).
 ; store_url = ${FORECAST_STORE_URL}
 store_host = ${FORECAST_STORE_HOST}
 store_port = ${FORECAST_STORE_PORT}
@@ -135,5 +105,135 @@ store_database = ${FORECAST_STORE_DATABASE}
 store_user = ${FORECAST_STORE_USER}
 store_ssl_mode = ${FORECAST_STORE_SSLMODE}
 store_password = ${FORECAST_STORE_PASSWORD}
+
+; FUNCTION: retention
+; How long a snapshot nothing refreshed may live (retrain ticker's sweep;
+; default 72h, 0 disables, below 1h falls back to the default).
+; snapshot_ttl = ${FORECAST_SNAPSHOT_TTL}
+
+; FUNCTION: mTLS
+; store_mtls makes pgx present a Vault-issued client certificate to Postgres.
+; Unset defaults to "vault_pki_store_role is configured"; false keeps the
+; sslmode-only connection. The CN defaults to store_user, or vault_store_cn.
+; store_mtls = ${FORECAST_STORE_MTLS}
+; vault_pki_store_role = ${FORECAST_VAULT_PKI_STORE_ROLE}
+; vault_store_cn = ${FORECAST_VAULT_STORE_CN}
+
+; -----------------------------------------------------------------------------
+; COMPONENT: PVV — DataByRefId retrain transport
+; -----------------------------------------------------------------------------
+
+; FUNCTION: transport
+; Set pvv_client_cert + pvv_client_key (or vault_pki_pvv_role) to switch the
+; scheduler to PVV; it then claims panel rows across all orgs and fetches each
+; with that row's org_id. pvv_url defaults to grafana_url. No Grafana token is
+; sent to PVV. retrain_window_chunk is the sequential slice size (max 24h).
+; pvv_url = ${FORECAST_PVV_URL}
+; pvv_ca_cert = ${FORECAST_PVV_CA_CERT}
+; pvv_tls_skip_verify = ${FORECAST_PVV_TLS_SKIP_VERIFY}
+; retrain_window_chunk = ${FORECAST_RETRAIN_WINDOW_CHUNK}
+
+; FUNCTION: mTLS
+; pvv_mtls selects the Vault-issued client cert. Set false to keep the file pair
+; as the only possible source. pvv_client_cert/key are paths, not PEM content.
+; pvv_mtls = ${FORECAST_PVV_MTLS}
+; pvv_client_cert = ${FORECAST_PVV_CLIENT_CERT}
+; pvv_client_key = ${FORECAST_PVV_CLIENT_KEY}
+; Setting this role also selects PVV mode; CN defaults to gpx-forecast-pvv.
+; vault_pki_pvv_role = ${FORECAST_VAULT_PKI_PVV_ROLE}
+; vault_pvv_cn = ${FORECAST_VAULT_PVV_CN}
+
+; -----------------------------------------------------------------------------
+; COMPONENT: retrain scheduler — this process only, unless compute_url moves it
+; -----------------------------------------------------------------------------
+; The datasource section never runs the ticker. The scheduler claims due rows
+; from forecast.retrain; one ticker may run here or in the compute service.
+
+; FUNCTION: schedule and reliability
+; retrain_retry_max must exceed retrain_lease; otherwise the default is kept.
+retrain_enabled = ${FORECAST_RETRAIN_ENABLED}
+retrain_tick = ${FORECAST_RETRAIN_TICK}
+retrain_lease = ${FORECAST_RETRAIN_LEASE}
+retrain_retry_max = ${FORECAST_RETRAIN_RETRY_MAX}
+retrain_cron = ${FORECAST_RETRAIN_CRON}
+
+; FUNCTION: Grafana frame source
+; Reach Grafana directly, from whichever process ticks: 127.0.0.1:3000 here,
+; Grafana's Service from a compute container (plus serve_from_sub_path when on).
+; Never an IAM/forward-auth URL: that proxy replaces Authorization and needs a
+; browser session, which an unattended call has neither of. Empty grafana_url
+; means http://127.0.0.1:3000. grafana_token is a Viewer service-account token.
+grafana_url = ${FORECAST_GRAFANA_URL}
+grafana_token = ${FORECAST_GRAFANA_TOKEN}
+
+; -----------------------------------------------------------------------------
+; COMPONENT: process — concurrency in this plugin backend
+; -----------------------------------------------------------------------------
+
+; FUNCTION: in-flight work
+; Concurrent Fit / ForecastRange slots (default 4; with compute_url this process
+; forwards instead of fitting and the default is 32).
+max_inflight = ${FORECAST_MAX_INFLIGHT}
+
+
+[plugin.eduardkolotushin-forecast-datasource]
+; Alerting QueryData is a second gpx_forecast process. It restores snapshots and
+; computes ForecastRange; it never forwards to compute and never runs the
+; retrain ticker, so only the store, Vault (for store mTLS) and its own
+; concurrency limit apply here.
+
+; -----------------------------------------------------------------------------
+; COMPONENT: snapshot store — Postgres
+; -----------------------------------------------------------------------------
+
+; FUNCTION: connection
+; store_url = ${FORECAST_STORE_URL}
+store_host = ${FORECAST_STORE_HOST}
+store_port = ${FORECAST_STORE_PORT}
+store_database = ${FORECAST_STORE_DATABASE}
+store_user = ${FORECAST_STORE_USER}
+store_ssl_mode = ${FORECAST_STORE_SSLMODE}
+store_password = ${FORECAST_STORE_PASSWORD}
+
+; FUNCTION: mTLS
+; Required for a Vault-issued store client certificate in this process.
+; store_mtls = ${FORECAST_STORE_MTLS}
+; vault_pki_store_role = ${FORECAST_VAULT_PKI_STORE_ROLE}
+; vault_store_cn = ${FORECAST_VAULT_STORE_CN}
+
+; -----------------------------------------------------------------------------
+; COMPONENT: Vault — connection, auth and issuance for the store certificate
+; -----------------------------------------------------------------------------
+; Only needed when store_mtls is on. The datasource has no compute or PVV role.
+
+; FUNCTION: connection
+; vault_addr = ${FORECAST_VAULT_ADDR}
+; vault_namespace = ${FORECAST_VAULT_NAMESPACE}
+; vault_ca_cert = ${FORECAST_VAULT_CA_CERT}
+; vault_tls_skip_verify = ${FORECAST_VAULT_TLS_SKIP_VERIFY}
+
+; FUNCTION: authentication
+; vault_token = ${FORECAST_VAULT_TOKEN}
+; vault_role_id = ${FORECAST_VAULT_ROLE_ID}
+; vault_secret_id = ${FORECAST_VAULT_SECRET_ID}
+; vault_approle_mount = ${FORECAST_VAULT_APPROLE_MOUNT}
+; vault_k8s_role = ${FORECAST_VAULT_K8S_ROLE}
+; vault_k8s_mount = ${FORECAST_VAULT_K8S_MOUNT}
+; vault_k8s_jwt_path = ${FORECAST_VAULT_K8S_JWT_PATH}
+
+; FUNCTION: PKI issuance defaults
+; vault_pki_mount = ${FORECAST_VAULT_PKI_MOUNT}
+; vault_cert_ttl = ${FORECAST_VAULT_CERT_TTL}
+
+; FUNCTION: client certificate for the Vault connection itself (v21)
+; vault_mtls = ${FORECAST_VAULT_MTLS}
+; vault_client_cert = ${FORECAST_VAULT_CLIENT_CERT}
+; vault_client_key = ${FORECAST_VAULT_CLIENT_KEY}
+
+; -----------------------------------------------------------------------------
+; COMPONENT: process — concurrency in this datasource backend
+; -----------------------------------------------------------------------------
+
+; FUNCTION: in-flight work
 ; Concurrent Restore / ForecastRange slots in this process (default 4).
 max_inflight = ${FORECAST_MAX_INFLIGHT}
