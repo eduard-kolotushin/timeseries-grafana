@@ -30,6 +30,7 @@ type Resolved struct {
 	ComputeMTLS bool
 	PVVMTLS     bool
 	StoreMTLS   bool
+	VaultMTLS   bool
 }
 
 // ResolveEnv resolves the Vault configuration from process env only. It is the
@@ -52,6 +53,9 @@ func ResolveEnv(getenv func(string) string) (*Resolved, error) {
 	if token == "" {
 		token = get("VAULT_TOKEN")
 	}
+	certFile := get("FORECAST_VAULT_CLIENT_CERT")
+	keyFile := get("FORECAST_VAULT_CLIENT_KEY")
+	vaultMTLS := parseBool(get("FORECAST_VAULT_MTLS"), certFile != "" || keyFile != "")
 	client, err := NewClient(Config{
 		Addr:      addr,
 		Namespace: get("FORECAST_VAULT_NAMESPACE"),
@@ -64,8 +68,11 @@ func ResolveEnv(getenv func(string) string) (*Resolved, error) {
 			K8sMount:     get("FORECAST_VAULT_K8S_MOUNT"),
 			K8sJWTPath:   get("FORECAST_VAULT_K8S_JWT_PATH"),
 		},
-		CACertFile:    get("FORECAST_VAULT_CA_CERT"),
-		TLSSkipVerify: parseBool(get("FORECAST_VAULT_TLS_SKIP_VERIFY"), false),
+		CACertFile:     get("FORECAST_VAULT_CA_CERT"),
+		TLSSkipVerify:  parseBool(get("FORECAST_VAULT_TLS_SKIP_VERIFY"), false),
+		ClientMTLS:     vaultMTLS,
+		ClientCertFile: certFile,
+		ClientKeyFile:  keyFile,
 	})
 	if err != nil {
 		return nil, err
@@ -97,6 +104,7 @@ func ResolveEnv(getenv func(string) string) (*Resolved, error) {
 		ComputeMTLS: computeMTLS,
 		PVVMTLS:     pvvMTLS,
 		StoreMTLS:   storeMTLS,
+		VaultMTLS:   vaultMTLS,
 	}, nil
 }
 

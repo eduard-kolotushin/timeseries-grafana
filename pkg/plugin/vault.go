@@ -65,6 +65,9 @@ func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*v
 			secretID = strings.TrimSpace(settings.DecryptedSecureJSONData["vaultSecretId"])
 		}
 	}
+	vaultCert := look.Get("FORECAST_VAULT_CLIENT_CERT", "VAULT_CLIENT_CERT", "vault_client_cert", "vaultClientCert")
+	vaultKey := look.Get("FORECAST_VAULT_CLIENT_KEY", "VAULT_CLIENT_KEY", "vault_client_key", "vaultClientKey")
+	vaultMTLS := parseBool(look.Get("FORECAST_VAULT_MTLS", "VAULT_MTLS", "vault_mtls", "vaultMtls"), vaultCert != "" || vaultKey != "")
 	cfg := vault.Config{
 		Addr:      addr,
 		Namespace: look.Get("FORECAST_VAULT_NAMESPACE", "VAULT_NAMESPACE", "vault_namespace", "vaultNamespace"),
@@ -77,8 +80,11 @@ func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*v
 			K8sMount:     look.Get("FORECAST_VAULT_K8S_MOUNT", "VAULT_K8S_MOUNT", "vault_k8s_mount", "vaultK8sMount"),
 			K8sJWTPath:   look.Get("FORECAST_VAULT_K8S_JWT_PATH", "VAULT_K8S_JWT_PATH", "vault_k8s_jwt_path", "vaultK8sJwtPath"),
 		},
-		CACertFile:    look.Get("FORECAST_VAULT_CA_CERT", "VAULT_CA_CERT", "vault_ca_cert", "vaultCaCert"),
-		TLSSkipVerify: parseBool(look.Get("FORECAST_VAULT_TLS_SKIP_VERIFY", "VAULT_TLS_SKIP_VERIFY", "vault_tls_skip_verify", "vaultTlsSkipVerify"), false),
+		CACertFile:     look.Get("FORECAST_VAULT_CA_CERT", "VAULT_CA_CERT", "vault_ca_cert", "vaultCaCert"),
+		TLSSkipVerify:  parseBool(look.Get("FORECAST_VAULT_TLS_SKIP_VERIFY", "VAULT_TLS_SKIP_VERIFY", "vault_tls_skip_verify", "vaultTlsSkipVerify"), false),
+		ClientMTLS:     vaultMTLS,
+		ClientCertFile: vaultCert,
+		ClientKeyFile:  vaultKey,
 	}
 	client, err := vault.NewClient(cfg)
 	if err != nil {
@@ -119,6 +125,7 @@ func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*v
 		ComputeMTLS: computeMTLS,
 		PVVMTLS:     pvvMTLS,
 		StoreMTLS:   storeMTLS,
+		VaultMTLS:   vaultMTLS,
 	}, nil
 }
 

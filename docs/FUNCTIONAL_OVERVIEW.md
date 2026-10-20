@@ -933,13 +933,13 @@ One transaction per file, opened with `pg_advisory_xact_lock(0x666f726563617374)
 
 **Positive — Compose (pass 5):** loading the page as an anonymous Admin rendered "Overlay univariate forecasts from timeseries-forecast on Grafana queries. Add the Forecast overlay visualization to a dashboard panel…" and the page made **no** `/resources/…` request (the only resource calls in that session came from the dashboard panels).
 
-### F35. Per-component mTLS — compute hop, PVV, Postgres store
+### F35. Per-component mTLS — compute hop, PVV, Postgres store, Vault
 
 | | |
 | --- | --- |
-| **Function** | Every hop the plugin or its compute service opens can require mutual TLS independently: the plugin→compute hop, the retrainer→PVV `DataByRefId` hop, and the Postgres snapshot store used by the app, the datasource, the compute service and the migrate CLI. A VM install can enforce all three; a Kubernetes install that terminates mTLS in Istio can leave any of them plain. |
+| **Function** | Every hop the plugin or its compute service opens can require mutual TLS independently: the plugin→compute hop, the retrainer→PVV `DataByRefId` hop, the Postgres snapshot store used by the app, the datasource, the compute service and the migrate CLI, and the Vault API connection that issues those certificates. A VM install can enforce all of them; a Kubernetes install that terminates mTLS in Istio can leave any of them plain. |
 | **Who can use** | **Operator** — deployment configuration; no Grafana page edits these values. |
-| **How configured** | Vault PKI roles `FORECAST_VAULT_PKI_ROLE` (compute, CN `FORECAST_VAULT_CLIENT_CN`, default `gpx-forecast`), `FORECAST_VAULT_PKI_PVV_ROLE` (CN default `gpx-forecast-pvv`) and `FORECAST_VAULT_PKI_STORE_ROLE` (CN `FORECAST_VAULT_STORE_CN`, default the resolved store user, e.g. `forecast`). Each component's switch is `FORECAST_COMPUTE_MTLS` / `FORECAST_PVV_MTLS` / `FORECAST_STORE_MTLS`: **unset means “on iff that role is set”**, and an explicit `false` turns it off even when the role is present. The plugin reads the env → `GF_PLUGIN_*` → ini → jsonData chain; the compute service and `gpx_forecast_migrate` read process env only. Certificates are issued by Vault and rotate in-process; the pgx TLS config asks the manager for the current leaf on every new connection. |
+| **How configured** | Vault PKI roles `FORECAST_VAULT_PKI_ROLE` (compute, CN `FORECAST_VAULT_CLIENT_CN`, default `gpx-forecast`), `FORECAST_VAULT_PKI_PVV_ROLE` (CN default `gpx-forecast-pvv`) and `FORECAST_VAULT_PKI_STORE_ROLE` (CN `FORECAST_VAULT_STORE_CN`, default the resolved store user, e.g. `forecast`). Each component's switch is `FORECAST_COMPUTE_MTLS` / `FORECAST_PVV_MTLS` / `FORECAST_STORE_MTLS`: **unset means “on iff that role is set”**, and an explicit `false` turns it off even when the role is present. The Vault API connection itself has a fourth switch, `FORECAST_VAULT_MTLS`, with a file pair `FORECAST_VAULT_CLIENT_CERT` / `FORECAST_VAULT_CLIENT_KEY` (default on when either path is set, so a lone half is an error; Vault cannot issue the certificate needed to reach it, so this pair is loaded at client construction). The plugin reads the env → `GF_PLUGIN_*` → ini → jsonData chain; the compute service and `gpx_forecast_migrate` read process env only. Certificates are issued by Vault and rotate in-process; the pgx TLS config asks the manager for the current leaf on every new connection. |
 | **Input params** | None at request time. The compute hop also needs `FORECAST_COMPUTE_TLS_SERVER_NAME` when its listener is mTLS. The store needs no file paths: TLS comes from Vault, and `sslmode` in the DSN is irrelevant to whether a client certificate is presented. |
 | **Expected result** | With a component on, its peer sees a certificate issued by the Vault CA and a peer without one is refused. With a component off, the connection is exactly its pre-v19 shape even though Vault is configured for another component. Misconfiguration is loud: flag on without its role names that role; Vault configured with no role at all is `forecast: vault: no component role is configured (compute, pvv, store)`. |
 
@@ -956,6 +956,7 @@ One transaction per file, opened with `pg_advisory_xact_lock(0x666f726563617374)
 | MT-9 | negative configuration | `FORECAST_COMPUTE_MTLS=true` with no compute role exits with `forecast: vault: FORECAST_VAULT_PKI_ROLE is required with FORECAST_COMPUTE_MTLS=true`; Vault configured with no roles exits with `forecast: vault: no component role is configured (compute, pvv, store)`. |
 | MT-10 | certificate rotation | A re-issued leaf reaches the next connection through `GetClientCertificate`; a Vault CA rotation itself needs a process restart because the root pool is pinned at pool open (unit-tested). |
 | MT-11 | Vault auth method: Kubernetes | With no Vault token in either pod, the plugin and both compute replicas log in through `auth/kubernetes/login` with their service-account JWTs; Vault audit shows each pod's login and `pki/issue/forecast-compute`, and a service account not bound to the role gets `403 service account name not authorized`. |
+| MT-12 | Vault connection mTLS | A Vault endpoint that requires a client certificate accepts the configured `FORECAST_VAULT_CLIENT_CERT`/`_KEY` pair (the compute service issues and starts TLS; the migrator prints `nothing to apply`), and refuses the same client without the pair or with `FORECAST_VAULT_MTLS=false`, even when the files are present. |
 
 **Positive — Compose.** All three components are on: Grafana/compute point at `https://forecast-compute:8080`, the compute service listens TLS-only, the store uses `FORECAST_STORE_USER=forecast` with `FORECAST_STORE_MTLS=true` and `FORECAST_VAULT_PKI_STORE_ROLE=forecast-pg`, and the PVV stub requires a Vault client certificate. A fit returned **200** and wrote `forecast.snapshots`; the datasource restored **120** points; the dashboard rendered three `Using saved model` panels; a forced retrain logged `clientCN=gpx-forecast-pvv` and `status=ok`; `pg_stat_ssl` showed **three** `forecast` sessions at TLSv1.3 (app, datasource, compute); the migrator printed `nothing to apply (3 known, 3 applied)`.
 
@@ -968,6 +969,8 @@ One transaction per file, opened with `pg_advisory_xact_lock(0x666f726563617374)
 Vault's file audit device recorded **two** `auth/kubernetes/login` requests from each of the Grafana pod (`10.244.0.44`) and the two compute pods (`10.244.0.41`, `.42`), followed by `pki/issue/forecast-compute` from each; an unbound service account's login answered **403** `service account name not authorized`. A fit returned **200** and wrote its snapshot, a certless request was still refused, a forced panel retrain finished `ok`, and the dashboard rendered three `Using saved model` panels (one transient `Forecast backend is busy` on the first load, cleared by the next).
 
 One operational gotcha: deleting `vaultToken` from the provisioning file did **not** clear Grafana's stored app setting — the plugin kept using the old token because provisioning merges secure fields. Clearing it explicitly (`POST /api/plugins/eduardkolotushin-forecast-app/settings` with `secureJsonData.vaultToken: ""`) and restarting Grafana was required before the audit showed the Kubernetes logins. A deployment moving from token to Kubernetes auth must clear the stored field, not just the ConfigMap.
+
+**Vault connection mTLS (MT-12).** A throwaway TLS proxy in front of the sandbox Vault (`ssl.CERT_REQUIRED`, a test CA, server name `vault-mtls-proxy`) stood in for a Vault listener that requires a client certificate. With `FORECAST_VAULT_MTLS` defaulting on from `FORECAST_VAULT_CLIENT_CERT` / `_KEY` plus `FORECAST_VAULT_CA_CERT`, the shipped migrator ran `nothing to apply (3 known, 3 applied)` against the store, and a compute service issued its `forecast-compute` certificate through the proxy and started with `"tls":true`; the proxy logged `cn=vault-mtls-client` on `/v1/auth/token/lookup-self` and both `pki/issue` calls. The same migrator without the pair, and with the pair plus `FORECAST_VAULT_MTLS=false`, answered `forecast: vault: issue pki/forecast-pg: … remote error: tls: certificate required` — the switch, not the file presence, selected the certificate. This hop is intentionally file-based: a Vault-issued certificate cannot bootstrap access to the Vault that issues it.
 
 ## The contract between the two
 
@@ -1144,6 +1147,8 @@ source and are **not** backed by a live observation in this run:
 | In-process leaf re-issue reaching the next connection | `pkg/vault/manager.go`, `pkg/vault/tls.go`, `pkg/plugin/store_postgres.go` | `TestNewClientTLSConfigRotatesTheLeaf` proves the callback returns the new certificate; neither environment waits out a half-life, so no live pgx connection was observed presenting a re-issued leaf. |
 | A Vault CA rotation while a process stays up | `pkg/vault/tls.go` | The root pool is built at pool/listener creation; a CA rotation is documented as requiring a restart and was not exercised. |
 | PVV and store mTLS in the Kubernetes chart | `timeseries-k8s` values/configmaps | The chart exposes the compute PKI role only; the live Kubernetes pass measured compute mTLS on and store/PVV plain (MT-3/4/5/6 are Compose-only). |
+| Rotating the Vault API client file pair without a restart | `pkg/vault/client.go` | The pair is loaded in `NewClient`; the live pass loaded one pair, and rotation is documented as requiring a restart. |
+| Vault client mTLS (MT-12) on Kubernetes | `timeseries-k8s` (no mount) | The chart does not create/mount the file pair; MT-12 was measured through a Compose-side TLS proxy, not a Vault listener in the cluster. |
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
 | A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |
 
@@ -1705,3 +1710,44 @@ ConfigMap alone is not enough for a token→Kubernetes-auth migration.
 `TestServeComputeVaultValidation`, and `TestRunStoreMTLSValidation` (role+unreachable Vault) all pass;
 `go test ./pkg/... ./cmd/...` and `go vet` are green. The fixture snapshots (`eeee…`, `ffff…`, `1111…`) were
 deleted after the Kubernetes checks; both stacks were left running.
+
+### Pass 9 (2026-10-20) — Vault connection mTLS (v21), measured on Compose
+
+Pass 9 adds the fourth hop: the Vault API connection itself. The switch is `FORECAST_VAULT_MTLS`; the
+certificate is a file pair (`FORECAST_VAULT_CLIENT_CERT` / `FORECAST_VAULT_CLIENT_KEY`) because Vault
+cannot issue the certificate needed to reach Vault. Unset, the switch is on when either path is set; an
+explicit `false` ignores the pair. Server verification stays `FORECAST_VAULT_CA_CERT` /
+`FORECAST_VAULT_TLS_SKIP_VERIFY`, and the pair is loaded when `pkg/vault.NewClient` builds the transport,
+so a rotation needs a restart.
+
+The live proof used a throwaway TLS proxy in front of the sandbox Vault: a self-signed CA, a server
+certificate for `vault-mtls-proxy`, a client certificate with `clientAuth`, and a Python
+`ssl.CERT_REQUIRED` reverse proxy forwarding to `vault:8200` on the Compose network. Requests without a
+client certificate ended at the handshake (`Send failure: Connection reset by peer`), while the same
+request with the pair answered Vault's `/v1/sys/health` 200 and the proxy logged `cn=vault-mtls-client`.
+
+The shipped `gpx_forecast_migrate_linux_amd64` (built from the v21 tree) then ran through that proxy with
+`FORECAST_VAULT_MTLS` unset and the pair present:
+
+```
+gpx_forecast_migrate … -e FORECAST_VAULT_ADDR=https://vault-mtls-proxy:8443 … → nothing to apply (3 known, 3 applied)
+```
+
+and without the pair, or with the pair plus `FORECAST_VAULT_MTLS=false`:
+
+```
+gpx_forecast_migrate: vault: forecast: vault: issue pki/forecast-pg: Post "https://vault-mtls-proxy:8443/v1/pki/issue/forecast-pg": remote error: tls: certificate required
+```
+
+— the file presence alone does not turn the hop on. `FORECAST_VAULT_MTLS=true` without either path exits 1
+before any request with `forecast: vault: both FORECAST_VAULT_CLIENT_CERT and FORECAST_VAULT_CLIENT_KEY
+are required with FORECAST_VAULT_MTLS=true`. A compute service started with the pair and
+`FORECAST_COMPUTE_MTLS=true` issued its `forecast-compute` certificate through the proxy and logged
+`{"tls":true}`; the proxy recorded `cn=vault-mtls-client` for `/v1/auth/token/lookup-self` and both
+`pki/issue` calls (`forecast-pg`, `forecast-compute`). A certless request to that compute listener was
+still refused by the compute hop.
+
+Unit coverage: `TestResolveEnvVaultMTLS` (pair defaults on, explicit false, half a pair is an error),
+`TestVaultEndpointRequiresClientCertificate` (an `httptest` TLS server with
+`RequireAndVerifyClientCert` accepts the pair and refuses without it), and `TestNewClientVaultMTLSErrors`.
+The throwaway proxy, certificates and probe containers were removed; the Compose stack was left running.

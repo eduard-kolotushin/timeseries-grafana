@@ -320,7 +320,31 @@ while a Kubernetes install leaves it to Istio and runs plain traffic.
   `clientcert=verify-full` for a dedicated `forecast` store user, while Grafana's
   core Postgres datasource and the seed jobs keep plain scram on the same server.
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20 non-goals
+## v21 must-have
+
+The Vault API is itself a TLS hop, and it is selectable like the others. A Vault
+listener may require a client certificate, but that certificate cannot be issued
+by the same Vault (a bootstrap loop), so this hop uses a file pair rather than
+PKI.
+
+- **One boolean**: `FORECAST_VAULT_MTLS` (GF_PLUGIN suffix, ini `vault_mtls`,
+  jsonData `vaultMtls`). Unset defaults to "either client-certificate path
+  is set" (so a lone half is a loud construction error); an explicit `false`
+  ignores the pair even when the files exist.
+- **File pair**: `FORECAST_VAULT_CLIENT_CERT` and `FORECAST_VAULT_CLIENT_KEY`
+  (`vault_client_cert` / `vault_client_key`, jsonData `vaultClientCert` /
+  `vaultClientKey`). Both are required when the switch is on; a missing half is a
+  loud construction error. The pair is loaded when the client is built, so
+  rotating the Vault client certificate needs a process restart. Server
+  verification remains `FORECAST_VAULT_CA_CERT` / `FORECAST_VAULT_TLS_SKIP_VERIFY`.
+- The same env/lookup chain reaches the app, the nested datasource, the compute
+  service and `gpx_forecast_migrate`; a configured Vault with no component role
+  is still the v20 error, independent of this hop.
+- Live proof: a client-certificate-requiring TLS proxy in front of the sandbox
+  Vault accepts the compute service and migrator with the configured pair and
+  refuses a client without it.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 non-goals
 
 Do not add these without first updating this document:
 

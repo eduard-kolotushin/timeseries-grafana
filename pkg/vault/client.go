@@ -67,7 +67,13 @@ type Config struct {
 	Auth          AuthConfig
 	CACertFile    string
 	TLSSkipVerify bool
-	Timeout       time.Duration
+	// ClientMTLS presents a client certificate on the Vault connection itself.
+	// The certificate cannot be issued by this Vault (it is needed to reach it),
+	// so the pair is file-based and loaded once when the client is built.
+	ClientMTLS     bool
+	ClientCertFile string
+	ClientKeyFile  string
+	Timeout        time.Duration
 }
 
 // Client talks to one Vault server. It is safe for concurrent use.
@@ -137,6 +143,16 @@ func NewClient(cfg Config) (*Client, error) {
 			return nil, errors.New("forecast: vault: ca contains no certificates")
 		}
 		tlsCfg.RootCAs = pool
+	}
+	if cfg.ClientMTLS {
+		if cfg.ClientCertFile == "" || cfg.ClientKeyFile == "" {
+			return nil, errors.New("forecast: vault: both FORECAST_VAULT_CLIENT_CERT and FORECAST_VAULT_CLIENT_KEY are required with FORECAST_VAULT_MTLS=true")
+		}
+		pair, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("forecast: vault: load client certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{pair}
 	}
 	return &Client{
 		cfg:        cfg,

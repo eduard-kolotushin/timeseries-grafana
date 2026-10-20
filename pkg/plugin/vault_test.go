@@ -41,6 +41,7 @@ func TestVaultConfigResolution(t *testing.T) {
 		wantCompute bool
 		wantPVV     bool
 		wantStoreOn bool
+		wantVaultOn bool
 	}{
 		{name: "unset", wantNil: true},
 		{
@@ -112,6 +113,19 @@ func TestVaultConfigResolution(t *testing.T) {
 			wantCompute: true, wantPVV: true, wantStoreCN: "overlay",
 		},
 		{
+			name: "vault client mTLS explicitly off ignores the file pair",
+			env: map[string]string{
+				"FORECAST_VAULT_ADDR":        "http://vault:8200",
+				"FORECAST_VAULT_TOKEN":       "t",
+				"FORECAST_VAULT_PKI_ROLE":    "forecast",
+				"FORECAST_VAULT_CLIENT_CERT": "/does/not/exist.crt",
+				"FORECAST_VAULT_CLIENT_KEY":  "/does/not/exist.key",
+				"FORECAST_VAULT_MTLS":        "false",
+			},
+			wantMount: "pki", wantRole: "forecast", wantClient: defaultVaultClientCN,
+			wantTTL: defaultVaultCertTTL, wantStoreCN: "overlay", wantCompute: true,
+		},
+		{
 			name:    "addr without any role",
 			env:     map[string]string{"FORECAST_VAULT_ADDR": "http://vault:8200", "FORECAST_VAULT_TOKEN": "t"},
 			wantErr: true,
@@ -146,7 +160,8 @@ func TestVaultConfigResolution(t *testing.T) {
 			if got.Client == nil || got.PKIMount != tc.wantMount || got.ComputeRole != tc.wantRole ||
 				got.PVVRole != tc.wantPVVRole || got.StoreRole != tc.wantStore ||
 				got.StoreCN != tc.wantStoreCN || got.ClientCN != tc.wantClient || got.CertTTL != tc.wantTTL ||
-				got.ComputeMTLS != tc.wantCompute || got.PVVMTLS != tc.wantPVV || got.StoreMTLS != tc.wantStoreOn {
+				got.ComputeMTLS != tc.wantCompute || got.PVVMTLS != tc.wantPVV || got.StoreMTLS != tc.wantStoreOn ||
+				got.VaultMTLS != tc.wantVaultOn {
 				t.Fatalf("config = %+v", got)
 			}
 		})

@@ -358,6 +358,7 @@ store and point the app at it. The service reads **process env only** (no ini, n
 | `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` | for the retrain ticker it owns (Grafana mode) |
 | `FORECAST_PVV_*`, `FORECAST_RETRAIN_WINDOW_CHUNK` | PVV mode, when the client certificate/key are set (or `FORECAST_VAULT_PKI_PVV_ROLE` issues one) |
 | `FORECAST_VAULT_*`, `FORECAST_COMPUTE_TLS_SERVER_NAME` | v19 mTLS: Vault address/auth/PKI role, and the DNS name this service's certificate is issued for (required with Vault) |
+| `FORECAST_VAULT_MTLS`, `FORECAST_VAULT_CLIENT_CERT`, `FORECAST_VAULT_CLIENT_KEY` | v21 client certificate for the Vault connection itself (file pair; default on when either path is set, a lone half is an error) |
 | `FORECAST_RETRAIN_*`, `FORECAST_SNAPSHOT_TTL` | the ticker and retention, unchanged |
 | `FORECAST_MAX_INFLIGHT` | concurrent fits in this service, default `4` (the forwarding plugin process's own slots default to `32`) |
 
@@ -385,6 +386,17 @@ needs no restart. Auth is tried in the order static token (`FORECAST_VAULT_TOKEN
 (default `24h`) requests the TTL; `FORECAST_VAULT_PKI_MOUNT` defaults to `pki`. On the app, the plain
 keys may also be jsonData (`vaultAddr`, `vaultPkiRole`, …) and the two secrets `secureJsonData.vaultToken`
 / `vaultSecretId`; the service reads process env only.
+
+The Vault API connection itself can require a client certificate (v21). Set `FORECAST_VAULT_MTLS=true`
+and point `FORECAST_VAULT_CLIENT_CERT` / `FORECAST_VAULT_CLIENT_KEY` at a PEM pair; unset, the switch
+defaults to “on when either path is set” (a lone half is an error); an explicit `false` ignores the pair on
+a listener that does not ask for one. This hop is file-based on purpose: the certificate cannot come from the Vault it is needed to
+reach. The pair is loaded when the client is built, so rotating it needs a process restart; the Vault CA
+and `FORECAST_VAULT_TLS_SKIP_VERIFY` apply to the same connection. The env/lookup chain is the same one
+the component switches use. The Helm chart renders the paths and accepts `compute.extraVolumes` /
+`compute.extraVolumeMounts` and `grafana.extraVolumes` / `grafana.extraVolumeMounts`, but it does not
+create the Secret: mount the same pair into the Grafana and compute pods. The pair is read once, so a
+rotated Secret takes effect on the next pod restart.
 
 To move the v18 PVV client certificate to Vault as well, set `FORECAST_VAULT_PKI_PVV_ROLE` (on the app,
 the compute service, or both) and leave `FORECAST_PVV_MTLS` true: the PVV transport then presents a

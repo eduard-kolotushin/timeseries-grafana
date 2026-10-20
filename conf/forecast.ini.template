@@ -79,6 +79,13 @@ compute_token = ${FORECAST_COMPUTE_TOKEN}
 ; vault_pvv_cn = ${FORECAST_VAULT_PVV_CN}
 ; vault_ca_cert = ${FORECAST_VAULT_CA_CERT}
 ; vault_tls_skip_verify = ${FORECAST_VAULT_TLS_SKIP_VERIFY}
+; Client-certificate mTLS to Vault itself. The certificate cannot come from the
+; same Vault (it is needed to reach Vault), so these are file paths. Both are
+; required when vault_mtls is on; unset defaults to "either path is set" (a
+; lone half is an error).
+; vault_mtls = ${FORECAST_VAULT_MTLS}
+; vault_client_cert = ${FORECAST_VAULT_CLIENT_CERT}
+; vault_client_key = ${FORECAST_VAULT_CLIENT_KEY}
 ; DNS name the compute service's certificate is issued for and the client
 ; verifies. Required on the service when compute_mtls is on; defaults to the
 ; compute URL's hostname in this process.
