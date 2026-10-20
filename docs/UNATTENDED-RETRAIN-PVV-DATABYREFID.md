@@ -1,5 +1,10 @@
 # Brief: make the unattended retrain fetch training data through PVV `/gse/data/v1/DataByRefId`
 
+> Status: this is the v18 design brief. v20/v21 added `FORECAST_PVV_MTLS` and
+> `FORECAST_VAULT_PKI_PVV_ROLE` (setting the role also selects PVV), so the file pair below is one source
+> rather than the only switch. Certificate values are file paths, never PEM content. Current behaviour is
+> in `docs/ARCHITECTURE.md` and `docs/INSTALL.md`.
+
 Report for the plugin developer (AI agent). Self-contained. It explains why the backend
 retrain cannot run an `sbt-datasource-abyss` query headless today, documents the real PVV
 endpoint that solves it (the custom Grafana plugin `pvv_plugin`, which owns `/gse/data`), and

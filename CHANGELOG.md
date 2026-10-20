@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **mTLS from Vault PKI is selectable per hop, including the Vault connection itself.** The plugin→compute
+  hop, PVV's `DataByRefId` transport, the Postgres snapshot store and the Vault API client each have their
+  own switch (`FORECAST_COMPUTE_MTLS` / `_PVV_MTLS` / `_STORE_MTLS` / `_VAULT_MTLS`), defaulting to "that
+  component's Vault role is configured" and overridable with `false` (Istio shape). The Vault connection
+  uses a file certificate/key pair because Vault cannot issue the certificate needed to reach it; every
+  certificate setting is a file path and PEM content is rejected. The same env/ini/jsonData chain reaches
+  the app, the datasource, the compute service and `gpx_forecast_migrate`.
+
 - **A cacheKey-only fit is restorable after the retention sweep again.** The reconcile gives an orphan
   snapshot a row with the deployment default cron and no spec, and the probe's due check treated that
   unclaimable row as due, so every probe answered `needTrain` and the stored model could never be read.

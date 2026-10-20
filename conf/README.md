@@ -1,57 +1,80 @@
 # CI/CD grafana.ini snippet
 
-Proprietary Grafana images that already copy `dist/` can merge [forecast.ini.template](forecast.ini.template) into `grafana.ini` (or `custom.ini`).
+Proprietary Grafana images that already copy `dist/` can merge [forecast.ini.template](forecast.ini.template)
+into `grafana.ini` (or `custom.ini`). Grafana expands `${FORECAST_*}` in `.ini` files; a pipeline can also
+replace the placeholders before shipping. The template is laid out as **process → component → function**;
+this file is the same map with the env spelling.
 
-Grafana expands `${FORECAST_STORE_*}` in `.ini` files. Your pipeline can also replace those placeholders before shipping the file.
+## App process
 
-| ini key | Environment variable |
-| --- | --- |
-| `store_url` | `FORECAST_STORE_URL` |
-| `store_host` | `FORECAST_STORE_HOST` |
-| `store_port` | `FORECAST_STORE_PORT` |
-| `store_database` | `FORECAST_STORE_DATABASE` |
-| `store_user` | `FORECAST_STORE_USER` |
-| `store_ssl_mode` | `FORECAST_STORE_SSLMODE` |
-| `store_password` | `FORECAST_STORE_PASSWORD` |
-| `max_inflight` | `FORECAST_MAX_INFLIGHT` |
-| `compute_url` | `FORECAST_COMPUTE_URL` |
-| `compute_token` | `FORECAST_COMPUTE_TOKEN` |
-| `retrain_enabled` | `FORECAST_RETRAIN_ENABLED` |
-| `retrain_tick` | `FORECAST_RETRAIN_TICK` |
-| `retrain_lease` | `FORECAST_RETRAIN_LEASE` |
-| `retrain_retry_max` | `FORECAST_RETRAIN_RETRY_MAX` |
-| `retrain_cron` | `FORECAST_RETRAIN_CRON` |
-| `grafana_url` | `FORECAST_GRAFANA_URL` |
-| `grafana_token` | `FORECAST_GRAFANA_TOKEN` |
+| component | function | ini key → env |
+| --- | --- | --- |
+| Vault | connection | `vault_addr` → `FORECAST_VAULT_ADDR`; `vault_namespace`; `vault_ca_cert`; `vault_tls_skip_verify` |
+| Vault | authentication | `vault_token`; `vault_role_id`; `vault_secret_id`; `vault_approle_mount`; `vault_k8s_role`; `vault_k8s_mount`; `vault_k8s_jwt_path` |
+| Vault | PKI issuance defaults | `vault_pki_mount`; `vault_cert_ttl` |
+| Vault | client certificate to Vault (v21) | `vault_mtls`; `vault_client_cert`; `vault_client_key` |
+| compute | forwarding | `compute_url` → `FORECAST_COMPUTE_URL`; `compute_token` |
+| compute | mTLS | `compute_mtls`; `vault_pki_role`; `vault_client_cn`; `compute_tls_server_name` |
+| store | connection | `store_url`, or `store_host` / `store_port` / `store_database` / `store_user` / `store_ssl_mode` / `store_password` |
+| store | retention | `snapshot_ttl` |
+| store | mTLS | `store_mtls`; `vault_pki_store_role`; `vault_store_cn` |
+| PVV | transport | `pvv_url`; `pvv_ca_cert`; `pvv_tls_skip_verify`; `retrain_window_chunk` |
+| PVV | mTLS | `pvv_mtls`; `pvv_client_cert`; `pvv_client_key`; `vault_pki_pvv_role`; `vault_pvv_cn` |
+| retrain | schedule and reliability | `retrain_enabled`; `retrain_tick`; `retrain_lease`; `retrain_retry_max`; `retrain_cron` |
+| retrain | Grafana frame source | `grafana_url`; `grafana_token` |
+| process | in-flight work | `max_inflight` → `FORECAST_MAX_INFLIGHT` |
 
-Leave `store_host` empty (and do not set `store_url`) to disable the snapshot store. Panel model options are dashboard JSON, not this file. Do not put `allow_loading_unsigned_plugins` or datasource YAML here.
+Every env name is `FORECAST_` plus the upper-case key (`vault_mtls` → `FORECAST_VAULT_MTLS`), with
+`store_ssl_mode` → `FORECAST_STORE_SSLMODE` as the one spelling exception. The shipped
+template leaves the store connection fields, compute, retrain, Grafana and `max_inflight` keys active; Vault
+and PVV blocks are commented until configured. `store_host` empty (and no `store_url`) means persist is off.
 
-The template's two plugin sections are not identical: the overlay section (`eduardkolotushin-forecast-app`) carries the `retrain_*` and `grafana_*` keys as well, while the alerting QueryData section (`eduardkolotushin-forecast-datasource`) holds the store keys only. Grafana 12.4+ does not forward host `FORECAST_STORE_*` into plugin processes by default; each process reads its own `[plugin.<id>]` via `GF_PLUGIN_*` / GrafanaCfg. Overlay jsonData comes from provisioning (the app Configuration page renders no store fields); alerting needs the same keys on the Forecast datasource instance unless this ini section is merged.
+## Datasource process
 
-`gpx_forecast` also reads `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` and `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`. Process env `FORECAST_STORE_*` and `FORECAST_MAX_INFLIGHT` win over ini when present in the plugin process. Grafana exports the section itself id-less — `[plugin.eduardkolotushin-forecast-app] store_host` reaches the plugin process as `GF_PLUGIN_STORE_HOST` (read from a running plugin under Grafana 13.1.0) — so that spelling is read as well; the id-qualified form wins when both are set. Empty `max_inflight` uses the default of 4 concurrent Fit / ForecastRange slots.
+| component | function | ini key → env |
+| --- | --- | --- |
+| store | connection | `store_url` / `store_host` / `store_port` / `store_database` / `store_user` / `store_ssl_mode` / `store_password` |
+| store | mTLS | `store_mtls`; `vault_pki_store_role`; `vault_store_cn` |
+| Vault | connection | `vault_addr`; `vault_namespace`; `vault_ca_cert`; `vault_tls_skip_verify` |
+| Vault | authentication | `vault_token`; `vault_role_id`; `vault_secret_id`; `vault_approle_mount`; `vault_k8s_role`; `vault_k8s_mount`; `vault_k8s_jwt_path` |
+| Vault | PKI issuance defaults | `vault_pki_mount`; `vault_cert_ttl` |
+| Vault | client certificate to Vault (v21) | `vault_mtls`; `vault_client_cert`; `vault_client_key` |
+| process | in-flight work | `max_inflight` |
 
-The `retrain_*`, `grafana_*` and `compute_*` keys belong to the **app** section only. The app process runs the unattended retrain scheduler (claim a due `forecast.retrain` row, fetch training frames from Grafana's `/api/ds/query`, fit, store), unless `compute_url` moves fitting and the ticker to the standalone compute service; the datasource process serves alerting `QueryData`, which only Restores, so it never runs it. Empty `retrain_enabled` means on; `retrain_tick` defaults to `30s`, `retrain_lease` to `6m` (derived, not chosen: `retrainClaimBatch × frameFetchTimeout + frameFetchTimeout + 1 min` = `4 × 60s + 60s + 1m`, `pkg/plugin/retrain.go:46`), `retrain_cron` to `0 3 * * *`. `grafana_token` is only needed when anonymous auth is off: use a Viewer service-account token, or merge `grafana_token` in this ini / set `FORECAST_GRAFANA_TOKEN` in the plugin process env instead of a plaintext value elsewhere — no plugin page has a token field (the Configuration page renders only Cron and Timezone).
+The app and datasource sections are not identical. The app carries `retrain_*`, `grafana_*`, `compute_*`
+and the PVV keys; the datasource serves alerting `QueryData`, which only Restores, so it has no compute,
+PVV or retrain keys. It does need its own Vault block when `store_mtls` is on.
 
-## Remote compute (gpx_forecast_compute)
+## Remote compute service
 
-`compute_url` selects where fitting runs. Unset, the app process fits and runs the retrain ticker as before. Set to the compute service's base URL, the app process forwards every `POST /forecast` there and runs no ticker; the service answers the same contract and owns the ticking, so one implementation of the dispatch semantics serves both modes.
+The service reads process env only (no ini, no jsonData):
 
-The service is its own binary, `gpx_forecast_compute` (`cmd/compute`, `make compute`), and reads the process environment only — no grafana.ini section and no jsonData, the same rule as `gpx_forecast_migrate`:
+| component | function | env |
+| --- | --- | --- |
+| process | listener | `FORECAST_COMPUTE_LISTEN` (default `:8080`, `--listen` overrides) |
+| process | authentication | `FORECAST_COMPUTE_TOKEN` (required) |
+| compute | mTLS listener | `FORECAST_COMPUTE_MTLS`; `FORECAST_COMPUTE_TLS_SERVER_NAME` |
+| store | connection | `FORECAST_STORE_*` |
+| store | mTLS | `FORECAST_STORE_MTLS`; `FORECAST_VAULT_PKI_STORE_ROLE`; `FORECAST_VAULT_STORE_CN` |
+| Vault | connection/auth/PKI | `FORECAST_VAULT_*`, including `FORECAST_VAULT_MTLS` / `_CLIENT_CERT` / `_CLIENT_KEY` (v21) |
+| PVV | transport/mTLS | `FORECAST_PVV_*`, `FORECAST_VAULT_PKI_PVV_ROLE`, `FORECAST_RETRAIN_WINDOW_CHUNK` |
+| retrain | ticker | `FORECAST_RETRAIN_*`, `FORECAST_SNAPSHOT_TTL` |
+| Grafana | frame source | `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` |
+| process | in-flight work | `FORECAST_MAX_INFLIGHT` |
 
-| env | meaning |
-| --- | --- |
-| `FORECAST_COMPUTE_LISTEN` | listen address (default `:8080`; `--listen` overrides it) |
-| `FORECAST_COMPUTE_TOKEN` | shared secret; required, the service refuses to start without it |
-| `FORECAST_STORE_*` | the same snapshot store as the plugin |
-| `FORECAST_RETRAIN_*`, `FORECAST_SNAPSHOT_TTL`, `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` | the ticker, unchanged — training frames still come from Grafana's own `/api/ds/query` |
-| `FORECAST_MAX_INFLIGHT` | concurrent fits in this service (default 4) |
+## Rules
 
-It ignores `compute_url`, so a shared env block cannot make one compute service forward to another. The plugin asserts the org Grafana authenticated on every forwarded call (`X-Forecast-Org`, overwritten, never taken from the caller) and the service injects it as the plugin context, so `forecast.snapshots` and `forecast.retrain` stay org-scoped exactly as inline. The service mounts `/forecast`, `/ping` and an unauthenticated, coarse `/healthz`; the schedules API and alerting `QueryData` stay in the Grafana-managed plugin, which keeps working from the same store while the service is down. Replicas share one Postgres, so the `forecast.retrain` claim queue makes N tickers safe: each due row is claimed once.
-
-## Preparing the schema (migration CLI)
-
-`gpx_forecast_migrate` (`cmd/migrate`, `make migrate`) applies the plugin's versioned schema — `pkg/store/migrations/*.sql` — without starting the plugin, so a CI/CD pipeline can prepare the database before Grafana starts: a one-shot compose service or a Kubernetes Job in `timeseries-grafana-sandbox` / `timeseries-k8s`.
-
-It reads the same store settings as the plugin and nothing else: process env `FORECAST_STORE_*`, then the `GF_PLUGIN_*` variables Grafana exports for the two plugin sections (no grafana.ini of its own, no jsonData). `--dsn` overrides them, `--dry-run` lists the pending versions and writes nothing (not even the ledger), `--timeout` defaults to `60s`, and the exit code is non-zero on the first failing migration.
-
-Running it is optional. The plugin applies the same set at its first store use, so a deployment that skips this step converges one request late. Running it while Grafana is up is safe: each migration takes a `pg_advisory_xact_lock` and runs in one transaction, and a `forecast.schema_migrations` ledger row records it, so a pipeline run and every plugin process serialise instead of racing. That schema needs PostgreSQL 13 or newer (`gen_random_uuid()`); a ledger version this binary does not embed is a warning, never an error.
+- **Certificates are paths, not content.** `*_ca_cert`, `*_client_cert` and `*_client_key` are file paths;
+  a value containing a PEM block is rejected at construction.
+- Grafana 12.4+ does not forward host `FORECAST_STORE_*` into plugin processes by default; each process
+  reads its own `[plugin.<id>]` via `GF_PLUGIN_*` / GrafanaCfg. Overlay jsonData comes from provisioning
+  (the app Configuration page renders no store fields); alerting needs the same store keys on the Forecast
+  datasource instance unless this ini section is merged.
+- `gpx_forecast` also reads `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_APP_*` and
+  `GF_PLUGIN_EDUARDKOLOTUSHIN_FORECAST_DATASOURCE_*`. Process env `FORECAST_*` wins over ini when present.
+  Grafana also exports the section id-less — `[plugin.eduardkolotushin-forecast-app] store_host` reaches
+  the plugin process as `GF_PLUGIN_STORE_HOST` (Grafana 13.1.0) — and the id-qualified spelling wins when
+  both are set.
+- Empty `max_inflight` uses the default: 4 Fit / ForecastRange slots inline, 32 forwards in remote mode.
+- Do not put `allow_loading_unsigned_plugins` or datasource YAML here. Panel model options are dashboard
+  JSON, not this file.
