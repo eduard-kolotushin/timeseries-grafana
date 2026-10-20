@@ -945,7 +945,7 @@ One transaction per file, opened with `pg_advisory_xact_lock(0x666f726563617374)
 
 | Case | Component | Expected observation |
 | --- | --- | --- |
-| MT-1 | compute client (plugin, app and compute service) | `POST /forecast` forwarded to the compute service succeeds over TLS; the compute log starts with `"tls":true` and no `http: TLS handshake error`. |
+| MT-1 | compute client (plugin, app and compute service) | `POST /forecast` forwarded to the compute service succeeds over TLS; the compute log starts with `"tls":true` and the plugin log says `forecast: compute mTLS enabled`. |
 | MT-2 | compute server | A request without a client certificate is refused during the handshake (`tlsv13 alert certificate required` / `tls: client didn't provide a certificate`), including `/healthz`, `/ping` and `/forecast`. |
 | MT-3 | PVV client (retrainer) | The PVV stub answers `DataByRefId` only after a client certificate; its log names `clientCN=gpx-forecast-pvv`, and the retrain row logs `transport=pvv` then `status=ok`. |
 | MT-4 | PVV server | A `DataByRefId` request without a client certificate is refused (`certificate required`). |
