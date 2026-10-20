@@ -955,12 +955,19 @@ One transaction per file, opened with `pg_advisory_xact_lock(0x666f726563617374)
 | MT-8 | selection: store off | `FORECAST_STORE_MTLS=false` makes the migrator connect without TLS even though a Vault store role is available; the TLS-only server rejects it. |
 | MT-9 | negative configuration | `FORECAST_COMPUTE_MTLS=true` with no compute role exits with `forecast: vault: FORECAST_VAULT_PKI_ROLE is required with FORECAST_COMPUTE_MTLS=true`; Vault configured with no roles exits with `forecast: vault: no component role is configured (compute, pvv, store)`. |
 | MT-10 | certificate rotation | A re-issued leaf reaches the next connection through `GetClientCertificate`; a Vault CA rotation itself needs a process restart because the root pool is pinned at pool open (unit-tested). |
+| MT-11 | Vault auth method: Kubernetes | With no Vault token in either pod, the plugin and both compute replicas log in through `auth/kubernetes/login` with their service-account JWTs; Vault audit shows each pod's login and `pki/issue/forecast-compute`, and a service account not bound to the role gets `403 service account name not authorized`. |
 
 **Positive — Compose.** All three components are on: Grafana/compute point at `https://forecast-compute:8080`, the compute service listens TLS-only, the store uses `FORECAST_STORE_USER=forecast` with `FORECAST_STORE_MTLS=true` and `FORECAST_VAULT_PKI_STORE_ROLE=forecast-pg`, and the PVV stub requires a Vault client certificate. A fit returned **200** and wrote `forecast.snapshots`; the datasource restored **120** points; the dashboard rendered three `Using saved model` panels; a forced retrain logged `clientCN=gpx-forecast-pvv` and `status=ok`; `pg_stat_ssl` showed **three** `forecast` sessions at TLSv1.3 (app, datasource, compute); the migrator printed `nothing to apply (3 known, 3 applied)`.
 
 **Negative — Compose.** Certless requests to the compute service and the PVV stub both ended with `curl: (56) … tlsv13 alert certificate required`. `psql` as `forecast` without a certificate answered `FATAL: connection requires a valid client certificate`; with `sslmode=disable` it answered `FATAL: pg_hba.conf rejects … no encryption`. The migrator with `FORECAST_STORE_MTLS=false` got the latter refusal, while the same command with `true` succeeded — the switch, not the server, selected TLS. The explicit-off compute probe answered `{"status":"ok"}` over plain HTTP with `"tls":false`.
 
 **Kubernetes.** The chart's live shape is compute mTLS on (a Vault `forecast-compute` role) and store/PVV plain: `pg_stat_ssl` showed the Grafana and compute sessions as `ssl=f`, the app and datasource `/health` were `ok`, and the compute service logged `"tls":true`. A certless in-cluster request to the compute service was refused; an ordinary fit returned 200 and wrote the snapshot; a forced panel retrain logged no `transport=pvv` and finished `ok`, i.e. it used Grafana's `/api/ds/query` path. The store/PVV halves of MT-5/MT-6/MT-3/MT-4 are not configured in this chart (no store role, no PVV endpoint); that is the Istio/plain shape, not a failure.
+
+**Kubernetes Vault auth (MT-11).** The same release was then switched from a root token to Kubernetes auth. Vault (dev mode, in-cluster) had only the token method; `vault auth enable kubernetes` plus `auth/kubernetes/config` pointing at `https://kubernetes.default.svc` with its own service-account token, and a `system:auth-delegator` ClusterRoleBinding for `vault/default`, made token review work. The policy `forecast-pki` allows `pki/issue/forecast-compute` plus `lookup-self`/`renew-self`; role `forecast-k8s` binds service accounts `timeseries-grafana` and `default` in namespace `timeseries` (the compute Deployment uses the namespace default, Grafana its own account). `vault.auth.token` was removed from the Helm values and `vault.auth.kubernetesRole=forecast-k8s` set; the Secrets then held only `FORECAST_COMPUTE_TOKEN`, and the app configMap carried `vaultK8sRole`/`vaultK8sMount` with no `vaultToken`.
+
+Vault's file audit device recorded **two** `auth/kubernetes/login` requests from each of the Grafana pod (`10.244.0.44`) and the two compute pods (`10.244.0.41`, `.42`), followed by `pki/issue/forecast-compute` from each; an unbound service account's login answered **403** `service account name not authorized`. A fit returned **200** and wrote its snapshot, a certless request was still refused, a forced panel retrain finished `ok`, and the dashboard rendered three `Using saved model` panels (one transient `Forecast backend is busy` on the first load, cleared by the next).
+
+One operational gotcha: deleting `vaultToken` from the provisioning file did **not** clear Grafana's stored app setting — the plugin kept using the old token because provisioning merges secure fields. Clearing it explicitly (`POST /api/plugins/eduardkolotushin-forecast-app/settings` with `secureJsonData.vaultToken: ""`) and restarting Grafana was required before the audit showed the Kubernetes logins. A deployment moving from token to Kubernetes auth must clear the stored field, not just the ConfigMap.
 
 ## The contract between the two
 
@@ -1674,9 +1681,27 @@ pod's sessions as `ssl=f` — the store stayed plain, as its configuration says.
 `Using saved model` panels. There is no PVV stub in the cluster and no store role in the chart, so MT-3/4/5/6
 remain Compose observations; that split is the point of the per-component switches.
 
+**Kubernetes Vault auth (MT-11).** Vault was switched from the root token to its Kubernetes auth method without
+touching the images: `system:auth-delegator` was bound to `vault/default`, `vault auth enable kubernetes` was
+configured with `https://kubernetes.default.svc` and Vault's own service-account token, policy `forecast-pki`
+allowed `pki/issue/forecast-compute` (plus token lookup/renew), and role `forecast-k8s` bound service accounts
+`timeseries-grafana` and `default` in namespace `timeseries`. The release then set
+`vault.auth.kubernetesRole=forecast-k8s` and dropped `vault.auth.token`; once the stale `vaultToken` had been
+cleared from Grafana's stored app settings and Grafana restarted, Vault's file audit showed two
+`auth/kubernetes/login` entries from each of the Grafana (`10.244.0.44`) and compute (`10.244.0.41`, `.42`) pods,
+each followed by its `pki/issue/forecast-compute`; a request from an unbound service account answered 403
+`service account name not authorized`. A fit returned 200 with a snapshot, certless compute access stayed refused,
+the retrain row finished `ok`, the dashboard rendered three saved-model panels, and the store sessions remained
+plain (`ssl=f`).
+
+The switch has one non-obvious step: deleting `vaultToken` from the provisioning file did not clear the
+`secureJsonData` already stored by Grafana, so the plugin kept using the old token until the field was explicitly
+set to empty through `POST /api/plugins/eduardkolotushin-forecast-app/settings` and Grafana restarted. The
+ConfigMap alone is not enough for a token→Kubernetes-auth migration.
+
 **Unit half.** `TestResolveEnv` (unset, one role, explicit false, no-role error, store CN),
 `TestNewClientTLSConfig` (pre-issue error, root pool, leaf rotation after re-issue), `TestVaultConfigResolution`
 (store CN defaulting and the per-component off cases), `TestComputeMTLSConfigurationErrors`,
 `TestServeComputeVaultValidation`, and `TestRunStoreMTLSValidation` (role+unreachable Vault) all pass;
-`go test ./pkg/... ./cmd/...` and `go vet` are green. The fixture snapshot (`eeee…`) was deleted after the
-Kubernetes check; both stacks were left running.
+`go test ./pkg/... ./cmd/...` and `go vet` are green. The fixture snapshots (`eeee…`, `ffff…`, `1111…`) were
+deleted after the Kubernetes checks; both stacks were left running.
