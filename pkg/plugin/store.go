@@ -21,11 +21,21 @@ const (
 	snapshotCacheMax = 256
 )
 
-func connectStore(ctx context.Context, dsn string, mgr *vault.Manager) (SnapshotStore, func()) {
+// storeTLSConfig is the store's certificate selection: a Vault manager when its
+// PKI role is configured, otherwise a local file pair. Enabled with neither is an
+// error at pool build, never a plaintext connection.
+type storeTLSConfig struct {
+	Manager    *vault.Manager
+	Files      vault.FileTLS
+	Enabled    bool
+	ServerName string
+}
+
+func connectStore(ctx context.Context, dsn string, tlsCfg storeTLSConfig) (SnapshotStore, func()) {
 	if dsn == "" {
 		return nil, nil
 	}
-	pg, err := openPostgresStore(ctx, dsn, mgr)
+	pg, err := openPostgresStore(ctx, dsn, tlsCfg)
 	if err != nil {
 		log.DefaultLogger.Error("forecast store", "err", err.Error())
 		return errStore{err: err}, nil
@@ -37,11 +47,11 @@ func connectStore(ctx context.Context, dsn string, mgr *vault.Manager) (Snapshot
 // the schedule store, so the app process never dials Postgres twice for the same
 // database. A DSN that cannot even be parsed yields error stores rather than nil:
 // the scheduler keeps ticking and logging per attempt instead of silently idling.
-func connectStores(ctx context.Context, dsn string, mgr *vault.Manager) (SnapshotStore, ScheduleStore, func()) {
+func connectStores(ctx context.Context, dsn string, tlsCfg storeTLSConfig) (SnapshotStore, ScheduleStore, func()) {
 	if dsn == "" {
 		return nil, nil, nil
 	}
-	pg, err := openPostgresStore(ctx, dsn, mgr)
+	pg, err := openPostgresStore(ctx, dsn, tlsCfg)
 	if err != nil {
 		log.DefaultLogger.Error("forecast store", "err", err.Error())
 		return errStore{err: err}, errScheduleStore{err: err}, nil

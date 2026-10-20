@@ -49,7 +49,23 @@ func clearComputeEnv(t *testing.T) {
 		"FORECAST_VAULT_PVV_CN",
 		"FORECAST_VAULT_CA_CERT",
 		"FORECAST_VAULT_TLS_SKIP_VERIFY",
+		"FORECAST_VAULT_MTLS",
+		"FORECAST_VAULT_CLIENT_CERT",
+		"FORECAST_VAULT_CLIENT_KEY",
 		"FORECAST_COMPUTE_TLS_SERVER_NAME",
+		"FORECAST_COMPUTE_CLIENT_CERT",
+		"FORECAST_COMPUTE_CLIENT_KEY",
+		"FORECAST_COMPUTE_CA_CERT",
+		"FORECAST_COMPUTE_SERVER_CERT",
+		"FORECAST_COMPUTE_SERVER_KEY",
+		"FORECAST_STORE_CLIENT_CERT",
+		"FORECAST_STORE_CLIENT_KEY",
+		"FORECAST_STORE_CA_CERT",
+		"FORECAST_STORE_TLS_SERVER_NAME",
+		"FORECAST_PVV_CLIENT_CERT",
+		"FORECAST_PVV_CLIENT_KEY",
+		"FORECAST_PVV_CA_CERT",
+		"FORECAST_PVV_TLS_SKIP_VERIFY",
 		"VAULT_ADDR",
 		"VAULT_TOKEN",
 		store.PluginEnvPrefixApp + "COMPUTE_URL",
@@ -834,6 +850,53 @@ func TestComputeMTLSForward(t *testing.T) {
 	}
 }
 
+func TestComputeLocalMTLSForward(t *testing.T) {
+	clearComputeEnv(t)
+	material := newPVVTestTLS(t)
+	var sawOrg string
+	srv := startPVV(t, material, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawOrg = r.Header.Get(computeOrgHeader)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"cached":true}`)
+	}))
+	t.Setenv("FORECAST_COMPUTE_URL", srv.URL)
+	t.Setenv("FORECAST_COMPUTE_MTLS", "true")
+	t.Setenv("FORECAST_COMPUTE_CLIENT_CERT", material.clientCertPath)
+	t.Setenv("FORECAST_COMPUTE_CLIENT_KEY", material.clientKeyPath)
+	t.Setenv("FORECAST_COMPUTE_CA_CERT", material.caPath)
+	t.Setenv("FORECAST_COMPUTE_TOKEN", "shared-token")
+
+	mode := computeFrom(context.Background(), backend.AppInstanceSettings{})
+	if mode == nil {
+		t.Fatal("mode is inline, want remote")
+	}
+	if mode.cancel != nil {
+		t.Fatal("a local file pair must not start a Vault manager")
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+computeURLPath, strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(computeOrgHeader, "1")
+	resp, err := mode.client.Do(req)
+	if err != nil {
+		t.Fatalf("local mTLS forward: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != `{"cached":true}` {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	if sawOrg != "1" {
+		t.Fatalf("org header = %q, want 1", sawOrg)
+	}
+
+	certless := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: material.caPool, MinVersion: tls.VersionTLS12}}, Timeout: 5 * time.Second}
+	if _, err := certless.Get(srv.URL); err == nil {
+		t.Fatal("certless client was accepted")
+	}
+}
+
 func TestComputeMTLSConfigurationErrors(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -861,7 +924,7 @@ func TestComputeMTLSConfigurationErrors(t *testing.T) {
 			url:         "https://compute:8080",
 			pvvRole:     "pvv",
 			computeFlag: "true",
-			wantErr:     errComputeVaultRole,
+			wantErr:     errComputeMTLSSource,
 		},
 	}
 	for _, tc := range tests {
@@ -905,6 +968,82 @@ func TestComputeMTLSConfigurationErrors(t *testing.T) {
 	}
 }
 
+// TestServeComputeLocalMTLS: with no Vault address, a local server pair and CA
+// make the listener require a client certificate; a certless client is refused.
+func TestServeComputeLocalMTLS(t *testing.T) {
+	clearComputeEnv(t)
+	material := newPVVTestTLS(t)
+	addr := freeListenAddr(t)
+	t.Setenv("FORECAST_COMPUTE_TOKEN", "t")
+	t.Setenv("FORECAST_COMPUTE_MTLS", "true")
+	t.Setenv("FORECAST_COMPUTE_SERVER_CERT", material.serverCertPath)
+	t.Setenv("FORECAST_COMPUTE_SERVER_KEY", material.serverKeyPath)
+	t.Setenv("FORECAST_COMPUTE_CA_CERT", material.caPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- ServeCompute(ctx, addr) }()
+
+	pair, err := tls.LoadX509KeyPair(material.clientCertPath, material.clientKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{pair},
+			RootCAs:      material.caPool,
+		}},
+	}
+	var body []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := client.Get("https://" + addr + "/healthz")
+		if err == nil {
+			body, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("healthz status=%d body=%s", resp.StatusCode, body)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("local TLS listener did not answer: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(string(body), `"status":"ok"`) {
+		t.Fatalf("healthz body=%s", body)
+	}
+
+	certless := &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: material.caPool}},
+	}
+	if _, err := certless.Get("https://" + addr + "/healthz"); err == nil {
+		t.Fatal("certless client was accepted by the local TLS listener")
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("local TLS listener: %v", err)
+	}
+}
+
+func freeListenAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
 // TestServeComputeVaultValidation: the service listens plain when compute mTLS
 // is off (even with another component's role configured) and refuses to start
 // only when the compute component is enabled without its role or server name.
@@ -929,8 +1068,8 @@ func TestServeComputeVaultValidation(t *testing.T) {
 	// Compute mTLS on requires both its role and the server name.
 	t.Setenv("FORECAST_COMPUTE_MTLS", "true")
 	err := ServeCompute(context.Background(), "127.0.0.1:0")
-	if !errors.Is(err, errComputeVaultRole) {
-		t.Fatalf("err = %v, want %v", err, errComputeVaultRole)
+	if !errors.Is(err, errComputeServerSource) {
+		t.Fatalf("err = %v, want %v", err, errComputeServerSource)
 	}
 	t.Setenv("FORECAST_VAULT_PKI_ROLE", "forecast-compute")
 	err = ServeCompute(context.Background(), "127.0.0.1:0")

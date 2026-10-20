@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -69,22 +70,37 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 1
 	}
 	if resolvedVault != nil && resolvedVault.StoreMTLS {
-		if resolvedVault.StoreRole == "" {
-			fmt.Fprintln(stderr, "gpx_forecast_migrate: forecast: vault: FORECAST_VAULT_PKI_STORE_ROLE is required with FORECAST_STORE_MTLS=true")
-			return 1
+		serverName := resolvedVault.StoreServerName
+		if serverName == "" {
+			serverName = cfg.ConnConfig.Host
 		}
-		cn := resolvedVault.StoreCN
-		if cn == "" {
-			cn = cfg.ConnConfig.User
-		}
-		mgr := vault.NewManager(resolvedVault.Client, resolvedVault.PKIMount, resolvedVault.StoreRole, cn, resolvedVault.CertTTL)
-		if err := mgr.Start(ctx); err != nil {
-			fmt.Fprintf(stderr, "gpx_forecast_migrate: vault: %v\n", err)
-			return 1
-		}
-		tlsCfg, err := vault.NewClientTLSConfig(mgr, cfg.ConnConfig.Host)
-		if err != nil {
-			fmt.Fprintf(stderr, "gpx_forecast_migrate: vault: %v\n", err)
+		var tlsCfg *tls.Config
+		switch {
+		case resolvedVault.StoreRole != "" && resolvedVault.Client != nil:
+			cn := resolvedVault.StoreCN
+			if cn == "" {
+				cn = cfg.ConnConfig.User
+			}
+			mgr := vault.NewManager(resolvedVault.Client, resolvedVault.PKIMount, resolvedVault.StoreRole, cn, resolvedVault.CertTTL)
+			if err := mgr.Start(ctx); err != nil {
+				fmt.Fprintf(stderr, "gpx_forecast_migrate: vault: %v\n", err)
+				return 1
+			}
+			var err error
+			tlsCfg, err = vault.NewClientTLSConfig(mgr, serverName)
+			if err != nil {
+				fmt.Fprintf(stderr, "gpx_forecast_migrate: vault: %v\n", err)
+				return 1
+			}
+		case resolvedVault.StoreFiles.ClientConfigured():
+			var err error
+			tlsCfg, err = vault.NewFileClientTLSConfig(resolvedVault.StoreFiles, serverName)
+			if err != nil {
+				fmt.Fprintf(stderr, "gpx_forecast_migrate: store tls: %v\n", err)
+				return 1
+			}
+		default:
+			fmt.Fprintln(stderr, "gpx_forecast_migrate: forecast: store: mTLS needs FORECAST_VAULT_PKI_STORE_ROLE or FORECAST_STORE_CLIENT_CERT/KEY")
 			return 1
 		}
 		cfg.ConnConfig.TLSConfig = tlsCfg

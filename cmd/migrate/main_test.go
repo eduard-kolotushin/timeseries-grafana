@@ -245,11 +245,18 @@ func TestRunStoreMTLSValidation(t *testing.T) {
 		return func(key string) string { return env[key] }
 	}
 	code, _, stderr := runFor(base(nil), "--timeout", "5s")
-	if code != 1 || !strings.Contains(stderr, "FORECAST_VAULT_PKI_STORE_ROLE is required") {
-		t.Fatalf("exit=%d stderr=%q, want a missing store role", code, stderr)
+	if code != 1 || !strings.Contains(stderr, "FORECAST_VAULT_PKI_STORE_ROLE or FORECAST_STORE_CLIENT_CERT/KEY") {
+		t.Fatalf("exit=%d stderr=%q, want a missing store certificate source", code, stderr)
 	}
 	code, _, stderr = runFor(base(map[string]string{"FORECAST_VAULT_PKI_STORE_ROLE": "forecast-pg"}), "--timeout", "5s")
 	if code != 1 || !strings.Contains(stderr, "gpx_forecast_migrate: vault:") {
 		t.Fatalf("exit=%d stderr=%q, want a vault failure", code, stderr)
+	}
+	code, _, stderr = runFor(base(map[string]string{
+		"FORECAST_STORE_CLIENT_CERT": "/does/not/exist.crt",
+		"FORECAST_STORE_CLIENT_KEY":  "/does/not/exist.key",
+	}), "--timeout", "5s")
+	if code != 1 || !strings.Contains(stderr, "gpx_forecast_migrate: store tls:") {
+		t.Fatalf("exit=%d stderr=%q, want a local certificate failure", code, stderr)
 	}
 }

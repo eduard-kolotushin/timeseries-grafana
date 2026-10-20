@@ -16,8 +16,8 @@
 ;               .grafanaToken, .storePassword
 ;   datasource: secureJsonData.vaultToken, .vaultSecretId, .storePassword
 ;
-; CERTIFICATES ARE PATHS, NOT CONTENT. Every *_ca_cert, *_client_cert and
-; *_client_key value is a file path; a value containing a PEM block is rejected.
+; CERTIFICATES ARE PATHS, NOT CONTENT. Every *_ca_cert, *_client_cert, *_client_key,
+; *_server_cert and *_server_key value is a file path; a value containing a PEM block is rejected.
 ;
 ; PRECEDENCE in gpx_forecast: FORECAST_* env (only if Grafana forwards host env;
 ; Grafana 12.4+ does not by default), then GF_PLUGIN_* for this process's plugin
@@ -35,9 +35,9 @@
 ; COMPONENT: Vault — shared PKI/authentication endpoint
 ; -----------------------------------------------------------------------------
 ; Leave vault_addr empty (the default) for no Vault. The compute, PVV and store
-; components then keep their plain/file behaviour. Vault is also the fourth
-; selectable mTLS hop (v21): the connection to Vault can require its own client
-; certificate, which cannot come from the same Vault.
+; components then run plain or from their local certificate files. Vault is also
+; the fourth selectable mTLS hop (v21): the connection to Vault can require its
+; own client certificate, which cannot come from the same Vault.
 
 ; FUNCTION: connection
 ; vault_addr = ${FORECAST_VAULT_ADDR}
@@ -82,14 +82,22 @@ compute_token = ${FORECAST_COMPUTE_TOKEN}
 
 ; FUNCTION: mTLS
 ; compute_mtls turns the forwarded hop into https + a required client cert.
-; Unset defaults to "vault_pki_role is configured"; false keeps plain HTTP.
-; A true flag without the role is a loud per-component error.
+; Unset defaults to "vault_pki_role or a compute certificate path is
+; configured"; false keeps plain HTTP. A true flag with neither source is a
+; loud per-component error. A Vault role wins over local files.
 ; compute_mtls = ${FORECAST_COMPUTE_MTLS}
 ; vault_pki_role = ${FORECAST_VAULT_PKI_ROLE}
-; CN of the plugin's client certificate (default gpx-forecast).
+; CN of the plugin's Vault-issued client certificate (default gpx-forecast).
 ; vault_client_cn = ${FORECAST_VAULT_CLIENT_CN}
 ; DNS name the service's certificate is issued for and verified against.
 ; compute_tls_server_name = ${FORECAST_COMPUTE_TLS_SERVER_NAME}
+; Local client pair when no Vault role is set. ca_cert is optional (system roots
+; when empty). The listener uses its own pair and needs the CA to verify clients:
+; compute_client_cert = ${FORECAST_COMPUTE_CLIENT_CERT}
+; compute_client_key = ${FORECAST_COMPUTE_CLIENT_KEY}
+; compute_ca_cert = ${FORECAST_COMPUTE_CA_CERT}
+; compute_server_cert = ${FORECAST_COMPUTE_SERVER_CERT}
+; compute_server_key = ${FORECAST_COMPUTE_SERVER_KEY}
 
 ; -----------------------------------------------------------------------------
 ; COMPONENT: snapshot store — Postgres
@@ -112,12 +120,18 @@ store_password = ${FORECAST_STORE_PASSWORD}
 ; snapshot_ttl = ${FORECAST_SNAPSHOT_TTL}
 
 ; FUNCTION: mTLS
-; store_mtls makes pgx present a Vault-issued client certificate to Postgres.
-; Unset defaults to "vault_pki_store_role is configured"; false keeps the
-; sslmode-only connection. The CN defaults to store_user, or vault_store_cn.
+; store_mtls makes pgx present a client certificate to Postgres. Unset defaults
+; to "vault_pki_store_role or a store certificate path is configured"; false
+; keeps the sslmode-only connection. A Vault role wins over local files.
 ; store_mtls = ${FORECAST_STORE_MTLS}
 ; vault_pki_store_role = ${FORECAST_VAULT_PKI_STORE_ROLE}
 ; vault_store_cn = ${FORECAST_VAULT_STORE_CN}
+; Local client pair when no Vault role is set. ca_cert is optional (system roots
+; when empty); tls_server_name overrides the DSN host for SAN verification.
+; store_client_cert = ${FORECAST_STORE_CLIENT_CERT}
+; store_client_key = ${FORECAST_STORE_CLIENT_KEY}
+; store_ca_cert = ${FORECAST_STORE_CA_CERT}
+; store_tls_server_name = ${FORECAST_STORE_TLS_SERVER_NAME}
 
 ; -----------------------------------------------------------------------------
 ; COMPONENT: PVV — DataByRefId retrain transport
@@ -134,12 +148,15 @@ store_password = ${FORECAST_STORE_PASSWORD}
 ; retrain_window_chunk = ${FORECAST_RETRAIN_WINDOW_CHUNK}
 
 ; FUNCTION: mTLS
-; pvv_mtls selects the Vault-issued client cert. Set false to keep the file pair
-; as the only possible source. pvv_client_cert/key are paths, not PEM content.
+; pvv_mtls selects PVV over TLS; a Vault role issues the client certificate,
+; otherwise the file pair below is used. false disables PVV even when files
+; exist (the scheduler stays on Grafana's /api/ds/query). Certificates are paths,
+; not PEM content.
 ; pvv_mtls = ${FORECAST_PVV_MTLS}
 ; pvv_client_cert = ${FORECAST_PVV_CLIENT_CERT}
 ; pvv_client_key = ${FORECAST_PVV_CLIENT_KEY}
-; Setting this role also selects PVV mode; CN defaults to gpx-forecast-pvv.
+; Setting this role also selects PVV mode and wins over the file pair; CN
+; defaults to gpx-forecast-pvv.
 ; vault_pki_pvv_role = ${FORECAST_VAULT_PKI_PVV_ROLE}
 ; vault_pvv_cn = ${FORECAST_VAULT_PVV_CN}
 
@@ -196,15 +213,22 @@ store_ssl_mode = ${FORECAST_STORE_SSLMODE}
 store_password = ${FORECAST_STORE_PASSWORD}
 
 ; FUNCTION: mTLS
-; Required for a Vault-issued store client certificate in this process.
+; store_mtls makes this process present a client certificate too. A Vault role
+; issues it; otherwise the local pair below is used. CA and server name are
+; optional (system roots / the DSN host when empty).
 ; store_mtls = ${FORECAST_STORE_MTLS}
 ; vault_pki_store_role = ${FORECAST_VAULT_PKI_STORE_ROLE}
 ; vault_store_cn = ${FORECAST_VAULT_STORE_CN}
+; store_client_cert = ${FORECAST_STORE_CLIENT_CERT}
+; store_client_key = ${FORECAST_STORE_CLIENT_KEY}
+; store_ca_cert = ${FORECAST_STORE_CA_CERT}
+; store_tls_server_name = ${FORECAST_STORE_TLS_SERVER_NAME}
 
 ; -----------------------------------------------------------------------------
 ; COMPONENT: Vault — connection, auth and issuance for the store certificate
 ; -----------------------------------------------------------------------------
-; Only needed when store_mtls is on. The datasource has no compute or PVV role.
+; Only needed when store_mtls is on and the store role issues the certificate.
+; A local pair needs none of these. The datasource has no compute or PVV role.
 
 ; FUNCTION: connection
 ; vault_addr = ${FORECAST_VAULT_ADDR}

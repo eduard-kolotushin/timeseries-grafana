@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **The compute hop, PVV and the Postgres store can now use local certificate files instead of Vault PKI.**
+  Each existing `FORECAST_COMPUTE_MTLS` / `FORECAST_PVV_MTLS` / `FORECAST_STORE_MTLS` switch selects TLS,
+  and a configured Vault role still wins; with no role, `FORECAST_COMPUTE_CLIENT_CERT` / `_KEY` (plus the
+  listener's `FORECAST_COMPUTE_SERVER_CERT` / `_KEY` / `_CA_CERT`), the v18 PVV pair, or
+  `FORECAST_STORE_CLIENT_CERT` / `_KEY` / `_CA_CERT` is loaded. No Vault address is required. A switch on
+  with neither source is a loud per-component error; every certificate value is a file path, PEM content is
+  rejected, and local material is loaded once (rotation needs a restart). PVV's file pair is now actually
+  governed by `FORECAST_PVV_MTLS`: an explicit `false` disables PVV even when the files exist.
+
 - **mTLS from Vault PKI is selectable per hop, including the Vault connection itself.** The plugin→compute
   hop, PVV's `DataByRefId` transport, the Postgres snapshot store and the Vault API client each have their
   own switch (`FORECAST_COMPUTE_MTLS` / `_PVV_MTLS` / `_STORE_MTLS` / `_VAULT_MTLS`), defaulting to "that

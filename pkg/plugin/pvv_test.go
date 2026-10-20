@@ -28,6 +28,8 @@ type pvvTestTLS struct {
 	caPath         string
 	clientCertPath string
 	clientKeyPath  string
+	serverCertPath string
+	serverKeyPath  string
 	caPEM          string
 	clientCertPEM  string
 	clientKeyPEM   string
@@ -100,22 +102,30 @@ func newPVVTestTLS(t *testing.T) pvvTestTLS {
 	caPath := filepath.Join(dir, "ca.pem")
 	clientCertPath := filepath.Join(dir, "client.pem")
 	clientKeyPath := filepath.Join(dir, "client-key.pem")
+	serverCertPath := filepath.Join(dir, "server.pem")
+	serverKeyPath := filepath.Join(dir, "server-key.pem")
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
 	clientCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER})
 	clientKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)})
-	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(clientCertPath, clientCertPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(clientKeyPath, clientKeyPEM, 0o600); err != nil {
-		t.Fatal(err)
+	serverCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER})
+	serverKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)})
+	for path, data := range map[string][]byte{
+		caPath:         caPEM,
+		clientCertPath: clientCertPEM,
+		clientKeyPath:  clientKeyPEM,
+		serverCertPath: serverCertPEM,
+		serverKeyPath:  serverKeyPEM,
+	} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return pvvTestTLS{
 		caPath:         caPath,
 		clientCertPath: clientCertPath,
 		clientKeyPath:  clientKeyPath,
+		serverCertPath: serverCertPath,
+		serverKeyPath:  serverKeyPath,
 		caPEM:          string(caPEM),
 		clientCertPEM:  string(clientCertPEM),
 		clientKeyPEM:   string(clientKeyPEM),
@@ -143,6 +153,7 @@ func pvvPoster(t *testing.T, tlsMaterial pvvTestTLS, url string, chunk time.Dura
 	return newGrafanaPoster(retrainConfig{
 		GrafanaURL:         "http://127.0.0.1:1",
 		PVVURL:             url,
+		PVVMTLS:            true,
 		PVVClientCert:      tlsMaterial.clientCertPath,
 		PVVClientKey:       tlsMaterial.clientKeyPath,
 		PVVCA:              tlsMaterial.caPath,
@@ -443,11 +454,21 @@ func TestPVVModeSelection(t *testing.T) {
 		t.Fatal("client certificate/key must select PVV mode")
 	}
 	onlyCert := newGrafanaPoster(retrainConfig{
+		PVVMTLS:       true,
 		PVVURL:        "https://127.0.0.1:1",
 		PVVClientCert: tlsMaterial.clientCertPath,
 	})
 	if !onlyCert.pvvMode() {
 		t.Fatal("a configured certificate alone must still select PVV mode, not fall back")
+	}
+	off := newGrafanaPoster(retrainConfig{
+		PVVMTLS:       false,
+		PVVURL:        "https://127.0.0.1:1",
+		PVVClientCert: tlsMaterial.clientCertPath,
+		PVVClientKey:  tlsMaterial.clientKeyPath,
+	})
+	if off.pvvMode() {
+		t.Fatal("an explicit PVV_MTLS=false must disable PVV even when files exist")
 	}
 	spec := retrainSpec{TrainSource: TrainSource{RefID: "A", DashboardUID: "d", PanelID: 1}}
 	if _, err := onlyCert.fetchSeries(context.Background(), ScheduleRow{OrgID: 1}, spec); err == nil || !strings.Contains(err.Error(), "requires both") {
@@ -482,17 +503,17 @@ func TestPVVCertParamsArePaths(t *testing.T) {
 	}{
 		{
 			name: "client certificate content is not a path",
-			cfg:  retrainConfig{PVVClientCert: "-----BEGIN CERTIFICATE-----\n", PVVClientKey: "/k"},
+			cfg:  retrainConfig{PVVMTLS: true, PVVClientCert: "-----BEGIN CERTIFICATE-----\n", PVVClientKey: "/k"},
 			want: "FORECAST_PVV_CLIENT_CERT must be a file path",
 		},
 		{
 			name: "client key content is not a path",
-			cfg:  retrainConfig{PVVClientCert: "/c", PVVClientKey: "-----BEGIN PRIVATE KEY-----\n"},
+			cfg:  retrainConfig{PVVMTLS: true, PVVClientCert: "/c", PVVClientKey: "-----BEGIN PRIVATE KEY-----\n"},
 			want: "FORECAST_PVV_CLIENT_KEY must be a file path",
 		},
 		{
 			name: "CA content is not a path",
-			cfg:  retrainConfig{PVVClientCert: "/c", PVVClientKey: "/k", PVVCA: "-----BEGIN CERTIFICATE-----\n"},
+			cfg:  retrainConfig{PVVMTLS: true, PVVClientCert: "/c", PVVClientKey: "/k", PVVCA: "-----BEGIN CERTIFICATE-----\n"},
 			want: "FORECAST_PVV_CA_CERT must be a file path",
 		},
 	}

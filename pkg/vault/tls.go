@@ -4,7 +4,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
 )
 
@@ -129,4 +132,95 @@ func NewClientTLSConfig(m *Manager, serverName string) (*tls.Config, error) {
 			return cert, nil
 		},
 	}, nil
+}
+
+// NewFileClientTLSConfig builds a client configuration from a local file pair.
+// The CA file is optional (system roots when empty); the certificate and key
+// are loaded once, so rotating either needs a process restart. Unlike the Vault
+// manager path, this is a static certificate: there is no half-life refresh.
+func NewFileClientTLSConfig(f FileTLS, serverName string) (*tls.Config, error) {
+	for _, p := range []struct{ name, value string }{
+		{"TLS client certificate", f.ClientCertFile},
+		{"TLS client key", f.ClientKeyFile},
+		{"TLS CA certificate", f.CAFile},
+	} {
+		if err := checkCertPath(p.name, p.value); err != nil {
+			return nil, err
+		}
+	}
+	if f.ClientCertFile == "" || f.ClientKeyFile == "" {
+		return nil, errors.New("client certificate and key are both required")
+	}
+	pair, err := tls.LoadX509KeyPair(f.ClientCertFile, f.ClientKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load client certificate: %w", err)
+	}
+	cfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		Certificates:       []tls.Certificate{pair},
+		ServerName:         serverName,
+		InsecureSkipVerify: f.SkipVerify,
+	}
+	if f.CAFile != "" {
+		pool, err := loadCAPool(f.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, nil
+}
+
+// NewFileServerTLSConfig builds a listener configuration from local files. It
+// requires the client CA: a TLS listener that cannot verify clients is not
+// mTLS. The pair is loaded once, so rotation needs a restart.
+func NewFileServerTLSConfig(f FileTLS) (*tls.Config, error) {
+	for _, p := range []struct{ name, value string }{
+		{"TLS server certificate", f.ServerCertFile},
+		{"TLS server key", f.ServerKeyFile},
+		{"TLS CA certificate", f.CAFile},
+	} {
+		if err := checkCertPath(p.name, p.value); err != nil {
+			return nil, err
+		}
+	}
+	if f.ServerCertFile == "" || f.ServerKeyFile == "" {
+		return nil, errors.New("server certificate and key are both required")
+	}
+	if f.CAFile == "" {
+		return nil, errors.New("CA certificate is required to verify clients")
+	}
+	pair, err := tls.LoadX509KeyPair(f.ServerCertFile, f.ServerKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load server certificate: %w", err)
+	}
+	pool, err := loadCAPool(f.CAFile)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{pair},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    pool,
+	}, nil
+}
+
+func checkCertPath(name, value string) error {
+	if strings.Contains(value, "-----BEGIN") {
+		return fmt.Errorf("%s must be a file path, not PEM content", name)
+	}
+	return nil
+}
+
+func loadCAPool(file string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("load CA certificate: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, errors.New("CA certificate contains no certificates")
+	}
+	return pool, nil
 }

@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,10 +169,52 @@ func TestVaultConfigResolution(t *testing.T) {
 	}
 }
 
+func TestVaultLocalFileResolution(t *testing.T) {
+	clearComputeEnv(t)
+	t.Setenv("FORECAST_COMPUTE_CLIENT_CERT", "/c/compute.crt")
+	t.Setenv("FORECAST_COMPUTE_CLIENT_KEY", "/c/compute.key")
+	t.Setenv("FORECAST_COMPUTE_CA_CERT", "/c/ca.pem")
+	t.Setenv("FORECAST_COMPUTE_SERVER_CERT", "/c/server.crt")
+	t.Setenv("FORECAST_COMPUTE_SERVER_KEY", "/c/server.key")
+	t.Setenv("FORECAST_STORE_CLIENT_CERT", "/c/store.crt")
+	t.Setenv("FORECAST_STORE_CLIENT_KEY", "/c/store.key")
+	t.Setenv("FORECAST_STORE_TLS_SERVER_NAME", "overlay-postgres")
+	t.Setenv("FORECAST_PVV_CLIENT_CERT", "/c/pvv.crt")
+	t.Setenv("FORECAST_PVV_CLIENT_KEY", "/c/pvv.key")
+	t.Setenv("FORECAST_STORE_MTLS", "false")
+
+	got, err := vaultFrom(context.Background(), backend.AppInstanceSettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("local files without a Vault address must resolve")
+	}
+	if got.Client != nil {
+		t.Fatal("no Vault address must mean no Vault client")
+	}
+	if !got.ComputeMTLS || !got.ComputeServerMTLS || !got.PVVMTLS || got.StoreMTLS {
+		t.Fatalf("switches = compute:%v server:%v pvv:%v store:%v", got.ComputeMTLS, got.ComputeServerMTLS, got.PVVMTLS, got.StoreMTLS)
+	}
+	if got.ComputeFiles.ClientCertFile != "/c/compute.crt" || got.ComputeFiles.ServerKeyFile != "/c/server.key" ||
+		got.PVVFiles.CAFile != "" || got.StoreFiles.ClientKeyFile != "/c/store.key" ||
+		got.StoreServerName != "overlay-postgres" {
+		t.Fatalf("files = compute:%+v pvv:%+v store:%+v server=%q", got.ComputeFiles, got.PVVFiles, got.StoreFiles, got.StoreServerName)
+	}
+	if got.StoreMTLS {
+		t.Fatal("explicit store false must ignore the local pair")
+	}
+
+	t.Setenv("FORECAST_VAULT_PKI_ROLE", "compute")
+	if _, err := vaultFrom(context.Background(), backend.AppInstanceSettings{}); err == nil || !strings.Contains(err.Error(), "address is required") {
+		t.Fatalf("role without address: err=%v", err)
+	}
+}
+
 func TestPVVModeFromVault(t *testing.T) {
 	clearComputeEnv(t)
 	mgr := &vault.Manager{}
-	p := newGrafanaPoster(retrainConfig{PVVURL: "https://127.0.0.1:1", PVVManager: mgr})
+	p := newGrafanaPoster(retrainConfig{PVVMTLS: true, PVVURL: "https://127.0.0.1:1", PVVManager: mgr})
 	if !p.pvvMode() {
 		t.Fatal("a vault manager must select PVV mode")
 	}
@@ -179,6 +222,7 @@ func TestPVVModeFromVault(t *testing.T) {
 		t.Fatalf("pvv client = %v err = %v", p.pvvClient, p.pvvInitErr)
 	}
 	both := newGrafanaPoster(retrainConfig{
+		PVVMTLS:       true,
 		PVVURL:        "https://127.0.0.1:1",
 		PVVManager:    mgr,
 		PVVClientCert: "/does/not/exist",

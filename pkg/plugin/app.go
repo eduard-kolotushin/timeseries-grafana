@@ -77,28 +77,43 @@ func newAppWith(ctx context.Context, settings backend.AppInstanceSettings, store
 	if verr != nil {
 		log.DefaultLogger.Error("forecast: vault configuration refused", "err", verr.Error())
 	}
+	storeTLS := storeTLSConfig{}
 	var storeMgr *vault.Manager
-	if vc != nil && vc.StoreMTLS {
-		if vc.StoreRole == "" {
-			log.DefaultLogger.Error("forecast: vault store mTLS needs a role", "err", "FORECAST_VAULT_PKI_STORE_ROLE is required with FORECAST_STORE_MTLS=true")
-		} else {
-			mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-			storeMgr = vault.NewManager(vc.Client, vc.PKIMount, vc.StoreRole, vc.StoreCN, vc.CertTTL)
-			if err := storeMgr.Start(mgrCtx); err != nil {
-				// The manager retries in the background; until it succeeds the pool
-				// reports ErrNoCertificate and health stays red.
-				log.DefaultLogger.Error("forecast: vault store issue failed", "err", err.Error())
-			}
-			app.vaultCancels = append(app.vaultCancels, cancel)
+	if vc != nil {
+		storeTLS = storeTLSConfig{
+			Enabled:    vc.StoreMTLS,
+			Files:      vc.StoreFiles,
+			ServerName: vc.StoreServerName,
 		}
+		app.retrain.PVVMTLS = vc.PVVMTLS
+		app.retrain.PVVClientCert = vc.PVVFiles.ClientCertFile
+		app.retrain.PVVClientKey = vc.PVVFiles.ClientKeyFile
+		app.retrain.PVVCA = vc.PVVFiles.CAFile
+		app.retrain.PVVTLSSkipVerify = vc.PVVFiles.SkipVerify
+		if vc.StoreMTLS {
+			switch {
+			case vc.StoreRole != "" && vc.Client != nil:
+				mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+				storeMgr = vault.NewManager(vc.Client, vc.PKIMount, vc.StoreRole, vc.StoreCN, vc.CertTTL)
+				if err := storeMgr.Start(mgrCtx); err != nil {
+					// The manager retries in the background; until it succeeds the pool
+					// reports ErrNoCertificate and health stays red.
+					log.DefaultLogger.Error("forecast: vault store issue failed", "err", err.Error())
+				}
+				app.vaultCancels = append(app.vaultCancels, cancel)
+			case vc.StoreFiles.ClientConfigured():
+				// Local files are loaded when the pool is built.
+			default:
+				log.DefaultLogger.Error("forecast: store mTLS has no certificate source", "err", "FORECAST_VAULT_PKI_STORE_ROLE or FORECAST_STORE_CLIENT_CERT/KEY is required with FORECAST_STORE_MTLS=true")
+			}
+		}
+		storeTLS.Manager = storeMgr
 	}
 	if store == nil {
-		app.store, app.sched, app.close = connectStores(ctx, storeDSN(ctx, settings), storeMgr)
+		app.store, app.sched, app.close = connectStores(ctx, storeDSN(ctx, settings), storeTLS)
 	}
 	if vc != nil && vc.PVVMTLS && app.compute == nil {
-		if vc.PVVRole == "" {
-			log.DefaultLogger.Error("forecast: vault pvv mTLS needs a role", "err", "FORECAST_VAULT_PKI_PVV_ROLE is required with FORECAST_PVV_MTLS=true")
-		} else {
+		if vc.PVVRole != "" && vc.Client != nil {
 			// The ticker (and therefore PVV) runs in this process only in inline
 			// mode; in remote mode the compute service issues its own certificate.
 			mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -110,6 +125,8 @@ func newAppWith(ctx context.Context, settings backend.AppInstanceSettings, store
 			}
 			app.retrain.PVVManager = mgr
 			app.vaultCancels = append(app.vaultCancels, cancel)
+		} else if !vc.PVVFiles.ClientConfigured() {
+			log.DefaultLogger.Error("forecast: pvv mTLS has no certificate source", "err", "FORECAST_VAULT_PKI_PVV_ROLE or FORECAST_PVV_CLIENT_CERT/KEY is required with FORECAST_PVV_MTLS=true")
 		}
 	}
 	if app.poster == nil {

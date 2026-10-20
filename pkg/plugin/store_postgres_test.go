@@ -14,15 +14,42 @@ import (
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 	"github.com/eduard-kolotushin/timeseries-grafana/pkg/store"
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// TestPostgresStoreLocalTLSConfig: a local pair becomes the pool's TLS
+// configuration, and mTLS on with no source is an open error.
+func TestPostgresStoreLocalTLSConfig(t *testing.T) {
+	material := newPVVTestTLS(t)
+	cfg, err := postgresPoolConfig("postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1", storeTLSConfig{
+		Enabled: true,
+		Files: vault.FileTLS{
+			ClientCertFile: material.clientCertPath,
+			ClientKeyFile:  material.clientKeyPath,
+			CAFile:         material.caPath,
+		},
+		ServerName: "overlay-postgres",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCfg := cfg.ConnConfig.TLSConfig
+	if tlsCfg == nil || tlsCfg.ServerName != "overlay-postgres" || len(tlsCfg.Certificates) != 1 || tlsCfg.RootCAs == nil {
+		t.Fatalf("tls config = %+v", tlsCfg)
+	}
+
+	if _, err := postgresPoolConfig("postgres://u:p@127.0.0.1:1/db?sslmode=disable", storeTLSConfig{Enabled: true}); err == nil || !strings.Contains(err.Error(), "mTLS needs") {
+		t.Fatalf("missing source: err=%v", err)
+	}
+}
 
 // TestPostgresStoreLazyConnect: an unreachable database must not turn the store
 // into a permanent error; Get/Put fail per call and retry after the backoff.
 func TestPostgresStoreLazyConnect(t *testing.T) {
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, "postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1", nil)
+	s, err := openPostgresStore(ctx, "postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1", storeTLSConfig{})
 	if err != nil {
 		t.Fatalf("open must only parse the DSN: %v", err)
 	}
@@ -299,7 +326,7 @@ func TestPostgresStore(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +413,7 @@ func TestPostgresDueIgnoresSuperseded(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +468,7 @@ func TestPostgresListProjectsIdentity(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +536,7 @@ func TestPostgresScheduleOrgKey(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +632,7 @@ func TestPostgresRetrainKeyMigration(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +716,7 @@ func TestPostgresSchedule(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -921,7 +948,7 @@ func TestPostgresClaimRequiresFetchableQueries(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -988,7 +1015,7 @@ func TestPostgresClaimAllOrgs(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1076,7 +1103,7 @@ func TestPostgresSupersedeRetiresOldKeys(t *testing.T) {
 		t.Skip("FORECAST_TEST_PG not set")
 	}
 	ctx := context.Background()
-	s, err := openPostgresStore(ctx, dsn, nil)
+	s, err := openPostgresStore(ctx, dsn, storeTLSConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

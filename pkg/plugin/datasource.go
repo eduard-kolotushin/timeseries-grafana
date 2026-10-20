@@ -37,7 +37,7 @@ type Datasource struct {
 	vaultCancel func()
 	jsonData    []byte
 	secure      map[string]string
-	connect     func(context.Context, string, *vault.Manager) (SnapshotStore, func())
+	connect     func(context.Context, string, storeTLSConfig) (SnapshotStore, func())
 	limit       *workLimiter
 }
 
@@ -60,24 +60,26 @@ func newDatasource(ctx context.Context, settings backend.DataSourceInstanceSetti
 		limit:    newWorkLimiter(maxInflightFrom(ctx, settings.JSONData)),
 	}
 	if store == nil {
-		mgr, cancel := ds.storeManager(ctx, settings.JSONData, settings.DecryptedSecureJSONData)
+		tlsCfg, cancel := ds.storeTLS(ctx, settings.JSONData, settings.DecryptedSecureJSONData)
 		ds.vaultCancel = cancel
-		ds.store, ds.close = ds.connectFn()(ctx, storeDSNFrom(ctx, settings.JSONData, settings.DecryptedSecureJSONData), mgr)
+		ds.store, ds.close = ds.connectFn()(ctx, storeDSNFrom(ctx, settings.JSONData, settings.DecryptedSecureJSONData), tlsCfg)
 	}
 	return ds, nil
 }
 
-func (d *Datasource) connectFn() func(context.Context, string, *vault.Manager) (SnapshotStore, func()) {
+func (d *Datasource) connectFn() func(context.Context, string, storeTLSConfig) (SnapshotStore, func()) {
 	if d.connect != nil {
 		return d.connect
 	}
 	return connectStore
 }
 
-// storeManager resolves the same Vault settings the DSN uses and starts a
-// certificate manager when the store component's switch is on. A manager whose
-// first issue fails keeps retrying; connections fail loudly until it succeeds.
-func (d *Datasource) storeManager(ctx context.Context, jsonData []byte, secure map[string]string) (*vault.Manager, func()) {
+// storeTLS resolves the same Vault settings the DSN uses and selects the store's
+// certificate source: a Vault manager when the store role is configured,
+// otherwise local files. With mTLS on and neither source the returned config is
+// enabled but empty, so opening the pool reports the missing source instead of
+// silently connecting in plaintext.
+func (d *Datasource) storeTLS(ctx context.Context, jsonData []byte, secure map[string]string) (storeTLSConfig, func()) {
 	jd := map[string]any{}
 	if len(jsonData) > 0 {
 		_ = json.Unmarshal(jsonData, &jd)
@@ -90,21 +92,31 @@ func (d *Datasource) storeManager(ctx context.Context, jsonData []byte, secure m
 	vc, err := vaultFromLookup(look, backend.AppInstanceSettings{JSONData: jsonData, DecryptedSecureJSONData: secure})
 	if err != nil {
 		log.DefaultLogger.Error("forecast datasource: vault configuration refused", "err", err.Error())
-		return nil, nil
+		return storeTLSConfig{}, nil
 	}
 	if vc == nil || !vc.StoreMTLS {
-		return nil, nil
+		return storeTLSConfig{}, nil
 	}
-	if vc.StoreRole == "" {
-		log.DefaultLogger.Error("forecast datasource: store mTLS needs a role", "err", "FORECAST_VAULT_PKI_STORE_ROLE is required with FORECAST_STORE_MTLS=true")
-		return nil, nil
+	tlsCfg := storeTLSConfig{
+		Enabled:    true,
+		Files:      vc.StoreFiles,
+		ServerName: vc.StoreServerName,
 	}
-	mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	mgr := vault.NewManager(vc.Client, vc.PKIMount, vc.StoreRole, vc.StoreCN, vc.CertTTL)
-	if err := mgr.Start(mgrCtx); err != nil {
-		log.DefaultLogger.Error("forecast datasource: vault store issue failed", "err", err.Error())
+	switch {
+	case vc.StoreRole != "" && vc.Client != nil:
+		mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		mgr := vault.NewManager(vc.Client, vc.PKIMount, vc.StoreRole, vc.StoreCN, vc.CertTTL)
+		if err := mgr.Start(mgrCtx); err != nil {
+			log.DefaultLogger.Error("forecast datasource: vault store issue failed", "err", err.Error())
+		}
+		tlsCfg.Manager = mgr
+		return tlsCfg, cancel
+	case vc.StoreFiles.ClientConfigured():
+		return tlsCfg, nil
+	default:
+		log.DefaultLogger.Error("forecast datasource: store mTLS has no certificate source", "err", "FORECAST_VAULT_PKI_STORE_ROLE or FORECAST_STORE_CLIENT_CERT/KEY is required with FORECAST_STORE_MTLS=true")
+		return tlsCfg, nil
 	}
-	return mgr, cancel
 }
 
 func (d *Datasource) ensureStore(ctx context.Context, pCtx backend.PluginContext) SnapshotStore {
@@ -114,9 +126,9 @@ func (d *Datasource) ensureStore(ctx context.Context, pCtx backend.PluginContext
 		return d.store
 	}
 	jsonData, secure := storeJSONFromContext(d.jsonData, d.secure, pCtx.AppInstanceSettings)
-	mgr, cancel := d.storeManager(ctx, jsonData, secure)
+	tlsCfg, cancel := d.storeTLS(ctx, jsonData, secure)
 	d.vaultCancel = cancel
-	d.store, d.close = d.connectFn()(ctx, storeDSNFrom(ctx, jsonData, secure), mgr)
+	d.store, d.close = d.connectFn()(ctx, storeDSNFrom(ctx, jsonData, secure), tlsCfg)
 	return d.store
 }
 

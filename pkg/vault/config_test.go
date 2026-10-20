@@ -3,7 +3,10 @@ package vault
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +74,62 @@ func TestResolveEnv(t *testing.T) {
 			},
 			wantErr: "no component role is configured (compute, pvv, store)",
 		},
+		{
+			name:    "role without an address is an error",
+			env:     map[string]string{"FORECAST_VAULT_PKI_ROLE": "compute"},
+			wantErr: "address is required when a component role is configured",
+		},
+		{
+			name: "compute local pair needs no Vault address",
+			env: map[string]string{
+				"FORECAST_COMPUTE_CLIENT_CERT": "/c",
+				"FORECAST_COMPUTE_CLIENT_KEY":  "/k",
+				"FORECAST_COMPUTE_CA_CERT":     "/ca",
+			},
+			compute: true,
+		},
+		{
+			name: "compute server pair alone selects the listener",
+			env: map[string]string{
+				"FORECAST_COMPUTE_SERVER_CERT": "/sc",
+				"FORECAST_COMPUTE_SERVER_KEY":  "/sk",
+			},
+			compute: true,
+		},
+		{
+			name: "pvv local pair needs no Vault address",
+			env: map[string]string{
+				"FORECAST_PVV_CLIENT_CERT": "/c",
+				"FORECAST_PVV_CLIENT_KEY":  "/k",
+			},
+			pvv: true,
+		},
+		{
+			name: "store local pair needs no Vault address",
+			env: map[string]string{
+				"FORECAST_STORE_CLIENT_CERT": "/c",
+				"FORECAST_STORE_CLIENT_KEY":  "/k",
+			},
+			store: true,
+		},
+		{
+			name: "explicit store off keeps local files ignored",
+			env: map[string]string{
+				"FORECAST_STORE_CLIENT_CERT": "/c",
+				"FORECAST_STORE_CLIENT_KEY":  "/k",
+				"FORECAST_STORE_MTLS":        "false",
+			},
+		},
+		{
+			name: "address with a local source is not a role error",
+			env: map[string]string{
+				"FORECAST_VAULT_ADDR":          "http://v:8200",
+				"FORECAST_VAULT_TOKEN":         "t",
+				"FORECAST_COMPUTE_CLIENT_CERT": "/c",
+				"FORECAST_COMPUTE_CLIENT_KEY":  "/k",
+			},
+			compute: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,6 +159,44 @@ func TestResolveEnv(t *testing.T) {
 				t.Fatalf("store CN = %q", got.StoreCN)
 			}
 		})
+	}
+}
+
+func TestNewFileTLSConfigs(t *testing.T) {
+	pki := newTestPKI(t, time.Now().Add(time.Hour))
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	caPath := filepath.Join(dir, "ca.pem")
+	for path, data := range map[string]string{certPath: pki.certPEM, keyPath: pki.keyPEM, caPath: pki.caPEM} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := FileTLS{ClientCertFile: certPath, ClientKeyFile: keyPath, CAFile: caPath}
+	client, err := NewFileClientTLSConfig(files, "forecast.local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.ServerName != "forecast.local" || len(client.Certificates) != 1 || client.RootCAs == nil {
+		t.Fatalf("client config = %+v", client)
+	}
+	server, err := NewFileServerTLSConfig(FileTLS{ServerCertFile: certPath, ServerKeyFile: keyPath, CAFile: caPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(server.Certificates) != 1 || server.ClientAuth != tls.RequireAndVerifyClientCert || server.ClientCAs == nil {
+		t.Fatalf("server config = %+v", server)
+	}
+
+	if _, err := NewFileClientTLSConfig(FileTLS{ClientCertFile: certPath}, ""); err == nil {
+		t.Fatal("a lone client certificate must fail")
+	}
+	if _, err := NewFileServerTLSConfig(FileTLS{ServerCertFile: certPath, ServerKeyFile: keyPath}); err == nil {
+		t.Fatal("a listener without a client CA must fail")
+	}
+	if _, err := NewFileClientTLSConfig(FileTLS{ClientCertFile: "-----BEGIN CERTIFICATE-----", ClientKeyFile: keyPath}, ""); err == nil || !strings.Contains(err.Error(), "file path") {
+		t.Fatalf("PEM content: err=%v", err)
 	}
 }
 

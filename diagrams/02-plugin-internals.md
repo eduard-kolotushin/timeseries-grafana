@@ -4,7 +4,7 @@ Grafana загружает один app-плагин с вложенной па�
 
 Третий процесс — не от Grafana: `gpx_forecast_compute` (`cmd/compute`) поднимает те же обработчики по HTTP и нужен, когда обучать и тикать должно отдельно от Grafana. Grafana о нём не знает: URL задаётся плагину (`FORECAST_COMPUTE_URL`, ниже — режим **remote**), и тогда app-процесс пересылает ему `/forecast`, а сам не обучает и не тикает. Свой `FORECAST_COMPUTE_URL` сервис игнорирует, поэтому переслать запрос самому себе он не может по построению.
 
-Vault PKI и PVV — необязательные транспортные ответвления. `pkg/vault` выдаёт сертификаты для compute/PVV/store и умеет сам ходить в Vault по mTLS (файловая пара, v21); каждый switch независим (`FORECAST_COMPUTE_MTLS` / `_PVV_MTLS` / `_STORE_MTLS` / `_VAULT_MTLS`). Тикер в PVV-режиме ходит в `DataByRefId` вместо `/api/ds/query`; на схеме это пунктирные рёбра к Vault и PVV, а у ребра к Postgres пометка «TLS optional».
+Vault PKI или локальные файлы и PVV — необязательные транспортные ответвления. `pkg/vault` выдаёт сертификаты для compute/PVV/store, грузит локальные пары (v22) и умеет сам ходить в Vault по mTLS (файловая пара, v21); каждый switch независим (`FORECAST_COMPUTE_MTLS` / `_PVV_MTLS` / `_STORE_MTLS` / `_VAULT_MTLS`), роль Vault выигрывает над файлами. Тикер в PVV-режиме ходит в `DataByRefId` вместо `/api/ds/query`; на схеме это пунктирные рёбра к Vault, PVV и файлам, а у ребра к Postgres пометка «TLS optional».
 
 Страницы работают в процессе Grafana: лендинг и Configuration находятся вне пути оверлея, а Retrain schedules обращается к ресурсу `/schedules`. Configuration сохраняет только default retrain schedule (`jsonData.retrainCron` / `retrainTimezone`); DSN снимков задаётся деплоем (env `FORECAST_STORE_*` / ini / provisioned jsonData) — полей стора на странице нет.
 
@@ -16,8 +16,9 @@ Vault PKI и PVV — необязательные транспортные от�
 | Вложенная панель | `eduardkolotushin-forecast-panel` | Визуализация оверлея: сначала пробный запрос, затем (при необходимости) обучение |
 | Вложенный источник | `eduardkolotushin-forecast-datasource` | `QueryData` для alerting: Restore по `cacheKey`, промах — ошибка |
 | Compute-сервис | `gpx_forecast_compute` (`cmd/compute`) | Тот же `/forecast` и тот же тикер, когда задан `FORECAST_COMPUTE_URL`: процесс env only, без токена не стартует, монтирует `/forecast`, `/ping` и `/healthz` |
-| Vault | `pkg/vault` | Необязательный PKI-клиент: token/AppRole/Kubernetes auth, `pki/issue`, продление на половине срока; опциональный клиентский сертификат к самому Vault (v21, файловая пара). Питает compute/PVV/store mTLS |
-| PVV | `pkg/plugin/retrain.go` | Необязательный `DataByRefId`-транспорт тикера: mTLS клиентским сертификатом (Vault-issued или файловым), без `/api/ds/query` fallback |
+| Vault | `pkg/vault` | Необязательный PKI-клиент: token/AppRole/Kubernetes auth, `pki/issue`, продление на половине срока; опциональный клиентский сертификат к самому Vault (v21, файловая пара). Питает compute/PVV/store mTLS или уступает локальным файлам (v22) |
+| Локальные сертификаты | `pkg/vault/tls.go` | Файловые пары для compute client/listener, PVV и store: `tls.LoadX509KeyPair`, CA pool, `RequireAndVerifyClientCert`; PEM-содержимое отклоняется, ротация — рестарт |
+| PVV | `pkg/plugin/retrain.go` | Необязательный `DataByRefId`-транспорт тикера: mTLS клиентским сертификатом (Vault-issued или файловым), без `/api/ds/query` fallback; `PVV_MTLS=false` выключает транспорт даже при файлах |
 | Ресурсы | `POST /forecast`, `GET\|PUT\|DELETE /schedules`, `POST /schedules/default`, `GET ping` | `/schedules*` требуют прав Admin, остальное без ограничений. У compute-сервиса `/schedules` нет — расписания остаются в плагине |
 | Планировщик | `retrain.go`: тик 30 с, батч 4, аренда 6 мин (производная: батч × таймаут fetch + таймаут fetch + 1 мин), откат `min(аренда × 2^(attempts−1), FORECAST_RETRAIN_RETRY_MAX)` | `Claim` → `Extend` → `/api/ds/query` или PVV `DataByRefId` → `fitRequest` → `Put` → `Finish`. В remote-режиме тикает compute-сервис, а app не тикает вовсе |
 | Расписания | `forecast.retrain`, uuid PK `id`, `UNIQUE (scope, org_id, key)`, `attempts` | Спека панели = `trainSource` + модель; `spec` наружу не отдаётся — отдаётся производный `source` |
@@ -74,6 +75,7 @@ flowchart LR
 
   Vault["Vault PKI (optional)"]
   PVV["PVV DataByRefId (optional)"]
+  Files["Локальные сертификаты (v22)"]
 
   HTTP -->|"CallResource"| Mux
   HTTP2 -->|"CallResource"| Res
@@ -95,6 +97,10 @@ flowchart LR
   CADisp -.->|"issue certs"| Vault
   C1 -.->|"store client cert"| Vault
   C2 -.->|"store client cert"| Vault
+  CADisp -.->|"local client/server pair"| Files
+  C1 -.->|"local store pair"| Files
+  C2 -.->|"local store pair"| Files
+  CAWork -.->|"local compute/PVV pair"| Files
   DSAPI -->|"прокси к источнику"| PQ
 ```
 

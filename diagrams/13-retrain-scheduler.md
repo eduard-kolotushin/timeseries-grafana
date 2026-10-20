@@ -31,8 +31,8 @@
 | `FORECAST_RETRAIN_RETRY_MAX` | `1h` | Потолок отката; значение не длиннее аренды заменяется на `2 × аренда` |
 | `FORECAST_COMPUTE_URL` | — | Задан — тикает сервис `gpx_forecast_compute`, а app только пересылает `/forecast`; не задан — тикает app |
 | `FORECAST_GRAFANA_URL` / `FORECAST_GRAFANA_TOKEN` | — | Куда и с какими учётами обращаться к `/api/ds/query` (в сервисе `FORECAST_GRAFANA_URL` обязателен: его loopback не указывает на Grafana) |
-| `FORECAST_PVV_MTLS` / `FORECAST_VAULT_PKI_PVV_ROLE` | on, если роль задана | PVV-транспорт по mTLS: Vault-issued клиентский сертификат; `false` оставляет файловую пару |
-| `FORECAST_STORE_MTLS` / `FORECAST_VAULT_PKI_STORE_ROLE` | on, если роль задана | `Put`/`Get` снимков по TLS с Vault-issued клиентским сертификатом |
+| `FORECAST_PVV_MTLS` / `FORECAST_VAULT_PKI_PVV_ROLE` | on, если роль или локальная пара задана | PVV-транспорт по mTLS: Vault-issued клиентский сертификат выигрывает, иначе `FORECAST_PVV_CLIENT_CERT/KEY` (v18/v22); `false` выключает PVV даже при файлах |
+| `FORECAST_STORE_MTLS` / `FORECAST_VAULT_PKI_STORE_ROLE` | on, если роль или локальная пара задана | `Put`/`Get` снимков по TLS: Vault-issued клиентский сертификат или `FORECAST_STORE_CLIENT_CERT/KEY` (+ `_CA_CERT` / `_TLS_SERVER_NAME`) |
 
 Отказ авторизации: три тика подряд с 401/403 (`/api/ds/query` или `/api/org`) отключают планировщик до перезапуска — с одной записью Error в логе. Отказы должны идти подряд, поэтому редкий сбой не глушит рабочий планировщик. Проверка стоит только на пути планировщика — на запросы панели она не влияет.
 

@@ -347,7 +347,46 @@ PKI.
   Vault accepts the compute service and migrator with the configured pair and
   refuses a client without it.
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 non-goals
+## v22 must-have
+
+The compute hop, PVV's retrain transport and the Postgres snapshot store also
+accept a **local file certificate pair**, so an installation that cannot use
+Vault PKI still runs mTLS. The existing per-component switch chooses whether the
+component uses TLS and the configured material chooses the source; no new source
+flag is added.
+
+- **Source precedence**: when a component's Vault PKI role is configured, Vault
+  issues the certificate exactly as v19/v20 (and wins if a file pair is also
+  present). With no role, a configured client certificate/key pair is loaded
+  from disk. A switch that is on with neither source is a loud per-component
+  error, never a plaintext fallback.
+- **Compute client**: `FORECAST_COMPUTE_CLIENT_CERT` /
+  `FORECAST_COMPUTE_CLIENT_KEY`, optional `FORECAST_COMPUTE_CA_CERT` (system
+  roots when empty) and `FORECAST_COMPUTE_TLS_SERVER_NAME` (URL host when
+  empty). The URL must still be `https`.
+- **Compute listener**: `FORECAST_COMPUTE_SERVER_CERT` /
+  `FORECAST_COMPUTE_SERVER_KEY` plus `FORECAST_COMPUTE_CA_CERT` to verify client
+  certificates. The listener keeps `RequireAndVerifyClientCert`; server and
+  client pairs are separate because they belong to different processes.
+  `FORECAST_COMPUTE_MTLS` remains the on/off switch; unset defaults to "a compute
+  role or either compute pair is configured".
+- **PVV**: the v18 `FORECAST_PVV_CLIENT_CERT` / `FORECAST_PVV_CLIENT_KEY` /
+  `FORECAST_PVV_CA_CERT` pair is now actually governed by `FORECAST_PVV_MTLS`,
+  like every other component: unset defaults on when a pair exists, explicit
+  `false` disables PVV even when files exist.
+- **Store**: `FORECAST_STORE_CLIENT_CERT` / `FORECAST_STORE_CLIENT_KEY`, optional
+  `FORECAST_STORE_CA_CERT` and optional `FORECAST_STORE_TLS_SERVER_NAME` (pgx
+  host when empty).
+- Every certificate setting remains a **file path**, never PEM content; the same
+  guards as v21 reject a PEM block. Local material is loaded once when the
+  client, pool or listener is built, so rotating a local certificate needs a
+  process restart (Vault-issued material keeps its half-life rotation).
+- A deployment with no Vault address may still run any component from files. A
+  configured Vault with no component role and no local pair is still the v20
+  loud error. The same env/lookup chain reaches the app, the nested datasource,
+  the compute service and `gpx_forecast_migrate`.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 non-goals
 
 Do not add these without first updating this document:
 
@@ -368,7 +407,7 @@ Do not add these without first updating this document:
 - Retention outside the retrain ticker: a second scheduler, a Grafana-side cron, a job queue, a separate collector process, or a table the worker owns. `gpx_forecast_compute` (v16) is the named exception to "a separate process": it is not a second scheduler, it is the same ticker running where the fit runs, and it claims the same rows through the same lease protocol. Deleting a snapshot is not a reason to stop a query either — the overlay's `needTrain` path already answers a missing snapshot
 - A second implementation of the fit or the dispatch semantics, or a second compute transport: the service runs the same `pkg/plugin` handlers, and remote mode forwards the request rather than re-deriving `due` / `needTrain` / provenance locally
 - A compute service that reads grafana.ini or jsonData, or that authenticates with anything but the shared token and the org the plugin asserts, **except** the v19 mTLS layer: the token and the asserted org stay, and Vault-issued certificates add transport authentication. Its configuration is process env only, exactly like `gpx_forecast_migrate`
-- A Vault KV certificate source, a `hashicorp/vault/api` dependency, or a file-based certificate mode for the compute hop or the Postgres store (v19 issues the hop's certificates and v20 the store's from Vault PKI; the PVV file pair remains for deployments without Vault)
+- A certificate source beyond Vault PKI and the local file pair of v21/v22: no Vault KV certificate source, no `hashicorp/vault/api` dependency, and no third source (ACME, cert-manager API, an inline PEM setting). Vault wins when a component has both a role and files; PEM content is always refused.
 - A remote **plugin backend** — Grafana dialing a `gpx_forecast` gRPC server on another host. **Settled: the compute transport is HTTP** (`gpx_forecast_compute`, one authenticated route), and this stays a non-goal. The SDK's standalone client mode does exist — `GF_PLUGIN_GRPC_ADDRESS_EDUARDKOLOTUSHIN_FORECAST_APP` (or `standalone.txt` / `pid.txt` beside the local plugin binary) makes the spawned process print the `1|2|tcp|<address>|grpc` locator for *that* address instead of serving itself, so Grafana need not dial its own child — but it is a debugging facility, not a deployment: the plugin directory and `plugin.json` must still exist locally, the SDK ships `FindAndKillCurrentPlugin`/`pgrep` helpers around it, and the hop carries no TLS and no token of its own (the SDK's plugin `ServeOpts` expose none), so a network-exposed plugin port would answer `forecast.snapshots`, `forecast.retrain` and every resource route as the plugin for anyone who can reach it. Reviving it needs a new entry here, not a config knob
 - A panel that talks to the compute service directly (the shared token must never reach a browser) and a silent local fallback when the compute service is unreachable
 - A dead-letter queue, a disable-after-N-failures path, or a retry backoff that is not the capped exponential one above. A permanently broken row is retried at the cap until an Admin disables or deletes it, and its attempt count stays in `last_status` rather than becoming a new `GET /schedules` field
@@ -387,7 +426,7 @@ Do not add these without first updating this document:
 - Every primary key this plugin owns is a uuid (`gen_random_uuid()`), the natural key beside it is `UNIQUE`, and an applied migration file is never edited
 - Retention never loses a live model: a snapshot is collected only when nothing refreshed it within `FORECAST_SNAPSHOT_TTL`, and a row only when it is idle by its own clocks and has no snapshot behind it. `0` disables the sweep and a window below `1h` is refused rather than obeyed
 - Compute mode is a switch, not a second code path: the same request answers the same bytes with the URL unset and with it set to a compute service built from the same handlers, and the compute service mounts `/forecast`, `/ping` and `/healthz` only
-- The compute hop is authenticated and org-faithful: a missing or wrong token is refused, `X-Forecast-Org` must be a non-negative integer, the plugin overwrites any caller-supplied copy, and the store writes land under the asserted org. An unreachable compute service is a 502 with a reason, never a silent local fit. With compute mTLS on the hop additionally requires a client certificate, an `http` compute URL is refused, and a failed issue is a 502 or a startup refusal, never a plaintext downgrade. Each component's switch is independent: compute, PVV and the Postgres store can be on or off separately, and a flag turned on without its Vault role is an error rather than a silent downgrade
+- The compute hop is authenticated and org-faithful: a missing or wrong token is refused, `X-Forecast-Org` must be a non-negative integer, the plugin overwrites any caller-supplied copy, and the store writes land under the asserted org. An unreachable compute service is a 502 with a reason, never a silent local fit. With compute mTLS on the hop additionally requires a client certificate, an `http` compute URL is refused, and a failed issue is a 502 or a startup refusal, never a plaintext downgrade. Each component's switch is independent: compute, PVV and the Postgres store can be on or off separately, and a flag turned on without a Vault role **or** a local certificate pair is an error rather than a silent downgrade. Local files are paths, PEM content is refused, and a source conflict resolves to Vault
 - The ticker lives in exactly one place per deployment: remote mode starts none in the plugin, and N compute replicas retrain each due row once through the v12/v15 claim protocol
 - Inline behaviour is unchanged: with `FORECAST_COMPUTE_URL` unset the limiter default, the ticker and the `/forecast` handler are exactly what v15 shipped
 - A deleted schedule row does not delete the model: the sweep re-creates the row with the deployment default, and `drop=model` is the only way a caller removes the snapshot (a `baseline` key's snapshot belongs to the worker and is reported as such)

@@ -166,19 +166,26 @@ section's `compute_url` taking effect.
 Defaults when a key is absent: port `5432`, database `overlay`, user `overlay`, sslmode `disable`. An
 empty host (and no URL) means "no store": the overlay then retrains on every load.
 
-**Postgres mTLS (v20)** is a separate switch from the compute hop and PVV. Set `FORECAST_STORE_MTLS=true`
-(the app, the datasource instance, the compute service and `gpx_forecast_migrate` all honor it), configure
-Vault as for the other components, and set `FORECAST_VAULT_PKI_STORE_ROLE` to the PKI role that issues the
-store's client certificate. The CN defaults to the resolved `store_user` (override with
-`FORECAST_VAULT_STORE_CN`); the Vault CA from the issue response is the pgx root. `pgx` presents the
-certificate through a `GetClientCertificate` callback, so a renewed certificate is used by new pool
-connections without a restart; a rotation of the Vault CA itself needs a rolling restart. `sslmode` in the
-DSN is superseded when the switch is on. With the switch off (the default when no store role is set), the
-connection is exactly the pre-v20 `sslmode`-only behavior.
+**Postgres mTLS (v20/v22)** is a separate switch from the compute hop and PVV. Set `FORECAST_STORE_MTLS=true`
+(the app, the datasource instance, the compute service and `gpx_forecast_migrate` all honor it), then
+choose one source:
 
-A component's flag can be set to `false` even when its role exists — that is the Kubernetes/Istio shape,
-where the sidecar terminates mTLS and the application talks plain. A flag set `true` without its role is
-an error naming the missing key.
+- **Vault PKI**: configure Vault and set `FORECAST_VAULT_PKI_STORE_ROLE` to the role that issues the
+  store's client certificate. The CN defaults to the resolved `store_user` (override with
+  `FORECAST_VAULT_STORE_CN`); the Vault CA from the issue response is the pgx root. `pgx` presents the
+  certificate through a `GetClientCertificate` callback, so a renewed certificate is used by new pool
+  connections without a restart; a rotation of the Vault CA itself needs a rolling restart.
+- **Local files**: set `FORECAST_STORE_CLIENT_CERT` / `FORECAST_STORE_CLIENT_KEY` (paths), optionally
+  `FORECAST_STORE_CA_CERT` (system roots when empty) and `FORECAST_STORE_TLS_SERVER_NAME` when the DSN host
+  is not the certificate's SAN. No Vault is needed. The pair is loaded when the pool is built, so rotation
+  needs a restart. A Vault role wins when both are configured.
+
+`sslmode` in the DSN is superseded when the switch is on. With the switch off (the default when no store
+role and no local pair are set), the connection is exactly the pre-v20 `sslmode`-only behavior.
+
+A component's flag can be set to `false` even when its role or file pair exists — that is the
+Kubernetes/Istio shape, where the sidecar terminates mTLS and the application talks plain. A flag set
+`true` with neither a role nor a local pair is an error naming the missing keys.
 
 ### 6d. Configuration map (component → function)
 
@@ -195,10 +202,10 @@ upper-case key (section 6c shows the precedence).
 | Vault | PKI issuance defaults | `vault_pki_mount`, `vault_cert_ttl` |
 | Vault | client certificate to Vault (v21) | `vault_mtls`, `vault_client_cert`, `vault_client_key` |
 | compute | forwarding | `compute_url`, `compute_token` |
-| compute | mTLS | `compute_mtls`, `vault_pki_role`, `vault_client_cn`, `compute_tls_server_name` |
+| compute | mTLS | `compute_mtls`, `vault_pki_role`, `vault_client_cn`, `compute_tls_server_name`, `compute_client_cert`, `compute_client_key`, `compute_ca_cert`, `compute_server_cert`, `compute_server_key` |
 | store | connection | `store_url`, or `store_host` / `store_port` / `store_database` / `store_user` / `store_ssl_mode` / `store_password` |
 | store | retention | `snapshot_ttl` |
-| store | mTLS | `store_mtls`, `vault_pki_store_role`, `vault_store_cn` |
+| store | mTLS | `store_mtls`, `vault_pki_store_role`, `vault_store_cn`, `store_client_cert`, `store_client_key`, `store_ca_cert`, `store_tls_server_name` |
 | PVV | transport | `pvv_url`, `pvv_ca_cert`, `pvv_tls_skip_verify`, `retrain_window_chunk` |
 | PVV | mTLS | `pvv_mtls`, `pvv_client_cert`, `pvv_client_key`, `vault_pki_pvv_role`, `vault_pvv_cn` |
 | retrain | schedule and reliability | `retrain_enabled`, `retrain_tick`, `retrain_lease`, `retrain_retry_max`, `retrain_cron` |
@@ -210,7 +217,7 @@ upper-case key (section 6c shows the precedence).
 | component | function | keys |
 | --- | --- | --- |
 | store | connection | `store_url` / `store_*` (same meanings as the app) |
-| store | mTLS | `store_mtls`, `vault_pki_store_role`, `vault_store_cn` |
+| store | mTLS | `store_mtls`, `vault_pki_store_role`, `vault_store_cn`, `store_client_cert`, `store_client_key`, `store_ca_cert`, `store_tls_server_name` |
 | Vault | connection, authentication, issuance, client mTLS | the same keys as the app's Vault block; only the store role is used |
 | process | in-flight work | `max_inflight` |
 
@@ -284,9 +291,10 @@ export FORECAST_STORE_HOST=... FORECAST_STORE_USER=... FORECAST_STORE_PASSWORD=.
 - It reads process env `FORECAST_STORE_*`, then the `GF_PLUGIN_*` variables Grafana exports — no
   `grafana.ini` of its own and no jsonData. `--dsn postgres://…` overrides everything, `--timeout`
   defaults to `60s`, and the exit code is non-zero on the first failure.
-- With store mTLS it also reads the Vault env (`FORECAST_STORE_MTLS`, `FORECAST_VAULT_*`, including the
-  v21 client pair) exactly like the plugin; a missing role or certificate fails before migrating. The
-  certificate values are paths.
+- With store mTLS it selects the same source as the plugin: `FORECAST_VAULT_*` when
+  `FORECAST_VAULT_PKI_STORE_ROLE` is set, otherwise `FORECAST_STORE_CLIENT_CERT` / `_KEY` (and optional
+  `FORECAST_STORE_CA_CERT` / `_TLS_SERVER_NAME`). A switch on with neither source fails before migrating.
+  The certificate values are paths.
 
 ## 9. Unattended retraining
 
@@ -302,11 +310,11 @@ anonymous auth is off, a Viewer service-account token:
 | `grafanaUrl` / `grafana_url` / `FORECAST_GRAFANA_URL` | `http://127.0.0.1:3000` | where training frames come from |
 | `grafanaToken` / `grafana_token` / `FORECAST_GRAFANA_TOKEN` | — | Viewer service-account token for `/api/org` and `/api/ds/query` |
 | `pvvUrl` / `pvv_url` / `FORECAST_PVV_URL` | `FORECAST_GRAFANA_URL` | PVV base URL; the route is `/gse/data/v1/DataByRefId` |
-| `pvvClientCert` / `pvv_client_cert` / `FORECAST_PVV_CLIENT_CERT` | — | client certificate **path**; with the key, switches the scheduler to PVV mode |
-| `pvvClientKey` / `pvv_client_key` / `FORECAST_PVV_CLIENT_KEY` | — | client private key **path** |
+| `pvvClientCert` / `pvv_client_cert` / `FORECAST_PVV_CLIENT_CERT` | — | local client certificate **path**; used when no Vault PVV role is set |
+| `pvvClientKey` / `pvv_client_key` / `FORECAST_PVV_CLIENT_KEY` | — | local client private key **path** |
 | `pvvCaCert` / `pvv_ca_cert` / `FORECAST_PVV_CA_CERT` | system roots | CA bundle **path** for the PVV server |
-| `pvvMtls` / `pvv_mtls` / `FORECAST_PVV_MTLS` | on iff the Vault PVV role is set | selects the Vault-issued PVV client certificate; `false` keeps the file pair as the only source |
-| `vaultPkiPvvRole` / `vault_pki_pvv_role` / `FORECAST_VAULT_PKI_PVV_ROLE` | — | issue the PVV client certificate from Vault; setting it also selects PVV mode |
+| `pvvMtls` / `pvv_mtls` / `FORECAST_PVV_MTLS` | on iff the Vault PVV role or either local path is set | selects PVV over TLS; `false` disables PVV even when files exist |
+| `vaultPkiPvvRole` / `vault_pki_pvv_role` / `FORECAST_VAULT_PKI_PVV_ROLE` | — | issue the PVV client certificate from Vault; wins over the file pair |
 | `vaultPvvCn` / `vault_pvv_cn` / `FORECAST_VAULT_PVV_CN` | `gpx-forecast-pvv` | CN of the Vault-issued PVV certificate |
 | `pvvTlsSkipVerify` / `pvv_tls_skip_verify` / `FORECAST_PVV_TLS_SKIP_VERIFY` | `false` | test only; skip server certificate verification |
 | `retrainWindowChunk` / `retrain_window_chunk` / `FORECAST_RETRAIN_WINDOW_CHUNK` | `24h` | maximum PVV request range; values above `24h` fall back to `24h` |
@@ -315,7 +323,7 @@ anonymous auth is off, a Viewer service-account token:
 | `FORECAST_RETRAIN_LEASE` / `retrain_lease` | `6m` | claim lease; a fit that would outlive it is dropped, not duplicated |
 | `FORECAST_RETRAIN_RETRY_MAX` / `retrain_retry_max` | `1h` | cap on the retry backoff; not longer than the lease is refused |
 
-**PVV mode** is selected when `vaultPkiPvvRole` is set or either `pvvClientCert` (or `FORECAST_PVV_CLIENT_CERT`) or the key is set; the file pair requires both values. It claims every due panel row across all orgs, sends each row's `org_id` to `<pvvUrl>/gse/data/v1/DataByRefId` over mTLS, and calls neither `/api/org` nor `/orgs`; a PVV failure is the row's failure, with no `/api/ds/query` fallback. The client certificate's CN must be in PVV's `AllowedCNs` (a PVV-side deployment step). The compute service reads these keys from its process env only, like every other setting.
+**PVV mode** is selected when `FORECAST_PVV_MTLS` is on and `vaultPkiPvvRole` is set or the file pair is complete; the file pair requires both values. It claims every due panel row across all orgs, sends each row's `org_id` to `<pvvUrl>/gse/data/v1/DataByRefId` over mTLS, and calls neither `/api/org` nor `/orgs`; a PVV failure is the row's failure, with no `/api/ds/query` fallback. The client certificate's CN must be in PVV's `AllowedCNs` (a PVV-side deployment step). The compute service reads these keys from its process env only, like every other setting.
 
 ### 9a. Which URL, and which token
 
@@ -415,8 +423,10 @@ store and point the app at it. The service reads **process env only** (no ini, n
 | `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` | for the retrain ticker it owns (Grafana mode) |
 | `FORECAST_PVV_*`, `FORECAST_RETRAIN_WINDOW_CHUNK` | PVV mode, when the client certificate/key are set (or `FORECAST_VAULT_PKI_PVV_ROLE` issues one) |
 | `FORECAST_VAULT_*` | Vault address, namespace, auth, PKI mount/role, CA path and (v21) client certificate paths |
-| `FORECAST_COMPUTE_MTLS` | listen TLS-only when on; unset follows "the compute PKI role is set"; off keeps the plain listener |
-| `FORECAST_COMPUTE_TLS_SERVER_NAME` | DNS name this service's certificate is issued for and the plugin verifies |
+| `FORECAST_COMPUTE_MTLS` | listen TLS-only when on; unset follows "the compute PKI role or a compute certificate path is set"; off keeps the plain listener |
+| `FORECAST_COMPUTE_TLS_SERVER_NAME` | DNS name the service's certificate is issued for and the plugin verifies (Vault CN or a local certificate SAN) |
+| `FORECAST_COMPUTE_SERVER_CERT`, `FORECAST_COMPUTE_SERVER_KEY` | local listener pair; used when no compute PKI role is set |
+| `FORECAST_COMPUTE_CA_CERT` | CA the listener trusts for client certificates (required with the local listener pair) |
 | `FORECAST_RETRAIN_*`, `FORECAST_SNAPSHOT_TTL` | the ticker and retention, unchanged |
 | `FORECAST_MAX_INFLIGHT` | concurrent fits in this service, default `4` (the forwarding plugin process's own slots default to `32`) |
 
@@ -427,21 +437,24 @@ the failure when the service is unreachable — it never silently fits locally. 
 API and the panel keep working from the same store while the service is down. Replicas share one Postgres,
 and the claim queue with its lease makes N tickers safe.
 
-### mTLS from Vault PKI
+### mTLS from Vault PKI or local files
 
-Every hop is independent. An explicit `false` disables a component even when its Vault role exists (the
-Kubernetes/Istio shape); a switch set `true` without its role is an error naming the missing key.
+Every hop is independent. An explicit `false` disables a component even when its Vault role or local pair
+exists (the Kubernetes/Istio shape); a switch set `true` with neither source is an error naming the missing
+keys. A configured Vault role wins over a local pair.
 
-| component | switch | identity | what the switch does |
-| --- | --- | --- | --- |
-| compute | `FORECAST_COMPUTE_MTLS` | `FORECAST_VAULT_PKI_ROLE`, CN `FORECAST_VAULT_CLIENT_CN` (default `gpx-forecast`) | forward over `https` with a client cert; the service listens TLS-only |
-| PVV | `FORECAST_PVV_MTLS` | `FORECAST_VAULT_PKI_PVV_ROLE`, CN `FORECAST_VAULT_PVV_CN` (default `gpx-forecast-pvv`) | present a Vault-issued client cert to PVV |
-| store | `FORECAST_STORE_MTLS` | `FORECAST_VAULT_PKI_STORE_ROLE`, CN `FORECAST_VAULT_STORE_CN` (default the store user) | pgx presents a client cert to Postgres |
-| Vault API | `FORECAST_VAULT_MTLS` | file pair `FORECAST_VAULT_CLIENT_CERT` / `_KEY` | present a client cert to Vault itself |
+| component | switch | Vault identity | local source | what the switch does |
+| --- | --- | --- | --- | --- |
+| compute | `FORECAST_COMPUTE_MTLS` | `FORECAST_VAULT_PKI_ROLE`, CN `FORECAST_VAULT_CLIENT_CN` (default `gpx-forecast`) | client pair `FORECAST_COMPUTE_CLIENT_CERT` / `_KEY`, optional `FORECAST_COMPUTE_CA_CERT` | forward over `https` with a client cert; the service listens TLS-only |
+| PVV | `FORECAST_PVV_MTLS` | `FORECAST_VAULT_PKI_PVV_ROLE`, CN `FORECAST_VAULT_PVV_CN` (default `gpx-forecast-pvv`) | `FORECAST_PVV_CLIENT_CERT` / `_KEY`, optional `FORECAST_PVV_CA_CERT` | present a client cert to PVV |
+| store | `FORECAST_STORE_MTLS` | `FORECAST_VAULT_PKI_STORE_ROLE`, CN `FORECAST_VAULT_STORE_CN` (default the store user) | `FORECAST_STORE_CLIENT_CERT` / `_KEY`, optional `FORECAST_STORE_CA_CERT` / `_TLS_SERVER_NAME` | pgx presents a client cert to Postgres |
+| compute listener | `FORECAST_COMPUTE_MTLS` | same compute role, CN `FORECAST_COMPUTE_TLS_SERVER_NAME` | `FORECAST_COMPUTE_SERVER_CERT` / `_KEY` + `FORECAST_COMPUTE_CA_CERT` | serve TLS and require a client certificate |
+| Vault API | `FORECAST_VAULT_MTLS` | — | file pair `FORECAST_VAULT_CLIENT_CERT` / `_KEY` | present a client cert to Vault itself |
 
-Each switch defaults to "that component's Vault role is configured" (the Vault API switch: either file
-path is set). The same env/lookup chain reaches the app, the datasource, the compute service and the
-migrator; the app may also spell these keys as jsonData (`vaultAddr`, `vaultPkiRole`, `storeMtls`, …).
+Each switch defaults to "that component's Vault role or local certificate path is configured" (the Vault
+API switch: either file path is set). The same env/lookup chain reaches the app, the datasource, the compute
+service and the migrator; the app may also spell these keys as jsonData (`vaultAddr`, `vaultPkiRole`,
+`storeMtls`, …).
 
 **Vault connection — all components.** Set `FORECAST_VAULT_ADDR`; empty means no Vault. Auth is tried in
 order: static token (`FORECAST_VAULT_TOKEN`, then bare `VAULT_TOKEN`), AppRole
@@ -460,35 +473,50 @@ accepts `compute.extraVolumes` / `compute.extraVolumeMounts` and `grafana.extraV
 `grafana.extraVolumeMounts`, but does not create the Secret: mount the pair into the Grafana and compute
 pods.
 
-**Compute.** Set `FORECAST_VAULT_ADDR` and `FORECAST_VAULT_PKI_ROLE` on both the app and the service. The
-service refuses to start without `FORECAST_COMPUTE_TLS_SERVER_NAME` and a working initial issue, then
-listens TLS-only with `RequireAndVerifyClientCert`; the app forwards over `https` only. Certificates are
-issued by `pki/issue/<role>` and re-issued at half their remaining lifetime, so leaf rotation needs no
-restart.
+**Compute.** With Vault: set `FORECAST_VAULT_ADDR` and `FORECAST_VAULT_PKI_ROLE` on both the app and the
+service. The service refuses to start without `FORECAST_COMPUTE_TLS_SERVER_NAME` and a working initial
+issue, then listens TLS-only with `RequireAndVerifyClientCert`; the app forwards over `https` only.
+Certificates are issued by `pki/issue/<role>` and re-issued at half their remaining lifetime, so leaf
+rotation needs no restart.
 
-**PVV.** Set `FORECAST_VAULT_PKI_PVV_ROLE` (app, compute service, or both) and leave `FORECAST_PVV_MTLS`
-true: the retrain transport presents a Vault-issued certificate and PVV mode is selected by that role.
-Without Vault, set `FORECAST_PVV_CLIENT_CERT` / `_KEY` (paths) and `FORECAST_PVV_CA_CERT`;
-`FORECAST_PVV_MTLS=false` keeps the file pair as the only source.
+Without Vault: set `FORECAST_COMPUTE_MTLS=true` and give the app
+`FORECAST_COMPUTE_CLIENT_CERT` / `FORECAST_COMPUTE_CLIENT_KEY` (optional `FORECAST_COMPUTE_CA_CERT`,
+`FORECAST_COMPUTE_TLS_SERVER_NAME`), and the service `FORECAST_COMPUTE_SERVER_CERT` /
+`FORECAST_COMPUTE_SERVER_KEY` plus `FORECAST_COMPUTE_CA_CERT` to verify clients. The URL is still
+`https://`. The two pairs are separate because the plugin presents the client certificate and the service
+presents the server certificate; both are loaded once, so rotate them with a restart.
 
-**Store.** Set `FORECAST_STORE_MTLS=true` and `FORECAST_VAULT_PKI_STORE_ROLE` on every process that opens
-the store (app, datasource, compute service, migrator). The CN defaults to the resolved `store_user`
-(override with `FORECAST_VAULT_STORE_CN`); pgx presents the certificate through a `GetClientCertificate`
-callback, so new pool connections pick up a renewed leaf without a restart. The Vault CA from the issue
-response is the pgx root; rotating the Vault CA itself needs a rolling restart. `sslmode` is superseded
-when the switch is on.
+**PVV.** With Vault: set `FORECAST_VAULT_PKI_PVV_ROLE` (app, compute service, or both) and leave
+`FORECAST_PVV_MTLS` true; the retrain transport presents a Vault-issued certificate and PVV mode is
+selected by that role. Without Vault: set `FORECAST_PVV_MTLS=true` and
+`FORECAST_PVV_CLIENT_CERT` / `_KEY` (paths) plus optional `FORECAST_PVV_CA_CERT`. An explicit
+`FORECAST_PVV_MTLS=false` disables PVV even when the files exist, keeping the scheduler on Grafana's
+`/api/ds/query`.
+
+**Store.** With Vault: set `FORECAST_STORE_MTLS=true` and `FORECAST_VAULT_PKI_STORE_ROLE` on every process
+that opens the store (app, datasource, compute service, migrator). The CN defaults to the resolved
+`store_user` (override with `FORECAST_VAULT_STORE_CN`); pgx presents the certificate through a
+`GetClientCertificate` callback, so new pool connections pick up a renewed leaf without a restart. The
+Vault CA from the issue response is the pgx root; rotating the Vault CA itself needs a rolling restart.
+
+Without Vault: set `FORECAST_STORE_MTLS=true` and `FORECAST_STORE_CLIENT_CERT` /
+`FORECAST_STORE_CLIENT_KEY` on every such process, with optional `FORECAST_STORE_CA_CERT` (system roots
+when empty) and `FORECAST_STORE_TLS_SERVER_NAME` (the DSN host when empty). `sslmode` is superseded when the
+switch is on. Local material is loaded when the pool is built, so rotation needs a restart.
 
 All certificate settings are **file paths**, never PEM content: `FORECAST_VAULT_CA_CERT`,
-`FORECAST_VAULT_CLIENT_CERT`, `FORECAST_VAULT_CLIENT_KEY`, and PVV's `FORECAST_PVV_CA_CERT` /
-`FORECAST_PVV_CLIENT_CERT` / `FORECAST_PVV_CLIENT_KEY`. A value containing a PEM block is rejected at
-construction (`… must be a file path, not PEM content`).
+`FORECAST_VAULT_CLIENT_CERT`, `FORECAST_VAULT_CLIENT_KEY`, `FORECAST_COMPUTE_CLIENT_CERT` / `_KEY` /
+`_CA_CERT` / `_SERVER_CERT` / `_SERVER_KEY`, `FORECAST_STORE_CLIENT_CERT` / `_KEY` / `_CA_CERT`, and PVV's
+`FORECAST_PVV_CA_CERT` / `FORECAST_PVV_CLIENT_CERT` / `FORECAST_PVV_CLIENT_KEY`. A value containing a PEM
+block is rejected at construction (`… must be a file path, not PEM content`).
 
 The service exposes `/forecast`, `/ping` and an unauthenticated coarse `/healthz`; it deliberately does
 not serve the schedules API.
 
-> Without Vault the compute hop is plain HTTP with a single shared token and trusts `X-Forecast-Org`;
-> keep it on a trusted pod network, do not expose the Service outside the cluster, and terminate TLS in
-> front of it if it crosses a host or network boundary.
+> Without Vault the compute hop is plain HTTP unless a local pair is configured; with a local pair it is
+> still TLS with the same shared token and `X-Forecast-Org`. Keep a plain hop on a trusted pod network, do
+> not expose the Service outside the cluster, and terminate TLS in front of it if it crosses a host or
+> network boundary.
 
 ## 11. End-to-end verification
 
@@ -523,12 +551,16 @@ Then in the UI:
    plugin with an **Invalid plugin signature** banner in that header — expected, informational, and it
    does not block loading.
 
-If a Vault-backed mTLS switch is on, also check:
+If any mTLS switch is on (Vault PKI or local files), also check:
 
 ```sh
-# The plugin and the compute service both logged an initial issue.
+# Vault PKI: the plugin and the compute service both logged an initial issue.
 #   forecast: compute mTLS enabled pki_role=… server_name=…
+# Local files: the same line says source=files; no Vault log appears.
 #   {"tls":true,...}
+# The migrator with a local store pair and no Vault variables prints the same ledger line:
+#   FORECAST_STORE_MTLS=true FORECAST_STORE_CLIENT_CERT=… FORECAST_STORE_CLIENT_KEY=…
+#   FORECAST_STORE_CA_CERT=… gpx_forecast_migrate --dry-run
 # The compute listener refuses a peer without a client certificate:
 curl -k https://<compute-host>:8080/healthz
 # curl: (56) … tlsv13 alert certificate required
@@ -556,9 +588,13 @@ If Vault itself requires a client certificate, a deliberate request without the 
 | `forecast.retrain has no attempts column` in the log | the schema was created by an older release | run `gpx_forecast_migrate_linux_amd64` (section 8) |
 | retrainer goes quiet after startup | not reachable as configured, or 401 from a missing/invalid token | set `grafanaUrl`/`grafanaToken` (section 9), or `retrainEnabled: false` if a compute service owns ticking |
 | fit returns `502` / `401` | compute service unreachable, or `computeToken` does not match `FORECAST_COMPUTE_TOKEN` | section 10; the plugin never falls back to a local fit |
-| `forecast: vault: no component role is configured (compute, pvv, store)` | `vault_addr` is set but none of the three PKI roles is | set the role for the component you want, or leave `vault_addr` empty (section 10) |
+| `forecast: vault: no component role is configured (compute, pvv, store)` | `vault_addr` is set but none of the three PKI roles is, and no local certificate pair is configured | set the role for the component you want, point it at a local pair, or leave `vault_addr` empty (section 10) |
+| `forecast: vault: address is required when a component role is configured` | a `FORECAST_VAULT_PKI_*_ROLE` is set without `vault_addr` | set the address or remove the role |
+| `forecast: compute: mTLS needs FORECAST_VAULT_PKI_ROLE or FORECAST_COMPUTE_CLIENT_CERT/KEY` | compute mTLS is on with neither source | configure the role, or the client pair, or set `FORECAST_COMPUTE_MTLS=false` |
+| `forecast compute: mTLS needs … FORECAST_COMPUTE_SERVER_CERT/KEY and FORECAST_COMPUTE_CA_CERT` | the service has no listener pair and no compute role | configure the server pair and CA, or turn the listener switch off |
+| `forecast: store: mTLS needs FORECAST_VAULT_PKI_STORE_ROLE or FORECAST_STORE_CLIENT_CERT/KEY` | store mTLS is on with neither source | configure the role or the client pair, or set `FORECAST_STORE_MTLS=false` |
 | `forecast: vault: login: 403 …` | Vault token/AppRole/Kubernetes role is wrong or its policy lacks `pki/issue/<role>` | fix the auth method and policy; Kubernetes auth must bind the pod's service account (section 10) |
-| `forecast: vault: … must be a file path, not PEM content` | a `*_ca_cert` / `*_client_cert` / `*_client_key` value is PEM content | point it at a mounted file (section 6d) |
+| `forecast: vault: … must be a file path, not PEM content` (or `compute tls` / `store tls` / `pvv` prefix) | a certificate value is PEM content, not a path | point it at a mounted file (section 6d) |
 | `remote error: tls: certificate required` when the plugin talks to Vault | the Vault listener requires a client certificate but `vault_mtls` is off or the pair is missing | set `vault_mtls` and the client cert/key paths (section 10) |
 | alerting datasource cannot restore after store mTLS was enabled | the datasource needs its own Vault/store-mTLS keys, not the app's | section 7 and the datasource part of section 6d |
 | the plugin behaves like an older build, or the backend dies with `fatal error: invalid runtime symbol table` | the plugin directory is a bind mount whose backend binary did not refresh (measured on a Windows/Docker Desktop share after rebuilding the ~47 MB backend) | copy the tree into the image or the plugin directory instead of mounting the build output, or recreate the mount/container before restarting Grafana |

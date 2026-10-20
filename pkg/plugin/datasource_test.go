@@ -9,7 +9,6 @@ import (
 	"time"
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
-	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
 
@@ -113,7 +112,7 @@ func TestQueryData(t *testing.T) {
 		}
 		ds := &Datasource{
 			jsonData: dsHost,
-			connect: func(_ context.Context, dsn string, _ *vault.Manager) (SnapshotStore, func()) {
+			connect: func(_ context.Context, dsn string, _ storeTLSConfig) (SnapshotStore, func()) {
 				if !strings.Contains(dsn, "@from-ds:5432/") {
 					t.Fatalf("dsn=%s", dsn)
 				}
@@ -144,7 +143,7 @@ func TestQueryData(t *testing.T) {
 			t.Fatal(err)
 		}
 		ds := &Datasource{
-			connect: func(_ context.Context, dsn string, _ *vault.Manager) (SnapshotStore, func()) {
+			connect: func(_ context.Context, dsn string, _ storeTLSConfig) (SnapshotStore, func()) {
 				if !strings.Contains(dsn, "@from-app:5432/") {
 					t.Fatalf("dsn=%s", dsn)
 				}

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -311,28 +312,51 @@ ON CONFLICT (org_id, cache_key) DO UPDATE SET snapshot = EXCLUDED.snapshot, upda
 // lazily; the first Get/Put pings and provisions the schema (see ensure), so a
 // database that is down at plugin start does not disable the store for the
 // life of the process.
-func openPostgresStore(ctx context.Context, dsn string, mgr *vault.Manager) (*postgresStore, error) {
-	if mgr == nil {
+func openPostgresStore(ctx context.Context, dsn string, tlsCfg storeTLSConfig) (*postgresStore, error) {
+	if !tlsCfg.Enabled {
 		pool, err := pgxpool.New(ctx, dsn)
 		if err != nil {
 			return nil, err
 		}
 		return &postgresStore{pool: pool, now: time.Now}, nil
 	}
-	cfg, err := pgxpool.ParseConfig(dsn)
+	cfg, err := postgresPoolConfig(dsn, tlsCfg)
 	if err != nil {
 		return nil, err
 	}
-	tlsCfg, err := vault.NewClientTLSConfig(mgr, cfg.ConnConfig.Host)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ConnConfig.TLSConfig = tlsCfg
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 	return &postgresStore{pool: pool, now: time.Now}, nil
+}
+
+// postgresPoolConfig parses the DSN and attaches the selected certificate
+// source. A switch on with neither a manager nor a file pair is an error here,
+// before any connection can fall back to plaintext.
+func postgresPoolConfig(dsn string, tlsCfg storeTLSConfig) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	serverName := tlsCfg.ServerName
+	if serverName == "" {
+		serverName = cfg.ConnConfig.Host
+	}
+	var tlsConfig *tls.Config
+	switch {
+	case tlsCfg.Manager != nil:
+		tlsConfig, err = vault.NewClientTLSConfig(tlsCfg.Manager, serverName)
+	case tlsCfg.Files.ClientConfigured():
+		tlsConfig, err = vault.NewFileClientTLSConfig(tlsCfg.Files, serverName)
+	default:
+		return nil, errors.New("forecast: store: mTLS needs FORECAST_VAULT_PKI_STORE_ROLE or FORECAST_STORE_CLIENT_CERT/KEY")
+	}
+	if err != nil {
+		return nil, err
+	}
+	cfg.ConnConfig.TLSConfig = tlsConfig
+	return cfg, nil
 }
 
 func storeDSN(ctx context.Context, settings backend.AppInstanceSettings) string {

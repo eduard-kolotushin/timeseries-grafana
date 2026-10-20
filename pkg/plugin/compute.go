@@ -50,8 +50,9 @@ var (
 	errComputeBadOrg       = errors.New("forecast compute: bad X-Forecast-Org")
 	errComputeNoToken      = errors.New("forecast compute: FORECAST_COMPUTE_TOKEN is required: the service refuses unauthenticated requests")
 	errComputeHealthMethod = errors.New("forecast compute: health probe is GET-only")
-	errComputeHTTPS        = errors.New("forecast: compute url must be https when vault mTLS is configured")
-	errComputeVaultRole    = errors.New("forecast: vault: FORECAST_VAULT_PKI_ROLE is required with FORECAST_COMPUTE_MTLS=true")
+	errComputeHTTPS        = errors.New("forecast: compute url must be https when mTLS is configured")
+	errComputeMTLSSource   = errors.New("forecast: compute: mTLS needs FORECAST_VAULT_PKI_ROLE or FORECAST_COMPUTE_CLIENT_CERT/KEY")
+	errComputeServerSource = errors.New("forecast compute: mTLS needs FORECAST_VAULT_PKI_ROLE or FORECAST_COMPUTE_SERVER_CERT/KEY and FORECAST_COMPUTE_CA_CERT")
 	errComputeVaultServer  = errors.New("forecast compute: FORECAST_COMPUTE_TLS_SERVER_NAME is required with FORECAST_COMPUTE_MTLS=true")
 )
 
@@ -112,11 +113,6 @@ func computeFrom(ctx context.Context, settings backend.AppInstanceSettings) *com
 		log.DefaultLogger.Error("forecast: vault configuration refused; forwarded calls will fail", "err", verr.Error())
 		mode.client.Transport = errorTransport{verr}
 	case vc != nil && vc.ComputeMTLS:
-		if vc.ComputeRole == "" {
-			log.DefaultLogger.Error("forecast: compute mTLS needs a PKI role", "err", errComputeVaultRole.Error())
-			mode.client.Transport = errorTransport{errComputeVaultRole}
-			break
-		}
 		parsed, perr := url.Parse(baseURL)
 		if perr != nil || parsed.Scheme != "https" || parsed.Host == "" {
 			log.DefaultLogger.Error("forecast: compute mTLS needs an https url", "url", baseURL)
@@ -127,17 +123,32 @@ func computeFrom(ctx context.Context, settings backend.AppInstanceSettings) *com
 		if serverName == "" {
 			serverName = parsed.Hostname()
 		}
-		mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		mgr := vault.NewManager(vc.Client, vc.PKIMount, vc.ComputeRole, vc.ClientCN, vc.CertTTL)
-		if err := mgr.Start(mgrCtx); err != nil {
-			// The manager keeps retrying in the background; until it succeeds the
-			// transport answers ErrNoCertificate, which the forwarding path turns
-			// into a 502 naming the failure.
-			log.DefaultLogger.Error("forecast: vault initial issue failed", "err", err.Error())
+		switch {
+		case vc.ComputeRole != "" && vc.Client != nil:
+			mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+			mgr := vault.NewManager(vc.Client, vc.PKIMount, vc.ComputeRole, vc.ClientCN, vc.CertTTL)
+			if err := mgr.Start(mgrCtx); err != nil {
+				// The manager keeps retrying in the background; until it succeeds the
+				// transport answers ErrNoCertificate, which the forwarding path turns
+				// into a 502 naming the failure.
+				log.DefaultLogger.Error("forecast: vault initial issue failed", "err", err.Error())
+			}
+			mode.cancel = cancel
+			mode.client.Transport = vault.NewClientTransport(mgr, serverName, nil, false)
+			log.DefaultLogger.Info("forecast: compute mTLS enabled", "server_name", serverName, "pki_role", vc.ComputeRole)
+		case vc.ComputeFiles.ClientConfigured():
+			tlsCfg, err := vault.NewFileClientTLSConfig(vc.ComputeFiles, serverName)
+			if err != nil {
+				log.DefaultLogger.Error("forecast: compute local mTLS configuration refused", "err", err.Error())
+				mode.client.Transport = errorTransport{fmt.Errorf("forecast: compute tls: %w", err)}
+				break
+			}
+			mode.client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+			log.DefaultLogger.Info("forecast: compute mTLS enabled", "server_name", serverName, "source", "files")
+		default:
+			log.DefaultLogger.Error("forecast: compute mTLS has no certificate source", "err", errComputeMTLSSource.Error())
+			mode.client.Transport = errorTransport{errComputeMTLSSource}
 		}
-		mode.cancel = cancel
-		mode.client.Transport = vault.NewClientTransport(mgr, serverName, nil, false)
-		log.DefaultLogger.Info("forecast: compute mTLS enabled", "server_name", serverName, "pki_role", vc.ComputeRole)
 	case vc != nil:
 		log.DefaultLogger.Info("forecast: compute mTLS disabled", "url", baseURL)
 	}
@@ -260,14 +271,15 @@ func (a *App) computeProbe(ctx context.Context) string {
 }
 
 // ServeCompute runs the standalone compute service: the app's own handlers over
-// plain HTTP, or TLS requiring a Vault-issued client certificate when Vault PKI
-// is configured, with the SDK's request identity replaced by
-// FORECAST_COMPUTE_TOKEN and the X-Forecast-Org header the plugin sets. It builds
-// the App with a nil compute mode, so the service can never forward to another
-// compute service, and it mounts only /forecast, /ping and the coarse /healthz
-// probe — the schedules API and the alerting QueryData path stay in the
-// Grafana-managed plugin, which keeps working from the same store while this
-// service is down.
+// plain HTTP, or mTLS when the compute hop is enabled, with the SDK's request
+// identity replaced by FORECAST_COMPUTE_TOKEN and the X-Forecast-Org header the
+// plugin sets. The listener certificate comes from Vault PKI when a compute role
+// is configured, otherwise from FORECAST_COMPUTE_SERVER_CERT/KEY; either way it
+// requires a client certificate from the configured CA. It builds the App with a
+// nil compute mode, so the service can never forward to another compute service,
+// and it mounts only /forecast, /ping and the coarse /healthz probe — the
+// schedules API and the alerting QueryData path stay in the Grafana-managed
+// plugin, which keeps working from the same store while this service is down.
 func ServeCompute(ctx context.Context, addr string) error {
 	token := strings.TrimSpace(os.Getenv("FORECAST_COMPUTE_TOKEN"))
 	if token == "" {
@@ -277,17 +289,25 @@ func ServeCompute(ctx context.Context, addr string) error {
 	if err != nil {
 		return err
 	}
-	var mgr *vault.Manager
-	if vc != nil && vc.ComputeMTLS {
-		if vc.ComputeRole == "" {
-			return errComputeVaultRole
-		}
-		if vc.ServerName == "" {
-			return errComputeVaultServer
-		}
-		mgr = vault.NewManager(vc.Client, vc.PKIMount, vc.ComputeRole, vc.ServerName, vc.CertTTL)
-		if err := mgr.Start(ctx); err != nil {
-			return fmt.Errorf("forecast compute: vault: %w", err)
+	var tlsCfg *tls.Config
+	if vc != nil && vc.ComputeServerMTLS {
+		switch {
+		case vc.ComputeRole != "" && vc.Client != nil:
+			if vc.ServerName == "" {
+				return errComputeVaultServer
+			}
+			mgr := vault.NewManager(vc.Client, vc.PKIMount, vc.ComputeRole, vc.ServerName, vc.CertTTL)
+			if err := mgr.Start(ctx); err != nil {
+				return fmt.Errorf("forecast compute: vault: %w", err)
+			}
+			tlsCfg = vault.NewServerTLSConfig(mgr)
+		case vc.ComputeFiles.ServerConfigured():
+			tlsCfg, err = vault.NewFileServerTLSConfig(vc.ComputeFiles)
+			if err != nil {
+				return fmt.Errorf("forecast compute: tls: %w", err)
+			}
+		default:
+			return errComputeServerSource
 		}
 	}
 	app, err := newAppWith(ctx, backend.AppInstanceSettings{}, nil, nil, nil, nil)
@@ -299,15 +319,15 @@ func ServeCompute(ctx context.Context, addr string) error {
 	mux.HandleFunc("/ping", app.handlePing)
 	mux.HandleFunc("/healthz", app.handleComputeHealth)
 	mux.Handle("/forecast", computeAuth(token, http.HandlerFunc(app.handleForecast)))
-	log.DefaultLogger.Info("forecast compute listening", "addr", addr, "store", app.store != nil, "retrain", app.retrain.Enabled, "tls", mgr != nil)
-	return serveHTTP(ctx, addr, mux, mgr)
+	log.DefaultLogger.Info("forecast compute listening", "addr", addr, "store", app.store != nil, "retrain", app.retrain.Enabled, "tls", tlsCfg != nil)
+	return serveHTTP(ctx, addr, mux, tlsCfg)
 }
 
 // serveHTTP serves until ctx is cancelled, then shuts the listener down so an
 // in-flight fit finishes rather than being cut mid-write. A listener that cannot
 // bind (port in use, permission) returns its error at once instead of waiting for
 // a cancellation that will never come.
-func serveHTTP(ctx context.Context, addr string, h http.Handler, mgr *vault.Manager) error {
+func serveHTTP(ctx context.Context, addr string, h http.Handler, tlsCfg *tls.Config) error {
 	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	done := make(chan struct{})
 	go func() {
@@ -318,14 +338,14 @@ func serveHTTP(ctx context.Context, addr string, h http.Handler, mgr *vault.Mana
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 	var err error
-	if mgr == nil {
+	if tlsCfg == nil {
 		err = srv.ListenAndServe()
 	} else {
 		ln, listenErr := net.Listen("tcp", addr)
 		if listenErr != nil {
 			return listenErr
 		}
-		err = srv.Serve(tls.NewListener(ln, vault.NewServerTLSConfig(mgr)))
+		err = srv.Serve(tls.NewListener(ln, tlsCfg))
 	}
 	if ctx.Err() != nil {
 		// The shutdown path is running: wait for it, so the caller's cleanup does

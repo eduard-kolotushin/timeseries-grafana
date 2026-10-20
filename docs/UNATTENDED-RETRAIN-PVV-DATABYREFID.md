@@ -1,9 +1,9 @@
 # Brief: make the unattended retrain fetch training data through PVV `/gse/data/v1/DataByRefId`
 
-> Status: this is the v18 design brief. v20/v21 added `FORECAST_PVV_MTLS` and
-> `FORECAST_VAULT_PKI_PVV_ROLE` (setting the role also selects PVV), so the file pair below is one source
-> rather than the only switch. Certificate values are file paths, never PEM content. Current behaviour is
-> in `docs/ARCHITECTURE.md` and `docs/INSTALL.md`.
+> Status: this is the v18 design brief. v20/v21/v22 added `FORECAST_PVV_MTLS`, the Vault
+> `FORECAST_VAULT_PKI_PVV_ROLE` and local file mode: the switch selects PVV over TLS, a Vault role wins
+> over the file pair, and an explicit `false` disables PVV even when files exist. Certificate values are
+> file paths, never PEM content. Current behaviour is in `docs/ARCHITECTURE.md` and `docs/INSTALL.md`.
 
 Report for the plugin developer (AI agent). Self-contained. It explains why the backend
 retrain cannot run an `sbt-datasource-abyss` query headless today, documents the real PVV

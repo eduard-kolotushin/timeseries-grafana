@@ -118,6 +118,9 @@ type retrainConfig struct {
 	PVVClientKey     string
 	PVVCA            string
 	PVVTLSSkipVerify bool
+	// PVVMTLS is the component switch. Explicit false disables PVV even when the
+	// file pair exists; on without a Vault role uses that pair.
+	PVVMTLS bool
 	// PVVManager issues the PVV client certificate from Vault PKI when set. It
 	// takes precedence over PVVClientCert/PVVClientKey; PVV's server CA stays
 	// PVVCA.
@@ -158,6 +161,7 @@ func computeRetrain(ctx context.Context, settings backend.AppInstanceSettings) r
 	pvvKey := look.Get("FORECAST_PVV_CLIENT_KEY", "PVV_CLIENT_KEY", "pvv_client_key", "pvvClientKey")
 	pvvCA := look.Get("FORECAST_PVV_CA_CERT", "PVV_CA_CERT", "pvv_ca_cert", "pvvCaCert")
 	pvvSkipVerify := parseBool(look.Get("FORECAST_PVV_TLS_SKIP_VERIFY", "PVV_TLS_SKIP_VERIFY", "pvv_tls_skip_verify", "pvvTlsSkipVerify"), false)
+	pvvMTLS := parseBool(look.Get("FORECAST_PVV_MTLS", "PVV_MTLS", "pvv_mtls", "pvvMtls"), pvvCert != "" || pvvKey != "")
 	chunk := parseDuration(look.Get("FORECAST_RETRAIN_WINDOW_CHUNK", "RETRAIN_WINDOW_CHUNK", "retrain_window_chunk", "retrainWindowChunk"), defaultRetrainWindowChunk)
 	if chunk < time.Millisecond || chunk > pvvChunkMax {
 		slog.Warn("forecast: ignoring the retrain window chunk", "chunk", chunk, "default", defaultRetrainWindowChunk)
@@ -197,6 +201,7 @@ func computeRetrain(ctx context.Context, settings backend.AppInstanceSettings) r
 		PVVClientKey:       pvvKey,
 		PVVCA:              pvvCA,
 		PVVTLSSkipVerify:   pvvSkipVerify,
+		PVVMTLS:            pvvMTLS,
 		RetrainWindowChunk: chunk,
 		SnapshotTTL:        snapshotTTL,
 	}
@@ -409,21 +414,15 @@ func newGrafanaPoster(cfg retrainConfig) *grafanaPoster {
 	if p.chunk < time.Millisecond || p.chunk > pvvChunkMax {
 		p.chunk = defaultRetrainWindowChunk
 	}
-	p.pvvEnabled = cfg.PVVManager != nil || cfg.PVVClientCert != "" || cfg.PVVClientKey != ""
+	p.pvvEnabled = cfg.PVVMTLS
 	if !p.pvvEnabled {
 		return p
 	}
-	for _, param := range []struct{ name, value string }{
-		{"FORECAST_PVV_CLIENT_CERT", cfg.PVVClientCert},
-		{"FORECAST_PVV_CLIENT_KEY", cfg.PVVClientKey},
-		{"FORECAST_PVV_CA_CERT", cfg.PVVCA},
-	} {
-		if err := rejectCertPEM(param.name, param.value); err != nil {
+	if cfg.PVVManager != nil {
+		if err := rejectCertPEM("FORECAST_PVV_CA_CERT", cfg.PVVCA); err != nil {
 			p.pvvInitErr = err
 			return p
 		}
-	}
-	if cfg.PVVManager != nil {
 		var caPEM []byte
 		if cfg.PVVCA != "" {
 			pem, err := os.ReadFile(cfg.PVVCA)
@@ -442,6 +441,16 @@ func newGrafanaPoster(cfg retrainConfig) *grafanaPoster {
 			Timeout:   frameFetchTimeout,
 		}
 		return p
+	}
+	for _, param := range []struct{ name, value string }{
+		{"FORECAST_PVV_CLIENT_CERT", cfg.PVVClientCert},
+		{"FORECAST_PVV_CLIENT_KEY", cfg.PVVClientKey},
+		{"FORECAST_PVV_CA_CERT", cfg.PVVCA},
+	} {
+		if err := rejectCertPEM(param.name, param.value); err != nil {
+			p.pvvInitErr = err
+			return p
+		}
 	}
 	if cfg.PVVClientCert == "" || cfg.PVVClientKey == "" {
 		p.pvvInitErr = errors.New("forecast: pvv retrain requires both FORECAST_PVV_CLIENT_CERT and FORECAST_PVV_CLIENT_KEY")
