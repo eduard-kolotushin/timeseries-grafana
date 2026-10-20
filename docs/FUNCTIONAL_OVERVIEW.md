@@ -25,6 +25,7 @@ Commands are re-runnable as written. In the Compose environment the shell variab
 B=http://localhost:3000/api/plugins/eduardkolotushin-forecast-app/resources   # app resource route
 G=http://localhost:3000                                                       # Grafana
 PG='docker compose exec -T overlay-postgres psql -U overlay -d overlay -tAc'  # overlay Postgres
+C='docker run --rm --network timeseries-grafana-sandbox_default curlimages/curl:8.10.1'  # in-network client
 KAFKA='docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092'
 MIG='FORECAST_STORE_URL=postgres://overlay:overlay@127.0.0.1:5433/overlay?sslmode=disable go run ./cmd/migrate'  # schema CLI (F33); add --dry-run to look without writing
 ```
@@ -932,6 +933,35 @@ One transaction per file, opened with `pg_advisory_xact_lock(0x666f726563617374)
 
 **Positive — Compose (pass 5):** loading the page as an anonymous Admin rendered "Overlay univariate forecasts from timeseries-forecast on Grafana queries. Add the Forecast overlay visualization to a dashboard panel…" and the page made **no** `/resources/…` request (the only resource calls in that session came from the dashboard panels).
 
+### F35. Per-component mTLS — compute hop, PVV, Postgres store
+
+| | |
+| --- | --- |
+| **Function** | Every hop the plugin or its compute service opens can require mutual TLS independently: the plugin→compute hop, the retrainer→PVV `DataByRefId` hop, and the Postgres snapshot store used by the app, the datasource, the compute service and the migrate CLI. A VM install can enforce all three; a Kubernetes install that terminates mTLS in Istio can leave any of them plain. |
+| **Who can use** | **Operator** — deployment configuration; no Grafana page edits these values. |
+| **How configured** | Vault PKI roles `FORECAST_VAULT_PKI_ROLE` (compute, CN `FORECAST_VAULT_CLIENT_CN`, default `gpx-forecast`), `FORECAST_VAULT_PKI_PVV_ROLE` (CN default `gpx-forecast-pvv`) and `FORECAST_VAULT_PKI_STORE_ROLE` (CN `FORECAST_VAULT_STORE_CN`, default the resolved store user, e.g. `forecast`). Each component's switch is `FORECAST_COMPUTE_MTLS` / `FORECAST_PVV_MTLS` / `FORECAST_STORE_MTLS`: **unset means “on iff that role is set”**, and an explicit `false` turns it off even when the role is present. The plugin reads the env → `GF_PLUGIN_*` → ini → jsonData chain; the compute service and `gpx_forecast_migrate` read process env only. Certificates are issued by Vault and rotate in-process; the pgx TLS config asks the manager for the current leaf on every new connection. |
+| **Input params** | None at request time. The compute hop also needs `FORECAST_COMPUTE_TLS_SERVER_NAME` when its listener is mTLS. The store needs no file paths: TLS comes from Vault, and `sslmode` in the DSN is irrelevant to whether a client certificate is presented. |
+| **Expected result** | With a component on, its peer sees a certificate issued by the Vault CA and a peer without one is refused. With a component off, the connection is exactly its pre-v19 shape even though Vault is configured for another component. Misconfiguration is loud: flag on without its role names that role; Vault configured with no role at all is `forecast: vault: no component role is configured (compute, pvv, store)`. |
+
+| Case | Component | Expected observation |
+| --- | --- | --- |
+| MT-1 | compute client (plugin, app and compute service) | `POST /forecast` forwarded to the compute service succeeds over TLS; the compute log starts with `"tls":true` and no `http: TLS handshake error`. |
+| MT-2 | compute server | A request without a client certificate is refused during the handshake (`tlsv13 alert certificate required` / `tls: client didn't provide a certificate`), including `/healthz`, `/ping` and `/forecast`. |
+| MT-3 | PVV client (retrainer) | The PVV stub answers `DataByRefId` only after a client certificate; its log names `clientCN=gpx-forecast-pvv`, and the retrain row logs `transport=pvv` then `status=ok`. |
+| MT-4 | PVV server | A `DataByRefId` request without a client certificate is refused (`certificate required`). |
+| MT-5 | store server | A `forecast` user connection without a client certificate is refused by `pg_hba.conf` (`connection requires a valid client certificate`); without TLS it is refused as `no encryption`. |
+| MT-6 | store clients | `pg_stat_ssl` shows the app, datasource and compute sessions as `ssl=t`, TLSv1.3; `gpx_forecast_migrate` prints `nothing to apply (3 known, 3 applied)`. |
+| MT-7 | selection: compute off | With a Vault PVV role present, a compute service started with `FORECAST_COMPUTE_MTLS=false` listens plain and `/healthz` answers 200 over `http` (`"tls":false`), instead of failing on the missing compute role. |
+| MT-8 | selection: store off | `FORECAST_STORE_MTLS=false` makes the migrator connect without TLS even though a Vault store role is available; the TLS-only server rejects it. |
+| MT-9 | negative configuration | `FORECAST_COMPUTE_MTLS=true` with no compute role exits with `forecast: vault: FORECAST_VAULT_PKI_ROLE is required with FORECAST_COMPUTE_MTLS=true`; Vault configured with no roles exits with `forecast: vault: no component role is configured (compute, pvv, store)`. |
+| MT-10 | certificate rotation | A re-issued leaf reaches the next connection through `GetClientCertificate`; a Vault CA rotation itself needs a process restart because the root pool is pinned at pool open (unit-tested). |
+
+**Positive — Compose.** All three components are on: Grafana/compute point at `https://forecast-compute:8080`, the compute service listens TLS-only, the store uses `FORECAST_STORE_USER=forecast` with `FORECAST_STORE_MTLS=true` and `FORECAST_VAULT_PKI_STORE_ROLE=forecast-pg`, and the PVV stub requires a Vault client certificate. A fit returned **200** and wrote `forecast.snapshots`; the datasource restored **120** points; the dashboard rendered three `Using saved model` panels; a forced retrain logged `clientCN=gpx-forecast-pvv` and `status=ok`; `pg_stat_ssl` showed **three** `forecast` sessions at TLSv1.3 (app, datasource, compute); the migrator printed `nothing to apply (3 known, 3 applied)`.
+
+**Negative — Compose.** Certless requests to the compute service and the PVV stub both ended with `curl: (56) … tlsv13 alert certificate required`. `psql` as `forecast` without a certificate answered `FATAL: connection requires a valid client certificate`; with `sslmode=disable` it answered `FATAL: pg_hba.conf rejects … no encryption`. The migrator with `FORECAST_STORE_MTLS=false` got the latter refusal, while the same command with `true` succeeded — the switch, not the server, selected TLS. The explicit-off compute probe answered `{"status":"ok"}` over plain HTTP with `"tls":false`.
+
+**Kubernetes.** The chart's live shape is compute mTLS on (a Vault `forecast-compute` role) and store/PVV plain: `pg_stat_ssl` showed the Grafana and compute sessions as `ssl=f`, the app and datasource `/health` were `ok`, and the compute service logged `"tls":true`. A certless in-cluster request to the compute service was refused; an ordinary fit returned 200 and wrote the snapshot; a forced panel retrain logged no `transport=pvv` and finished `ok`, i.e. it used Grafana's `/api/ds/query` path. The store/PVV halves of MT-5/MT-6/MT-3/MT-4 are not configured in this chart (no store role, no PVV endpoint); that is the Istio/plain shape, not a failure.
+
 ## The contract between the two
 
 The two processes meet at exactly two places, both in the overlay Postgres:
@@ -1103,6 +1133,10 @@ source and are **not** backed by a live observation in this run:
 | `Copy source from query A` (Forecast editor) | `src/forecast-datasource/` | Opt-in, manual feature; the Forecast editor was not driven by hand. |
 | `DRUID_MAX_INFLIGHT` saturation | `timeseries-baselines/druid.go`, `timeseries-baselines/limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
 | `FORECAST_MAX_INFLIGHT` env/ini precedence | `pkg/plugin/limits.go` | The jsonData **value** path is now measured (`maxInflight: 2` in the app jsonData gave exactly 2 in flight and 62 × `429 forecast: busy` in a 64-wide burst); the env and ini spellings remain unexercised, since neither environment sets them. |
+| `FORECAST_COMPUTE_MTLS=true` together with an `http` compute URL | `pkg/plugin/compute.go` | Unit-tested (`errComputeScheme`); no live deployment points an mTLS-enabled plugin at a plain compute URL. |
+| In-process leaf re-issue reaching the next connection | `pkg/vault/manager.go`, `pkg/vault/tls.go`, `pkg/plugin/store_postgres.go` | `TestNewClientTLSConfigRotatesTheLeaf` proves the callback returns the new certificate; neither environment waits out a half-life, so no live pgx connection was observed presenting a re-issued leaf. |
+| A Vault CA rotation while a process stays up | `pkg/vault/tls.go` | The root pool is built at pool/listener creation; a CA rotation is documented as requiring a restart and was not exercised. |
+| PVV and store mTLS in the Kubernetes chart | `timeseries-k8s` values/configmaps | The chart exposes the compute PKI role only; the live Kubernetes pass measured compute mTLS on and store/PVV plain (MT-3/4/5/6 are Compose-only). |
 | The CI/CD `forecast.ini.template` merge | `conf/forecast.ini.template` | Neither test environment merges the ini; both configure through jsonData/ConfigMaps. |
 | A **stale** read-through cache entry served for up to 30 s after another replica retrains | `docs/ARCHITECTURE.md` (store section), `pkg/plugin/store_postgres.go` | Cross-replica visibility *was* observed (the [Scaling and HA](#scaling-and-ha) probe sequence), but every probe hit a process with no warm entry for that key, so the staleness window itself was never timed; timing it needs one process to cache a snapshot and another to retrain that key inside 30 s. |
 
@@ -1586,3 +1620,63 @@ that instantiates the app (`pkg/plugin/app.go`), so between a container restart 
 overlay's `needTrain` path is what covers a user who is looking at a panel. The `/resources/schedules` call used
 to check this also proves the schedule store was healthy on the new build (`hasSpec true` with a derived
 `source`), which is the state `errScheduleAttempts` exists to refuse.
+
+### Pass 8 (2026-10-20) — per-component mTLS (v19/v20), measured on Compose and Kubernetes
+
+Pass 8 exercised the three mTLS hops independently at plugin head `bc23da2ca56b` (`feat: select mTLS per component
+and add Postgres store mTLS`), with the sandbox at commit `8033135` and the chart pin at `167391a`. The Compose
+stack ran all three components on; the Kubernetes release ran the chart's shape (compute on, store and PVV off).
+
+**Compose — all three on.** `overlay-postgres` served TLS and its `pg_hba.conf` admitted user `forecast` only as
+`hostssl … cert clientcert=verify-full`; the app and datasource jsonData, the compute service env and the migrator
+env each carried `FORECAST_STORE_MTLS=true` and `FORECAST_VAULT_PKI_STORE_ROLE=forecast-pg`; the compute service
+also carried `FORECAST_VAULT_PKI_PVV_ROLE=forecast-pvv` and `FORECAST_PVV_URL=https://pvv-stub:8443`.
+
+The refusals were the ones the contract predicts:
+
+```
+$C -k https://forecast-compute:8080/healthz
+curl: (56) OpenSSL SSL_read: … tlsv13 alert certificate required, errno 0
+$C -k -X POST https://pvv-stub:8443/gse/data/v1/DataByRefId
+curl: (56) OpenSSL SSL_read: … tlsv13 alert certificate required, errno 0
+docker compose exec -T overlay-postgres psql "host=127.0.0.1 user=forecast dbname=overlay sslmode=require" -c 'select 1'
+FATAL:  connection requires a valid client certificate
+docker compose exec -T overlay-postgres psql "host=127.0.0.1 user=forecast dbname=overlay sslmode=disable" -c 'select 1'
+FATAL:  pg_hba.conf rejects connection for host "127.0.0.1", user "forecast", database "overlay", no encryption
+```
+
+`pg_stat_ssl` showed exactly **three** `forecast` sessions, all `ssl=t`, `TLSv1.3` — the app pool, the datasource
+pool and the compute-service pool. A fit returned **200** and wrote its `forecast.snapshots` row; the datasource's
+`/api/ds/query` restore returned **120** points from that row; a dashboard reload rendered three `Using saved
+model` panels. A forced `panel` retrain logged `transport=pvv` and `status=ok`, and the stub logged
+`clientCN=gpx-forecast-pvv` — PVV and the store were mTLS at the same time, independently. The shipped migrator,
+run in a throwaway container, printed `nothing to apply (3 known, 3 applied)` with `FORECAST_STORE_MTLS=true`, and
+the same command with `false` printed the `no encryption` refusal above.
+
+**Compose — selection and negatives.** A compute service started with `FORECAST_COMPUTE_MTLS=false` while a Vault
+PVV role was present logged `{"tls":false}` and answered `{"status":"ok"}` over plain HTTP on `:8081`; the old
+single-switch behaviour would have refused to start without a compute role. The migrator with Vault configured but
+no component roles exited 1 with `gpx_forecast_migrate: vault: forecast: vault: no component role is configured
+(compute, pvv, store)`. The compute service with `FORECAST_COMPUTE_MTLS=true`, a PVV role, and no compute role
+exited 1 with `gpx_forecast_compute: forecast: vault: FORECAST_VAULT_PKI_ROLE is required with
+FORECAST_COMPUTE_MTLS=true`.
+
+**Kubernetes — the chart's plain store/PVV shape.** The Grafana and compute Deployments were rebuilt from the same
+pin and rolled out as `ghcr.io/eduard-kolotushin/timeseries-{grafana,forecast-compute}:bc23da2ca56b`; the release
+kept its Vault values (`vault.pkiRole=forecast-compute`, `serverName=timeseries-forecast-compute`) and its store
+ConfigMaps (`storeUser: overlay`, `storeSslMode: disable`, no store/PVV PKI role). The compute service logged
+`{"store":true,"tls":true}`; the plugin and datasource `/health` both answered `ok`; a certless in-cluster
+`curl -k` to `https://timeseries-forecast-compute:8080/healthz` ended `tlsv13 alert certificate required` and the
+service log carried `tls: client didn't provide a certificate`. A fit returned **200** and wrote the snapshot, so
+the plugin→compute hop really presented a Vault certificate. `pg_stat_ssl` showed the Grafana pod's and the compute
+pod's sessions as `ssl=f` — the store stayed plain, as its configuration says. A forced panel retrain finished
+`status=ok` with **no** `transport=pvv` field, i.e. it used `/api/ds/query`, and the dashboard rendered three
+`Using saved model` panels. There is no PVV stub in the cluster and no store role in the chart, so MT-3/4/5/6
+remain Compose observations; that split is the point of the per-component switches.
+
+**Unit half.** `TestResolveEnv` (unset, one role, explicit false, no-role error, store CN),
+`TestNewClientTLSConfig` (pre-issue error, root pool, leaf rotation after re-issue), `TestVaultConfigResolution`
+(store CN defaulting and the per-component off cases), `TestComputeMTLSConfigurationErrors`,
+`TestServeComputeVaultValidation`, and `TestRunStoreMTLSValidation` (role+unreachable Vault) all pass;
+`go test ./pkg/... ./cmd/...` and `go vet` are green. The fixture snapshot (`eeee…`) was deleted after the
+Kubernetes check; both stacks were left running.
