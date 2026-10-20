@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -26,10 +27,34 @@ func clearComputeEnv(t *testing.T) {
 		"FORECAST_COMPUTE_TOKEN",
 		"FORECAST_MAX_INFLIGHT",
 		"FORECAST_RETRAIN_ENABLED",
+		"FORECAST_VAULT_ADDR",
+		"FORECAST_VAULT_TOKEN",
+		"FORECAST_VAULT_NAMESPACE",
+		"FORECAST_VAULT_ROLE_ID",
+		"FORECAST_VAULT_SECRET_ID",
+		"FORECAST_VAULT_APPROLE_MOUNT",
+		"FORECAST_VAULT_K8S_ROLE",
+		"FORECAST_VAULT_K8S_MOUNT",
+		"FORECAST_VAULT_K8S_JWT_PATH",
+		"FORECAST_VAULT_PKI_MOUNT",
+		"FORECAST_VAULT_PKI_ROLE",
+		"FORECAST_VAULT_PKI_PVV_ROLE",
+		"FORECAST_VAULT_CERT_TTL",
+		"FORECAST_VAULT_CLIENT_CN",
+		"FORECAST_VAULT_PVV_CN",
+		"FORECAST_VAULT_CA_CERT",
+		"FORECAST_VAULT_TLS_SKIP_VERIFY",
+		"FORECAST_COMPUTE_TLS_SERVER_NAME",
+		"VAULT_ADDR",
+		"VAULT_TOKEN",
 		store.PluginEnvPrefixApp + "COMPUTE_URL",
 		store.PluginEnvPrefixApp + "COMPUTE_TOKEN",
 		store.PluginEnvPrefixDatasource + "COMPUTE_URL",
 		store.PluginEnvPrefixDatasource + "COMPUTE_TOKEN",
+		store.PluginEnvPrefixApp + "VAULT_ADDR",
+		store.PluginEnvPrefixApp + "VAULT_TOKEN",
+		store.PluginEnvPrefixDatasource + "VAULT_ADDR",
+		store.PluginEnvPrefixDatasource + "VAULT_TOKEN",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -725,5 +750,144 @@ func TestHealthReportsAnUnreachableComputeService(t *testing.T) {
 	}
 	if upstream.calls != 1 {
 		t.Fatalf("healthz calls=%d want 1", upstream.calls)
+	}
+}
+
+// fakeVaultIssue serves one PKI issue response using the PVV test PKI: the
+// returned certificate is the client certificate the TLS server already trusts.
+func fakeVaultIssue(t *testing.T, material pvvTestTLS) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/pki/issue/forecast", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["common_name"] == "" || body["ttl"] == "" {
+			http.Error(w, "missing common_name/ttl", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+			"certificate": material.clientCertPEM,
+			"private_key": material.clientKeyPEM,
+			"ca_chain":    []string{material.caPEM},
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestComputeMTLSForward is the new v19 path end to end: computeFrom resolves a
+// Vault-issued client certificate, and the forwarding client completes an mTLS
+// handshake with a server that requires a client certificate.
+func TestComputeMTLSForward(t *testing.T) {
+	clearComputeEnv(t)
+	material := newPVVTestTLS(t)
+	vaultSrv := fakeVaultIssue(t, material)
+	t.Setenv("FORECAST_VAULT_ADDR", vaultSrv.URL)
+	t.Setenv("FORECAST_VAULT_TOKEN", "test-token")
+	t.Setenv("FORECAST_VAULT_PKI_ROLE", "forecast")
+	t.Setenv("FORECAST_COMPUTE_TLS_SERVER_NAME", "127.0.0.1")
+	t.Setenv("FORECAST_COMPUTE_URL", "https://127.0.0.1:1")
+	t.Setenv("FORECAST_COMPUTE_TOKEN", "shared-token")
+
+	mode := computeFrom(context.Background(), backend.AppInstanceSettings{})
+	if mode == nil {
+		t.Fatal("mode is inline, want remote")
+	}
+	if mode.cancel == nil {
+		t.Fatal("vault manager was not started")
+	}
+	t.Cleanup(mode.cancel)
+
+	var sawOrg string
+	srv := startPVV(t, material, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawOrg = r.Header.Get(computeOrgHeader)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"cached":true}`)
+	}))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+computeURLPath, strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(computeOrgHeader, "1")
+	resp, err := mode.client.Do(req)
+	if err != nil {
+		t.Fatalf("mTLS forward: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != `{"cached":true}` {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	if sawOrg != "1" {
+		t.Fatalf("org header = %q, want 1", sawOrg)
+	}
+
+	certless := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: material.caPool, MinVersion: tls.VersionTLS12}}, Timeout: 5 * time.Second}
+	if _, err := certless.Get(srv.URL); err == nil {
+		t.Fatal("certless client was accepted")
+	}
+}
+
+func TestComputeMTLSConfigurationErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		role    string
+		pvvRole string
+		wantErr error
+	}{
+		{
+			name:    "http url with vault",
+			url:     "http://compute:8080",
+			role:    "forecast",
+			wantErr: errComputeHTTPS,
+		},
+		{
+			name:    "vault without a pki role",
+			url:     "https://compute:8080",
+			pvvRole: "pvv",
+			wantErr: errComputeVaultRole,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearComputeEnv(t)
+			t.Setenv("FORECAST_VAULT_ADDR", "http://vault:8200")
+			t.Setenv("FORECAST_VAULT_TOKEN", "t")
+			t.Setenv("FORECAST_VAULT_PKI_ROLE", tc.role)
+			t.Setenv("FORECAST_VAULT_PKI_PVV_ROLE", tc.pvvRole)
+			t.Setenv("FORECAST_COMPUTE_URL", tc.url)
+			mode := computeFrom(context.Background(), backend.AppInstanceSettings{})
+			if mode == nil {
+				t.Fatal("mode is inline, want remote")
+			}
+			if mode.cancel != nil {
+				t.Cleanup(mode.cancel)
+			}
+			req, _ := http.NewRequest(http.MethodPost, mode.url+computeURLPath, strings.NewReader(`{}`))
+			_, err := mode.client.Do(req)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestServeComputeVaultValidation: the service refuses to start when Vault is
+// configured but its mTLS inputs are incomplete, before it opens a listener.
+func TestServeComputeVaultValidation(t *testing.T) {
+	clearComputeEnv(t)
+	t.Setenv("FORECAST_COMPUTE_TOKEN", "t")
+	t.Setenv("FORECAST_VAULT_ADDR", "http://vault:8200")
+	t.Setenv("FORECAST_VAULT_TOKEN", "t")
+
+	if err := ServeCompute(context.Background(), "127.0.0.1:0"); err == nil {
+		t.Fatal("expected a missing-role error")
+	}
+	t.Setenv("FORECAST_VAULT_PKI_ROLE", "forecast-compute")
+	err := ServeCompute(context.Background(), "127.0.0.1:0")
+	if !errors.Is(err, errComputeVaultServer) {
+		t.Fatalf("err = %v, want %v", err, errComputeVaultServer)
 	}
 }

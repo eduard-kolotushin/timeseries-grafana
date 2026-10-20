@@ -22,6 +22,7 @@ import (
 
 	"github.com/eduard-kolotushin/timeseries"
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
@@ -112,11 +113,15 @@ type retrainConfig struct {
 	// PVVURL is the PVV base URL; it defaults to GrafanaURL. A configured client
 	// certificate/key pair selects PVV mode, where the ticker claims every org's
 	// panel rows and fetches each by refId.
-	PVVURL             string
-	PVVClientCert      string
-	PVVClientKey       string
-	PVVCA              string
-	PVVTLSSkipVerify   bool
+	PVVURL           string
+	PVVClientCert    string
+	PVVClientKey     string
+	PVVCA            string
+	PVVTLSSkipVerify bool
+	// PVVManager issues the PVV client certificate from Vault PKI when set. It
+	// takes precedence over PVVClientCert/PVVClientKey; PVV's server CA stays
+	// PVVCA.
+	PVVManager         *vault.Manager
 	RetrainWindowChunk time.Duration
 	// SnapshotTTL is how long a fitted snapshot survives with nothing refreshing
 	// it. Zero turns the sweep off; the default is three retrain cycles.
@@ -397,8 +402,28 @@ func newGrafanaPoster(cfg retrainConfig) *grafanaPoster {
 	if p.chunk < time.Millisecond || p.chunk > pvvChunkMax {
 		p.chunk = defaultRetrainWindowChunk
 	}
-	p.pvvEnabled = cfg.PVVClientCert != "" || cfg.PVVClientKey != ""
+	p.pvvEnabled = cfg.PVVManager != nil || cfg.PVVClientCert != "" || cfg.PVVClientKey != ""
 	if !p.pvvEnabled {
+		return p
+	}
+	if cfg.PVVManager != nil {
+		var caPEM []byte
+		if cfg.PVVCA != "" {
+			pem, err := os.ReadFile(cfg.PVVCA)
+			if err != nil {
+				p.pvvInitErr = fmt.Errorf("forecast: pvv ca: %w", err)
+				return p
+			}
+			caPEM = pem
+		}
+		serverName := ""
+		if u, err := url.Parse(p.pvvURL); err == nil {
+			serverName = u.Hostname()
+		}
+		p.pvvClient = &http.Client{
+			Transport: vault.NewClientTransport(cfg.PVVManager, serverName, caPEM, cfg.PVVTLSSkipVerify),
+			Timeout:   frameFetchTimeout,
+		}
 		return p
 	}
 	if cfg.PVVClientCert == "" || cfg.PVVClientKey == "" {

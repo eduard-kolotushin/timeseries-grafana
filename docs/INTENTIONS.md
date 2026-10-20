@@ -238,7 +238,50 @@ configuration, with no datasource type or datasource field name in `pkg/`.
 - The PVV client is a b2b retrain transport, not a datasource client. It never interprets
   datasource-specific query content and is not a second scheduler or fit implementation.
 
-## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18 non-goals
+## v19 must-have
+
+The plugin→compute hop can be mTLS, with every certificate issued dynamically by
+HashiCorp Vault's PKI secrets engine and re-issued before it expires. Unset Vault
+configuration keeps v16's plain HTTP plus shared token exactly as shipped.
+
+- **Certificates come from Vault PKI only**: `pkg/vault` is a small stdlib client
+  (`net/http`, no `hashicorp/vault/api` dependency) that logs in, calls
+  `POST /v1/<pki_mount>/issue/<role>` with a common name and TTL, and parses
+  `certificate` / `private_key` / `ca_chain`. The compute hop has no file-based
+  certificate source.
+- **Auth**: a static token (`FORECAST_VAULT_TOKEN`, then bare `VAULT_TOKEN`),
+  AppRole (`FORECAST_VAULT_ROLE_ID` + `FORECAST_VAULT_SECRET_ID`), or Kubernetes
+  (`FORECAST_VAULT_K8S_ROLE`, JWT re-read from the service-account file at each
+  login), in that precedence. Login-based tokens are re-acquired before expiry and
+  once on a `403`; a renewable static token calls `renew-self`.
+- **Rotation**: a cert manager re-issues at half the issued leaf's remaining
+  lifetime (default TTL `FORECAST_VAULT_CERT_TTL=24h`), keeps the last good cert
+  when Vault is down, and retries every 30 s. The compute listener serves the
+  current cert per handshake and requires a client cert; the plugin's forwarding
+  client swaps its transport on renew. No process restart is needed to rotate.
+- **Compute service**: with Vault configured the service refuses to start unless
+  `FORECAST_VAULT_PKI_ROLE`, `FORECAST_COMPUTE_TLS_SERVER_NAME` and a working
+  initial issue are all present; it listens TLS-only (TLS 1.2+,
+  `RequireAndVerifyClientCert`). Without Vault it is the v16 plain listener.
+- **Plugin client**: remote mode plus Vault requires an `https` compute URL (an
+  `http` URL answers 502 with that reason, never a silent downgrade); the expected
+  server name is `FORECAST_COMPUTE_TLS_SERVER_NAME` or the URL hostname.
+  `/forecast` and the `/healthz` probe use the same mTLS client, and `Dispose`
+  stops the re-issue goroutine.
+- **PVV too**: when Vault is configured and `FORECAST_VAULT_PKI_PVV_ROLE` is set,
+  the retrain transport's client certificate is issued from Vault (CN
+  `FORECAST_VAULT_PVV_CN`) instead of `FORECAST_PVV_CLIENT_CERT`/`_KEY`; PVV's
+  server CA stays the existing `FORECAST_PVV_CA_CERT` file. PVV mode is selected
+  by either source.
+- **Config chain**: every key follows `FORECAST_*` env → `GF_PLUGIN_*` → grafana.ini
+  `vault_*` → jsonData `vault*`, with `vaultToken` / `vaultSecretId` accepted from
+  `secureJsonData`. The compute service remains process-env only.
+- **Deployment**: `timeseries-k8s` v5 renders the `vault.*` values and switches
+  `computeUrl` to `https` when enabled, with no credential in a ConfigMap; the
+  sandbox v9 runs a dev Vault and proves the hop live.
+- Without Vault, bytes, status, limiter default and limits are exactly v16/v18.
+
+## v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19 non-goals
 
 Do not add these without first updating this document:
 
@@ -258,7 +301,8 @@ Do not add these without first updating this document:
 - An integer surrogate key on any table this plugin owns, and a Go-side uuid generator (the database's `gen_random_uuid()` is the only one)
 - Retention outside the retrain ticker: a second scheduler, a Grafana-side cron, a job queue, a separate collector process, or a table the worker owns. `gpx_forecast_compute` (v16) is the named exception to "a separate process": it is not a second scheduler, it is the same ticker running where the fit runs, and it claims the same rows through the same lease protocol. Deleting a snapshot is not a reason to stop a query either — the overlay's `needTrain` path already answers a missing snapshot
 - A second implementation of the fit or the dispatch semantics, or a second compute transport: the service runs the same `pkg/plugin` handlers, and remote mode forwards the request rather than re-deriving `due` / `needTrain` / provenance locally
-- A compute service that reads grafana.ini or jsonData, or that authenticates with anything but the shared token and the org the plugin asserts. Its configuration is process env only, exactly like `gpx_forecast_migrate`
+- A compute service that reads grafana.ini or jsonData, or that authenticates with anything but the shared token and the org the plugin asserts, **except** the v19 mTLS layer: the token and the asserted org stay, and Vault-issued certificates add transport authentication. Its configuration is process env only, exactly like `gpx_forecast_migrate`
+- A Vault KV certificate source, a `hashicorp/vault/api` dependency, or a file-based certificate mode for the compute hop (v19 issues only from Vault PKI; the PVV file pair remains for deployments without Vault)
 - A remote **plugin backend** — Grafana dialing a `gpx_forecast` gRPC server on another host. **Settled: the compute transport is HTTP** (`gpx_forecast_compute`, one authenticated route), and this stays a non-goal. The SDK's standalone client mode does exist — `GF_PLUGIN_GRPC_ADDRESS_EDUARDKOLOTUSHIN_FORECAST_APP` (or `standalone.txt` / `pid.txt` beside the local plugin binary) makes the spawned process print the `1|2|tcp|<address>|grpc` locator for *that* address instead of serving itself, so Grafana need not dial its own child — but it is a debugging facility, not a deployment: the plugin directory and `plugin.json` must still exist locally, the SDK ships `FindAndKillCurrentPlugin`/`pgrep` helpers around it, and the hop carries no TLS and no token of its own (the SDK's plugin `ServeOpts` expose none), so a network-exposed plugin port would answer `forecast.snapshots`, `forecast.retrain` and every resource route as the plugin for anyone who can reach it. Reviving it needs a new entry here, not a config knob
 - A panel that talks to the compute service directly (the shared token must never reach a browser) and a silent local fallback when the compute service is unreachable
 - A dead-letter queue, a disable-after-N-failures path, or a retry backoff that is not the capped exponential one above. A permanently broken row is retried at the cap until an Admin disables or deletes it, and its attempt count stays in `last_status` rather than becoming a new `GET /schedules` field
@@ -277,7 +321,7 @@ Do not add these without first updating this document:
 - Every primary key this plugin owns is a uuid (`gen_random_uuid()`), the natural key beside it is `UNIQUE`, and an applied migration file is never edited
 - Retention never loses a live model: a snapshot is collected only when nothing refreshed it within `FORECAST_SNAPSHOT_TTL`, and a row only when it is idle by its own clocks and has no snapshot behind it. `0` disables the sweep and a window below `1h` is refused rather than obeyed
 - Compute mode is a switch, not a second code path: the same request answers the same bytes with the URL unset and with it set to a compute service built from the same handlers, and the compute service mounts `/forecast`, `/ping` and `/healthz` only
-- The compute boundary is authenticated and org-faithful: a missing or wrong token is refused, `X-Forecast-Org` must be a non-negative integer, the plugin overwrites any caller-supplied copy, and the store writes land under the asserted org. An unreachable compute service is a 502 with a reason, never a silent local fit
+- The compute hop is authenticated and org-faithful: a missing or wrong token is refused, `X-Forecast-Org` must be a non-negative integer, the plugin overwrites any caller-supplied copy, and the store writes land under the asserted org. An unreachable compute service is a 502 with a reason, never a silent local fit. With Vault configured the hop is additionally mTLS: the service requires a client certificate, an `http` compute URL is refused, and a failed issue is a 502 or a startup refusal, never a plaintext downgrade
 - The ticker lives in exactly one place per deployment: remote mode starts none in the plugin, and N compute replicas retrain each due row once through the v12/v15 claim protocol
 - Inline behaviour is unchanged: with `FORECAST_COMPUTE_URL` unset the limiter default, the ticker and the `/forecast` handler are exactly what v15 shipped
 - A deleted schedule row does not delete the model: the sweep re-creates the row with the deployment default, and `drop=model` is the only way a caller removes the snapshot (a `baseline` key's snapshot belongs to the worker and is reported as such)

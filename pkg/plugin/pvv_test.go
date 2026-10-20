@@ -28,6 +28,9 @@ type pvvTestTLS struct {
 	caPath         string
 	clientCertPath string
 	clientKeyPath  string
+	caPEM          string
+	clientCertPEM  string
+	clientKeyPEM   string
 	serverCert     tls.Certificate
 	caPool         *x509.CertPool
 }
@@ -97,19 +100,25 @@ func newPVVTestTLS(t *testing.T) pvvTestTLS {
 	caPath := filepath.Join(dir, "ca.pem")
 	clientCertPath := filepath.Join(dir, "client.pem")
 	clientKeyPath := filepath.Join(dir, "client-key.pem")
-	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	clientCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER})
+	clientKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)})
+	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(clientCertPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER}), 0o600); err != nil {
+	if err := os.WriteFile(clientCertPath, clientCertPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(clientKeyPath, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)}), 0o600); err != nil {
+	if err := os.WriteFile(clientKeyPath, clientKeyPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return pvvTestTLS{
 		caPath:         caPath,
 		clientCertPath: clientCertPath,
 		clientKeyPath:  clientKeyPath,
+		caPEM:          string(caPEM),
+		clientCertPEM:  string(clientCertPEM),
+		clientKeyPEM:   string(clientKeyPEM),
 		serverCert:     tls.Certificate{Certificate: [][]byte{serverDER}, PrivateKey: serverKey},
 		caPool:         caPool,
 	}

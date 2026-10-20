@@ -342,7 +342,8 @@ store and point the app at it. The service reads **process env only** (no ini, n
 | `FORECAST_COMPUTE_TOKEN` | shared secret, required — the service refuses to start without it |
 | `FORECAST_STORE_*` | the same snapshot store as the plugin |
 | `FORECAST_GRAFANA_URL`, `FORECAST_GRAFANA_TOKEN` | for the retrain ticker it owns (Grafana mode) |
-| `FORECAST_PVV_*`, `FORECAST_RETRAIN_WINDOW_CHUNK` | PVV mode, when the client certificate/key are set |
+| `FORECAST_PVV_*`, `FORECAST_RETRAIN_WINDOW_CHUNK` | PVV mode, when the client certificate/key are set (or `FORECAST_VAULT_PKI_PVV_ROLE` issues one) |
+| `FORECAST_VAULT_*`, `FORECAST_COMPUTE_TLS_SERVER_NAME` | v19 mTLS: Vault address/auth/PKI role, and the DNS name this service's certificate is issued for (required with Vault) |
 | `FORECAST_RETRAIN_*`, `FORECAST_SNAPSHOT_TTL` | the ticker and retention, unchanged |
 | `FORECAST_MAX_INFLIGHT` | concurrent fits in this service, default `4` (the forwarding plugin process's own slots default to `32`) |
 
@@ -353,12 +354,30 @@ unreachable — it never silently fits locally. `QueryData`, the schedules API a
 from the same store while the service is down. Replicas share one Postgres, and the claim queue with its
 lease makes N tickers safe.
 
+### mTLS from Vault PKI
+
+Set `FORECAST_VAULT_ADDR` on both the app and the service to turn the hop into mTLS. The service then
+refuses to start without `FORECAST_VAULT_PKI_ROLE` and `FORECAST_COMPUTE_TLS_SERVER_NAME` and a working
+initial issue, and listens TLS-only with `RequireAndVerifyClientCert`; the app forwards over `https`
+only. Certificates are issued by `pki/issue/<role>` and re-issued at half their remaining lifetime, so
+rotation needs no restart. Auth is tried in the order static token (`FORECAST_VAULT_TOKEN`, then bare
+`VAULT_TOKEN`), AppRole (`FORECAST_VAULT_ROLE_ID` + `FORECAST_VAULT_SECRET_ID`), Kubernetes
+(`FORECAST_VAULT_K8S_ROLE`, JWT re-read from the service-account file). `FORECAST_VAULT_CERT_TTL`
+(default `24h`) requests the TTL; `FORECAST_VAULT_PKI_MOUNT` defaults to `pki`. On the app, the plain
+keys may also be jsonData (`vaultAddr`, `vaultPkiRole`, …) and the two secrets `secureJsonData.vaultToken`
+/ `vaultSecretId`; the service reads process env only.
+
+To move the v18 PVV client certificate to Vault as well, set `FORECAST_VAULT_PKI_PVV_ROLE` (on the app,
+the compute service, or both): the PVV transport then presents a Vault-issued certificate with CN
+`FORECAST_VAULT_PVV_CN` (default `gpx-forecast-pvv`), and PVV mode is selected by that role even without
+the file pair. PVV's server CA stays `FORECAST_PVV_CA_CERT`.
+
 The service exposes `/forecast`, `/ping` and an unauthenticated coarse `/healthz`; it deliberately does
 not serve the schedules API.
 
-> The compute hop is plain HTTP with a single shared token and trusts `X-Forecast-Org`; keep it on a
-> trusted pod network, do not expose the Service outside the cluster, and terminate TLS in front of it
-> if it crosses a host or network boundary.
+> Without Vault the compute hop is plain HTTP with a single shared token and trusts `X-Forecast-Org`;
+> keep it on a trusted pod network, do not expose the Service outside the cluster, and terminate TLS in
+> front of it if it crosses a host or network boundary.
 
 ## 11. End-to-end verification
 

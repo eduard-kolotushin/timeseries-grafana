@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -28,8 +29,10 @@ type App struct {
 	retrain retrainConfig
 	close   func()
 	cancel  func()
-	limit   *workLimiter
-	maxBody int64
+	// vaultCancel stops the PVV certificate manager. It is nil without Vault.
+	vaultCancel func()
+	limit       *workLimiter
+	maxBody     int64
 }
 
 // NewApp creates a new *App instance.
@@ -70,6 +73,21 @@ func newAppWith(ctx context.Context, settings backend.AppInstanceSettings, store
 	if store == nil {
 		app.store, app.sched, app.close = connectStores(ctx, storeDSN(ctx, settings))
 	}
+	if vc, verr := vaultFrom(ctx, settings); verr != nil {
+		log.DefaultLogger.Error("forecast: vault configuration refused", "err", verr.Error())
+	} else if vc != nil && vc.pvvRole != "" && app.compute == nil {
+		// The ticker (and therefore PVV) runs in this process only in inline mode;
+		// in remote mode the compute service issues its own PVV certificate.
+		mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		mgr := vault.NewManager(vc.client, vc.pkiMount, vc.pvvRole, vc.pvvCN, vc.certTTL)
+		if err := mgr.Start(mgrCtx); err != nil {
+			// The manager keeps retrying; until it succeeds PVV fetches fail with
+			// ErrNoCertificate rather than falling back to Grafana mode.
+			log.DefaultLogger.Error("forecast: vault pvv issue failed", "err", err.Error())
+		}
+		app.retrain.PVVManager = mgr
+		app.vaultCancel = cancel
+	}
 	if app.poster == nil {
 		app.poster = newGrafanaPoster(app.retrain)
 	}
@@ -98,6 +116,12 @@ func newAppWith(ctx context.Context, settings backend.AppInstanceSettings, store
 func (a *App) Dispose() {
 	if a.cancel != nil {
 		a.cancel()
+	}
+	if a.compute != nil && a.compute.cancel != nil {
+		a.compute.cancel()
+	}
+	if a.vaultCancel != nil {
+		a.vaultCancel()
 	}
 	if a.close != nil {
 		a.close()

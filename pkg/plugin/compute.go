@@ -3,15 +3,20 @@ package plugin
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 )
@@ -45,7 +50,20 @@ var (
 	errComputeBadOrg       = errors.New("forecast compute: bad X-Forecast-Org")
 	errComputeNoToken      = errors.New("forecast compute: FORECAST_COMPUTE_TOKEN is required: the service refuses unauthenticated requests")
 	errComputeHealthMethod = errors.New("forecast compute: health probe is GET-only")
+	errComputeHTTPS        = errors.New("forecast: compute url must be https when vault mTLS is configured")
+	errComputeVaultRole    = errors.New("forecast: vault: FORECAST_VAULT_PKI_ROLE is required for compute mTLS")
+	errComputeVaultServer  = errors.New("forecast compute: FORECAST_COMPUTE_TLS_SERVER_NAME is required when FORECAST_VAULT_ADDR is set")
 )
+
+// errorTransport fails every request with one configuration reason. It lets the
+// plugin keep serving (alerting, schedules) while a bad mTLS configuration is
+// visible as a 502 on the forwarded path and in CheckHealth, instead of
+// silently downgrading to plain HTTP.
+type errorTransport struct{ err error }
+
+func (t errorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, t.err
+}
 
 // computeMode is how this process fits series: in-process (nil) or by forwarding
 // to a separate compute service. A nil *computeMode is inline, so the inline path
@@ -54,6 +72,8 @@ type computeMode struct {
 	url    string
 	token  string
 	client *http.Client
+	// cancel stops the Vault re-issue goroutine. It is nil without Vault.
+	cancel func()
 }
 
 // computeFrom resolves the compute mode from the same settings chain the store
@@ -70,8 +90,8 @@ func computeFrom(ctx context.Context, settings backend.AppInstanceSettings) *com
 		cfg:    backend.GrafanaConfigFromContext(ctx),
 		json:   jd,
 	}
-	url := strings.TrimRight(look.Get("FORECAST_COMPUTE_URL", "COMPUTE_URL", "compute_url", "computeUrl"), "/")
-	if url == "" {
+	baseURL := strings.TrimRight(look.Get("FORECAST_COMPUTE_URL", "COMPUTE_URL", "compute_url", "computeUrl"), "/")
+	if baseURL == "" {
 		return nil
 	}
 	token := look.Get("FORECAST_COMPUTE_TOKEN", "COMPUTE_TOKEN", "compute_token", "computeToken")
@@ -82,9 +102,44 @@ func computeFrom(ctx context.Context, settings backend.AppInstanceSettings) *com
 		// Keep serving: without a token every forwarded call is refused upstream,
 		// and a misconfiguration that silently does nothing is worse than one that
 		// logs here and answers 401 there.
-		log.DefaultLogger.Warn("forecast: compute mode without a token; forwarded calls will be refused", "url", url)
+		log.DefaultLogger.Warn("forecast: compute mode without a token; forwarded calls will be refused", "url", baseURL)
 	}
-	return &computeMode{url: url, token: token, client: &http.Client{Timeout: computeTimeout}}
+	mode := &computeMode{url: baseURL, token: token, client: &http.Client{Timeout: computeTimeout}}
+
+	vc, verr := vaultFromLookup(look, settings)
+	switch {
+	case verr != nil:
+		log.DefaultLogger.Error("forecast: vault configuration refused; forwarded calls will fail", "err", verr.Error())
+		mode.client.Transport = errorTransport{verr}
+	case vc != nil:
+		if vc.pkiRole == "" {
+			log.DefaultLogger.Error("forecast: compute mTLS needs a PKI role", "err", errComputeVaultRole.Error())
+			mode.client.Transport = errorTransport{errComputeVaultRole}
+			break
+		}
+		parsed, perr := url.Parse(baseURL)
+		if perr != nil || parsed.Scheme != "https" || parsed.Host == "" {
+			log.DefaultLogger.Error("forecast: compute mTLS needs an https url", "url", baseURL)
+			mode.client.Transport = errorTransport{errComputeHTTPS}
+			break
+		}
+		serverName := vc.serverName
+		if serverName == "" {
+			serverName = parsed.Hostname()
+		}
+		mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		mgr := vault.NewManager(vc.client, vc.pkiMount, vc.pkiRole, vc.clientCN, vc.certTTL)
+		if err := mgr.Start(mgrCtx); err != nil {
+			// The manager keeps retrying in the background; until it succeeds the
+			// transport answers ErrNoCertificate, which the forwarding path turns
+			// into a 502 naming the failure.
+			log.DefaultLogger.Error("forecast: vault initial issue failed", "err", err.Error())
+		}
+		mode.cancel = cancel
+		mode.client.Transport = vault.NewClientTransport(mgr, serverName, nil, false)
+		log.DefaultLogger.Info("forecast: compute mTLS enabled", "server_name", serverName, "pki_role", vc.pkiRole)
+	}
+	return mode
 }
 
 // computeAuth is the standalone service's trust boundary: the shared token and the
@@ -203,16 +258,35 @@ func (a *App) computeProbe(ctx context.Context) string {
 }
 
 // ServeCompute runs the standalone compute service: the app's own handlers over
-// plain HTTP, with the SDK's request identity replaced by FORECAST_COMPUTE_TOKEN
-// and the X-Forecast-Org header the plugin sets. It builds the App with a nil
-// compute mode, so the service can never forward to another compute service, and
-// it mounts only /forecast, /ping and the coarse /healthz probe — the schedules
-// API and the alerting QueryData path stay in the Grafana-managed plugin, which
-// keeps working from the same store while this service is down.
+// plain HTTP, or TLS requiring a Vault-issued client certificate when Vault PKI
+// is configured, with the SDK's request identity replaced by
+// FORECAST_COMPUTE_TOKEN and the X-Forecast-Org header the plugin sets. It builds
+// the App with a nil compute mode, so the service can never forward to another
+// compute service, and it mounts only /forecast, /ping and the coarse /healthz
+// probe — the schedules API and the alerting QueryData path stay in the
+// Grafana-managed plugin, which keeps working from the same store while this
+// service is down.
 func ServeCompute(ctx context.Context, addr string) error {
 	token := strings.TrimSpace(os.Getenv("FORECAST_COMPUTE_TOKEN"))
 	if token == "" {
 		return errComputeNoToken
+	}
+	vc, err := vaultFromLookup(storeLookup{getenv: os.Getenv}, backend.AppInstanceSettings{})
+	if err != nil {
+		return err
+	}
+	var mgr *vault.Manager
+	if vc != nil {
+		if vc.pkiRole == "" {
+			return errComputeVaultRole
+		}
+		if vc.serverName == "" {
+			return errComputeVaultServer
+		}
+		mgr = vault.NewManager(vc.client, vc.pkiMount, vc.pkiRole, vc.serverName, vc.certTTL)
+		if err := mgr.Start(ctx); err != nil {
+			return fmt.Errorf("forecast compute: vault: %w", err)
+		}
 	}
 	app, err := newAppWith(ctx, backend.AppInstanceSettings{}, nil, nil, nil, nil)
 	if err != nil {
@@ -223,15 +297,15 @@ func ServeCompute(ctx context.Context, addr string) error {
 	mux.HandleFunc("/ping", app.handlePing)
 	mux.HandleFunc("/healthz", app.handleComputeHealth)
 	mux.Handle("/forecast", computeAuth(token, http.HandlerFunc(app.handleForecast)))
-	log.DefaultLogger.Info("forecast compute listening", "addr", addr, "store", app.store != nil, "retrain", app.retrain.Enabled)
-	return serveHTTP(ctx, addr, mux)
+	log.DefaultLogger.Info("forecast compute listening", "addr", addr, "store", app.store != nil, "retrain", app.retrain.Enabled, "tls", mgr != nil)
+	return serveHTTP(ctx, addr, mux, mgr)
 }
 
 // serveHTTP serves until ctx is cancelled, then shuts the listener down so an
 // in-flight fit finishes rather than being cut mid-write. A listener that cannot
 // bind (port in use, permission) returns its error at once instead of waiting for
 // a cancellation that will never come.
-func serveHTTP(ctx context.Context, addr string, h http.Handler) error {
+func serveHTTP(ctx context.Context, addr string, h http.Handler, mgr *vault.Manager) error {
 	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	done := make(chan struct{})
 	go func() {
@@ -241,7 +315,16 @@ func serveHTTP(ctx context.Context, addr string, h http.Handler) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	err := srv.ListenAndServe()
+	var err error
+	if mgr == nil {
+		err = srv.ListenAndServe()
+	} else {
+		ln, listenErr := net.Listen("tcp", addr)
+		if listenErr != nil {
+			return listenErr
+		}
+		err = srv.Serve(tls.NewListener(ln, vault.NewServerTLSConfig(mgr)))
+	}
 	if ctx.Err() != nil {
 		// The shutdown path is running: wait for it, so the caller's cleanup does
 		// not race a listener that is still draining.

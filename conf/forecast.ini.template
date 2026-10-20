@@ -38,6 +38,40 @@ compute_url = ${FORECAST_COMPUTE_URL}
 ; service refuses to start without it; this process only warns when it is
 ; missing, because the forwarded calls are then refused with 401 upstream.
 compute_token = ${FORECAST_COMPUTE_TOKEN}
+; v19: mTLS for the compute hop. Leave vault_addr empty (the default) for plain
+; HTTP, exactly as before. With it set, this process and the compute service both
+; request short-lived certificates from Vault's PKI secrets engine; the compute
+; service then listens TLS-only and requires a client certificate, and this
+; process forwards over https. vault_pki_role is the role this process uses as a
+; client; the compute service's own role must allow the DNS name in
+; compute_tls_server_name. Auth precedence: token, then AppRole, then Kubernetes.
+; The token/secret_id are secrets; prefer secureJsonData.vaultToken /
+; secureJsonData.vaultSecretId (or the pod's Secret env) over this file.
+; The compute service reads process env only, so it takes the FORECAST_VAULT_*
+; spellings directly.
+; vault_addr = ${FORECAST_VAULT_ADDR}
+; vault_namespace = ${FORECAST_VAULT_NAMESPACE}
+; vault_token = ${FORECAST_VAULT_TOKEN}
+; vault_role_id = ${FORECAST_VAULT_ROLE_ID}
+; vault_secret_id = ${FORECAST_VAULT_SECRET_ID}
+; vault_approle_mount = ${FORECAST_VAULT_APPROLE_MOUNT}
+; vault_k8s_role = ${FORECAST_VAULT_K8S_ROLE}
+; vault_k8s_mount = ${FORECAST_VAULT_K8S_MOUNT}
+; vault_k8s_jwt_path = ${FORECAST_VAULT_K8S_JWT_PATH}
+; vault_pki_mount = ${FORECAST_VAULT_PKI_MOUNT}
+; vault_pki_role = ${FORECAST_VAULT_PKI_ROLE}
+; Optional: issue the PVV client certificate from Vault instead of the
+; pvv_client_cert/key files. Setting this role also selects PVV mode.
+; vault_pki_pvv_role = ${FORECAST_VAULT_PKI_PVV_ROLE}
+; vault_cert_ttl = ${FORECAST_VAULT_CERT_TTL}
+; vault_client_cn = ${FORECAST_VAULT_CLIENT_CN}
+; vault_pvv_cn = ${FORECAST_VAULT_PVV_CN}
+; vault_ca_cert = ${FORECAST_VAULT_CA_CERT}
+; vault_tls_skip_verify = ${FORECAST_VAULT_TLS_SKIP_VERIFY}
+; DNS name the compute service's certificate is issued for and the client
+; verifies. Required on the service when vault_addr is set; defaults to the
+; compute URL's hostname in this process.
+; compute_tls_server_name = ${FORECAST_COMPUTE_TLS_SERVER_NAME}
 ; Unattended retrain scheduler. Only this process (the app) runs it, unless
 ; compute_url above moves it to the compute service; the datasource section below
 ; never runs it, because alerting QueryData only Restores.
