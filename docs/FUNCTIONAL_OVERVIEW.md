@@ -1749,5 +1749,7 @@ still refused by the compute hop.
 
 Unit coverage: `TestResolveEnvVaultMTLS` (pair defaults on, explicit false, half a pair is an error),
 `TestVaultEndpointRequiresClientCertificate` (an `httptest` TLS server with
-`RequireAndVerifyClientCert` accepts the pair and refuses without it), and `TestNewClientVaultMTLSErrors`.
-The throwaway proxy, certificates and probe containers were removed; the Compose stack was left running.
+`RequireAndVerifyClientCert` accepts the pair and refuses without it), `TestNewClientVaultMTLSErrors`
+(including PEM content rejected for the Vault CA/client pair), and `TestPVVCertParamsArePaths` (the PVV
+client/key/CA parameters are paths too). The throwaway proxy, certificates and probe containers were
+removed; the Compose stack was left running.
