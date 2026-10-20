@@ -82,7 +82,7 @@ compute_token = ${FORECAST_COMPUTE_TOKEN}
 ; Client-certificate mTLS to Vault itself. The certificate cannot come from the
 ; same Vault (it is needed to reach Vault), so these are file paths. Both are
 ; required when vault_mtls is on; unset defaults to "either path is set" (a
-; lone half is an error).
+; lone half is an error). PEM content is rejected.
 ; vault_mtls = ${FORECAST_VAULT_MTLS}
 ; vault_client_cert = ${FORECAST_VAULT_CLIENT_CERT}
 ; vault_client_key = ${FORECAST_VAULT_CLIENT_KEY}

@@ -334,9 +334,12 @@ PKI.
 - **File pair**: `FORECAST_VAULT_CLIENT_CERT` and `FORECAST_VAULT_CLIENT_KEY`
   (`vault_client_cert` / `vault_client_key`, jsonData `vaultClientCert` /
   `vaultClientKey`). Both are required when the switch is on; a missing half is a
-  loud construction error. The pair is loaded when the client is built, so
-  rotating the Vault client certificate needs a process restart. Server
-  verification remains `FORECAST_VAULT_CA_CERT` / `FORECAST_VAULT_TLS_SKIP_VERIFY`.
+  loud construction error. Every certificate setting (these two, the Vault CA,
+  and PVV's client/CA values) is a **file path**, never PEM content; a value
+  containing a PEM block is rejected at construction. The pair is loaded when
+  the client is built, so rotating the Vault client certificate needs a process
+  restart. Server verification remains `FORECAST_VAULT_CA_CERT` /
+  `FORECAST_VAULT_TLS_SKIP_VERIFY`.
 - The same env/lookup chain reaches the app, the nested datasource, the compute
   service and `gpx_forecast_migrate`; a configured Vault with no component role
   is still the v20 error, independent of this hop.

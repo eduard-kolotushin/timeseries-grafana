@@ -473,3 +473,35 @@ func TestPVVConfigResolution(t *testing.T) {
 		t.Fatalf("cfg=%+v", cfg)
 	}
 }
+
+func TestPVVCertParamsArePaths(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  retrainConfig
+		want string
+	}{
+		{
+			name: "client certificate content is not a path",
+			cfg:  retrainConfig{PVVClientCert: "-----BEGIN CERTIFICATE-----\n", PVVClientKey: "/k"},
+			want: "FORECAST_PVV_CLIENT_CERT must be a file path",
+		},
+		{
+			name: "client key content is not a path",
+			cfg:  retrainConfig{PVVClientCert: "/c", PVVClientKey: "-----BEGIN PRIVATE KEY-----\n"},
+			want: "FORECAST_PVV_CLIENT_KEY must be a file path",
+		},
+		{
+			name: "CA content is not a path",
+			cfg:  retrainConfig{PVVClientCert: "/c", PVVClientKey: "/k", PVVCA: "-----BEGIN CERTIFICATE-----\n"},
+			want: "FORECAST_PVV_CA_CERT must be a file path",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newGrafanaPoster(tc.cfg)
+			if p.pvvInitErr == nil || !strings.Contains(p.pvvInitErr.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", p.pvvInitErr, tc.want)
+			}
+		})
+	}
+}

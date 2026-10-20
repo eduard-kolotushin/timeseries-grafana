@@ -392,7 +392,11 @@ and point `FORECAST_VAULT_CLIENT_CERT` / `FORECAST_VAULT_CLIENT_KEY` at a PEM pa
 defaults to “on when either path is set” (a lone half is an error); an explicit `false` ignores the pair on
 a listener that does not ask for one. This hop is file-based on purpose: the certificate cannot come from the Vault it is needed to
 reach. The pair is loaded when the client is built, so rotating it needs a process restart; the Vault CA
-and `FORECAST_VAULT_TLS_SKIP_VERIFY` apply to the same connection. The env/lookup chain is the same one
+and `FORECAST_VAULT_TLS_SKIP_VERIFY` apply to the same connection. All certificate settings are **file
+paths**, never PEM content: `FORECAST_VAULT_CA_CERT`, `FORECAST_VAULT_CLIENT_CERT`,
+`FORECAST_VAULT_CLIENT_KEY`, and PVV's `FORECAST_PVV_CA_CERT` / `FORECAST_PVV_CLIENT_CERT` /
+`FORECAST_PVV_CLIENT_KEY` are read from disk, and a value containing a PEM block is rejected at
+construction (`… must be a file path, not PEM content`). The env/lookup chain is the same one
 the component switches use. The Helm chart renders the paths and accepts `compute.extraVolumes` /
 `compute.extraVolumeMounts` and `grafana.extraVolumes` / `grafana.extraVolumeMounts`, but it does not
 create the Secret: mount the same pair into the Grafana and compute pods. The pair is read once, so a

@@ -108,6 +108,15 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.Addr == "" {
 		return nil, errors.New("forecast: vault: address is required")
 	}
+	for _, p := range []struct{ name, value string }{
+		{"FORECAST_VAULT_CA_CERT", cfg.CACertFile},
+		{"FORECAST_VAULT_CLIENT_CERT", cfg.ClientCertFile},
+		{"FORECAST_VAULT_CLIENT_KEY", cfg.ClientKeyFile},
+	} {
+		if err := rejectPEMContent(p.name, p.value); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultTimeout
 	}
@@ -160,6 +169,13 @@ func NewClient(cfg Config) (*Client, error) {
 		loginBased: loginBased,
 		token:      cfg.Auth.Token,
 	}, nil
+}
+
+func rejectPEMContent(name, value string) error {
+	if strings.Contains(value, "-----BEGIN") {
+		return fmt.Errorf("forecast: vault: %s must be a file path, not PEM content", name)
+	}
+	return nil
 }
 
 // IssueCertificate asks the PKI engine for a certificate. The returned leaf is

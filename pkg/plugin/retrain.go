@@ -388,6 +388,13 @@ type grafanaPoster struct {
 	org int64
 }
 
+func rejectCertPEM(name, value string) error {
+	if strings.Contains(value, "-----BEGIN") {
+		return fmt.Errorf("forecast: %s must be a file path, not PEM content", name)
+	}
+	return nil
+}
+
 func newGrafanaPoster(cfg retrainConfig) *grafanaPoster {
 	p := &grafanaPoster{
 		url:    strings.TrimRight(cfg.GrafanaURL, "/"),
@@ -405,6 +412,16 @@ func newGrafanaPoster(cfg retrainConfig) *grafanaPoster {
 	p.pvvEnabled = cfg.PVVManager != nil || cfg.PVVClientCert != "" || cfg.PVVClientKey != ""
 	if !p.pvvEnabled {
 		return p
+	}
+	for _, param := range []struct{ name, value string }{
+		{"FORECAST_PVV_CLIENT_CERT", cfg.PVVClientCert},
+		{"FORECAST_PVV_CLIENT_KEY", cfg.PVVClientKey},
+		{"FORECAST_PVV_CA_CERT", cfg.PVVCA},
+	} {
+		if err := rejectCertPEM(param.name, param.value); err != nil {
+			p.pvvInitErr = err
+			return p
+		}
 	}
 	if cfg.PVVManager != nil {
 		var caPEM []byte

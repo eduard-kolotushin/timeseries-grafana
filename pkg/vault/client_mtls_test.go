@@ -144,4 +144,37 @@ func TestNewClientVaultMTLSErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "both FORECAST_VAULT_CLIENT_CERT and FORECAST_VAULT_CLIENT_KEY are required") {
 		t.Fatalf("err = %v", err)
 	}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "CA content is not a path",
+			cfg:  Config{Addr: "https://vault.example:8200", Auth: AuthConfig{Token: "t"}, CACertFile: "-----BEGIN CERTIFICATE-----\n"},
+			want: "FORECAST_VAULT_CA_CERT must be a file path, not PEM content",
+		},
+		{
+			name: "client certificate content is not a path",
+			cfg: Config{
+				Addr: "https://vault.example:8200", Auth: AuthConfig{Token: "t"},
+				ClientMTLS: true, ClientCertFile: "-----BEGIN CERTIFICATE-----\n", ClientKeyFile: "key",
+			},
+			want: "FORECAST_VAULT_CLIENT_CERT must be a file path, not PEM content",
+		},
+		{
+			name: "client key content is not a path",
+			cfg: Config{
+				Addr: "https://vault.example:8200", Auth: AuthConfig{Token: "t"},
+				ClientMTLS: true, ClientCertFile: certFile, ClientKeyFile: "-----BEGIN PRIVATE KEY-----\n",
+			},
+			want: "FORECAST_VAULT_CLIENT_KEY must be a file path, not PEM content",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewClient(tc.cfg); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
 }
