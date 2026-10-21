@@ -108,6 +108,12 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.Addr == "" {
 		return nil, errors.New("forecast: vault: address is required")
 	}
+	// A client certificate is silently unused on a plain http URL: net/http
+	// ignores TLSClientConfig there, so mTLS would be off with the token in the
+	// clear. Refuse the combination instead of downgrading silently.
+	if cfg.ClientMTLS && !strings.HasPrefix(cfg.Addr, "https://") {
+		return nil, errors.New("forecast: vault: client mTLS requires an https address")
+	}
 	for _, p := range []struct{ name, value string }{
 		{"FORECAST_VAULT_CA_CERT", cfg.CACertFile},
 		{"FORECAST_VAULT_CLIENT_CERT", cfg.ClientCertFile},
