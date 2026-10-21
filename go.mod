@@ -2,6 +2,8 @@ module github.com/eduard-kolotushin/timeseries-grafana
 
 go 1.26.5
 
+toolchain go1.26.10
+
 require (
 	github.com/eduard-kolotushin/timeseries v0.2.1
 	github.com/eduard-kolotushin/timeseries-forecast v0.5.4
