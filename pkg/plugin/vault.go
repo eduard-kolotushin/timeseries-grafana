@@ -41,7 +41,9 @@ func vaultFrom(ctx context.Context, settings backend.AppInstanceSettings) (*vaul
 // grafanaToken. The three component switches default to "that component's Vault
 // role or local certificate path is configured"; an explicit false disables a
 // component even when either source is set. A nil Client with local files means
-// the process runs mTLS without Vault.
+// the process runs mTLS without Vault. A configuration error returns a partial
+// Resolved — switches, roles, files and names set, Client nil — so a caller can
+// fail closed instead of falling back to plaintext.
 func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*vault.Resolved, error) {
 	getenv := look.getenv
 	if getenv == nil {
@@ -54,9 +56,6 @@ func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*v
 	computeRole := look.Get("FORECAST_VAULT_PKI_ROLE", "VAULT_PKI_ROLE", "vault_pki_role", "vaultPkiRole")
 	pvvRole := look.Get("FORECAST_VAULT_PKI_PVV_ROLE", "VAULT_PKI_PVV_ROLE", "vault_pki_pvv_role", "vaultPvvRole")
 	storeRole := look.Get("FORECAST_VAULT_PKI_STORE_ROLE", "VAULT_PKI_STORE_ROLE", "vault_pki_store_role", "vaultPkiStoreRole")
-	if addr == "" && (computeRole != "" || pvvRole != "" || storeRole != "") {
-		return nil, errors.New("forecast: vault: address is required when a component role is configured")
-	}
 
 	computeFiles := vault.FileTLS{
 		ClientCertFile: look.Get("FORECAST_COMPUTE_CLIENT_CERT", "COMPUTE_CLIENT_CERT", "compute_client_cert", "computeClientCert"),
@@ -84,13 +83,39 @@ func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*v
 	pvvMTLS := parseBool(pvvFlag, pvvRole != "" || pvvFiles.ClientConfigured())
 	storeMTLS := parseBool(storeFlag, storeRole != "" || storeFiles.ClientConfigured())
 
-	if addr == "" && !computeFiles.ClientConfigured() && !computeFiles.ServerConfigured() &&
+	if addr == "" && computeRole == "" && pvvRole == "" && storeRole == "" &&
+		!computeFiles.ClientConfigured() && !computeFiles.ServerConfigured() &&
 		!storeFiles.ClientConfigured() && !pvvFiles.ClientConfigured() && computeFlag == "" && pvvFlag == "" && storeFlag == "" {
 		return nil, nil
 	}
+	// The component view exists before the last configuration checks: a caller
+	// that receives an error still knows whether its store asked for mTLS, so the
+	// pool can refuse a plaintext connection instead of downgrading.
+	resolved := &vault.Resolved{
+		PKIMount:    defaultString(look.Get("FORECAST_VAULT_PKI_MOUNT", "VAULT_PKI_MOUNT", "vault_pki_mount", "vaultPkiMount"), defaultVaultPKIMount),
+		ComputeRole: computeRole,
+		PVVRole:     pvvRole,
+		StoreRole:   storeRole,
+		ClientCN:    defaultString(look.Get("FORECAST_VAULT_CLIENT_CN", "VAULT_CLIENT_CN", "vault_client_cn", "vaultClientCn"), defaultVaultClientCN),
+		PVVCN:       defaultString(look.Get("FORECAST_VAULT_PVV_CN", "VAULT_PVV_CN", "vault_pvv_cn", "vaultPvvCn"), defaultVaultPVVCN),
+		ServerName:  look.Get("FORECAST_COMPUTE_TLS_SERVER_NAME", "COMPUTE_TLS_SERVER_NAME", "compute_tls_server_name", "computeTlsServerName"),
+		// A local store certificate is verified against the pgx host unless this
+		// override names the certificate's SAN.
+		StoreServerName:   look.Get("FORECAST_STORE_TLS_SERVER_NAME", "STORE_TLS_SERVER_NAME", "store_tls_server_name", "storeTlsServerName"),
+		ComputeFiles:      computeFiles,
+		PVVFiles:          pvvFiles,
+		StoreFiles:        storeFiles,
+		ComputeMTLS:       computeMTLS,
+		PVVMTLS:           pvvMTLS,
+		StoreMTLS:         storeMTLS,
+		ComputeServerMTLS: computeMTLS,
+	}
+	if addr == "" && (computeRole != "" || pvvRole != "" || storeRole != "") {
+		return resolved, errors.New("forecast: vault: address is required when a component role is configured")
+	}
 	if addr != "" && computeRole == "" && pvvRole == "" && storeRole == "" &&
 		!computeMTLS && !pvvMTLS && !storeMTLS && !computeFiles.ClientConfigured() && !storeFiles.ClientConfigured() && !pvvFiles.ClientConfigured() {
-		return nil, errors.New("forecast: vault: no component role is configured (compute, pvv, store)")
+		return resolved, errors.New("forecast: vault: no component role is configured (compute, pvv, store)")
 	}
 
 	vaultMTLS := false
@@ -132,7 +157,7 @@ func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*v
 			ClientKeyFile:  vaultKey,
 		})
 		if err != nil {
-			return nil, err
+			return resolved, err
 		}
 	}
 	ttl := parseDuration(look.Get("FORECAST_VAULT_CERT_TTL", "VAULT_CERT_TTL", "vault_cert_ttl", "vaultCertTtl"), defaultVaultCertTTL)
@@ -147,29 +172,11 @@ func vaultFromLookup(look storeLookup, settings backend.AppInstanceSettings) (*v
 	if storeCN == "" {
 		storeCN = "overlay"
 	}
-	return &vault.Resolved{
-		Client:      client,
-		PKIMount:    defaultString(look.Get("FORECAST_VAULT_PKI_MOUNT", "VAULT_PKI_MOUNT", "vault_pki_mount", "vaultPkiMount"), defaultVaultPKIMount),
-		ComputeRole: computeRole,
-		PVVRole:     pvvRole,
-		StoreRole:   storeRole,
-		ClientCN:    defaultString(look.Get("FORECAST_VAULT_CLIENT_CN", "VAULT_CLIENT_CN", "vault_client_cn", "vaultClientCn"), defaultVaultClientCN),
-		PVVCN:       defaultString(look.Get("FORECAST_VAULT_PVV_CN", "VAULT_PVV_CN", "vault_pvv_cn", "vaultPvvCn"), defaultVaultPVVCN),
-		StoreCN:     storeCN,
-		ServerName:  look.Get("FORECAST_COMPUTE_TLS_SERVER_NAME", "COMPUTE_TLS_SERVER_NAME", "compute_tls_server_name", "computeTlsServerName"),
-		// A local store certificate is verified against the pgx host unless this
-		// override names the certificate's SAN.
-		StoreServerName:   look.Get("FORECAST_STORE_TLS_SERVER_NAME", "STORE_TLS_SERVER_NAME", "store_tls_server_name", "storeTlsServerName"),
-		CertTTL:           ttl,
-		ComputeFiles:      computeFiles,
-		PVVFiles:          pvvFiles,
-		StoreFiles:        storeFiles,
-		ComputeMTLS:       computeMTLS,
-		PVVMTLS:           pvvMTLS,
-		StoreMTLS:         storeMTLS,
-		VaultMTLS:         vaultMTLS,
-		ComputeServerMTLS: computeMTLS,
-	}, nil
+	resolved.Client = client
+	resolved.StoreCN = storeCN
+	resolved.CertTTL = ttl
+	resolved.VaultMTLS = vaultMTLS
+	return resolved, nil
 }
 
 func defaultString(v, def string) string {

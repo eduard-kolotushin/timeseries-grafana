@@ -91,8 +91,10 @@ func (d *Datasource) storeTLS(ctx context.Context, jsonData []byte, secure map[s
 	}
 	vc, err := vaultFromLookup(look, backend.AppInstanceSettings{JSONData: jsonData, DecryptedSecureJSONData: secure})
 	if err != nil {
+		// vaultFromLookup keeps the partial view on error: the switches and file
+		// paths are set, so a store that asked for mTLS below is enabled with no
+		// usable source and the pool refuses it instead of connecting in plaintext.
 		log.DefaultLogger.Error("forecast datasource: vault configuration refused", "err", err.Error())
-		return storeTLSConfig{}, nil
 	}
 	if vc == nil || !vc.StoreMTLS {
 		return storeTLSConfig{}, nil
