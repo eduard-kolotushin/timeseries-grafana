@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,28 @@ type mockCallResourceResponseSender struct {
 func (s *mockCallResourceResponseSender) Send(response *backend.CallResourceResponse) error {
 	s.response = response
 	return nil
+}
+
+// TestForecastNilRequestBodyInline: the inline handler must answer an empty body with a
+// bad request, not panic. recoverHTTP turns the panic into a 500, which still hides the
+// caller's error behind "forecast: panic".
+func TestForecastNilRequestBodyInline(t *testing.T) {
+	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{})
+	if err != nil {
+		t.Fatalf("new app: %s", err)
+	}
+	app, ok := inst.(*App)
+	if !ok {
+		t.Fatal("inst must be of type *App")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/forecast", nil)
+	req.Body = nil
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+	app.handleForecast(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", w.Code, w.Body)
+	}
 }
 
 func TestCallResource(t *testing.T) {

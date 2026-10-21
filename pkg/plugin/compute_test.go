@@ -731,6 +731,31 @@ func TestForecastRemoteModeMatchesInline(t *testing.T) {
 	}
 }
 
+// TestForecastNilRequestBodyAnswersBadRequest: a Grafana resource call with no body reaches
+// the handler with a nil Body. Wrapping that in http.MaxBytesReader is not inert — its Read
+// dereferences the nil reader — and in remote mode the read runs in net/http's background
+// write loop, where the panic exits the plugin process instead of answering the request.
+func TestForecastNilRequestBodyAnswersBadRequest(t *testing.T) {
+	clearComputeEnv(t)
+	upstream := httptest.NewServer(computeMux(newComputeApp(t, newMemoryStore()), "shared"))
+	defer upstream.Close()
+	app, err := newAppWith(context.Background(), backend.AppInstanceSettings{}, newMemoryStore(), nil, nil,
+		&computeMode{url: upstream.URL, token: "shared", client: upstream.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	req := httptest.NewRequest(http.MethodPost, "/forecast", nil)
+	req.Body = nil
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+	app.forwardForecast(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 from the empty-body decode", w.Code, w.Body)
+	}
+}
+
 // TestHealthReportsAnUnreachableComputeService: in remote mode the health probe answers for
 // the upstream too, so a split deployment whose compute half is down is visible from
 // Grafana instead of looking healthy while every panel fails.

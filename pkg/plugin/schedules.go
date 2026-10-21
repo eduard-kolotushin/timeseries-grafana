@@ -143,7 +143,7 @@ func decodeBody(w http.ResponseWriter, req *http.Request, into any) bool {
 		http.Error(w, errBodyTooLarge.Error(), http.StatusRequestEntityTooLarge)
 		return false
 	}
-	req.Body = http.MaxBytesReader(w, req.Body, maxScheduleBodyBytes)
+	req.Body = http.MaxBytesReader(w, requestBody(req), maxScheduleBodyBytes)
 	if err := json.NewDecoder(req.Body).Decode(into); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {

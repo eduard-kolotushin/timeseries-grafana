@@ -225,7 +225,7 @@ func (a *App) forwardForecast(w http.ResponseWriter, req *http.Request) {
 	defer release()
 	orgID := backend.PluginConfigFromContext(req.Context()).OrgID
 	out, err := http.NewRequestWithContext(req.Context(), http.MethodPost, a.compute.url+computeURLPath,
-		http.MaxBytesReader(w, req.Body, a.bodyLimit()))
+		http.MaxBytesReader(w, requestBody(req), a.bodyLimit()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

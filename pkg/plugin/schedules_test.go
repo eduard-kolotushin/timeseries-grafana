@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strconv"
 	"strings"
@@ -323,6 +324,21 @@ func (m *memSchedules) seed(row ScheduleRow) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rows[schedKey(row.Scope, row.OrgID, row.Key)] = row
+}
+
+// TestDecodeBodyNilRequestBody: the same nil Body the resource call delivers to a schedule
+// PUT must decode as an empty body and answer 400, not panic on the nil reader.
+func TestDecodeBodyNilRequestBody(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "/schedules", nil)
+	req.Body = nil
+	w := httptest.NewRecorder()
+	var body struct{}
+	if decodeBody(w, req, &body) {
+		t.Fatal("decoded a nil body")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", w.Code, w.Body)
+	}
 }
 
 func adminCtx(orgID int64) backend.PluginContext {

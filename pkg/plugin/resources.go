@@ -3,10 +3,23 @@ package plugin
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
+
+// requestBody substitutes http.NoBody for a nil Body. Grafana's resource adapter
+// hands a handler a nil Body when the caller sent none, and http.MaxBytesReader is
+// not inert over that: its Read dereferences the nil reader. Inline the panic is
+// recovered into a 500; in remote mode the read happens in net/http's background
+// write loop, where the panic exits the plugin process.
+func requestBody(req *http.Request) io.ReadCloser {
+	if req.Body == nil {
+		return http.NoBody
+	}
+	return req.Body
+}
 
 func recoverHTTP(w http.ResponseWriter) {
 	if rec := recover(); rec != nil {
@@ -32,6 +45,7 @@ func (a *App) handleForecast(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	req.Body = requestBody(req)
 	limit := a.bodyLimit()
 	if req.ContentLength > limit {
 		http.Error(w, errBodyTooLarge.Error(), http.StatusRequestEntityTooLarge)
