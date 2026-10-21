@@ -30,6 +30,8 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`); the rows are the loa
 | `src/forecast-panel/types.ts` | `ForecastOptions` and the model/season/calendar/severity unions the panel and the datasource share |
 | `src/forecast-datasource/queryModel.ts` | Forecast query ↔ `CacheKeyInput` bridge: the datasource computes the same `cacheKey` the overlay stored |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
+| `pkg/vault/` | Stdlib Vault client (token / AppRole / Kubernetes auth, `pki/issue`), the half-life certificate manager, and the TLS helpers: rotating transport, pgx client config, local file pairs, PEM-as-path rejection |
+| `pkg/plugin/vault.go` | `vaultFromLookup`: the env / `GF_PLUGIN_*` / grafana.ini / jsonData chain for Vault and the per-component certificate settings; a configuration error still returns the partial component view so the store fails closed |
 | `pkg/plugin/forecast.go` | Fit/forecast using sibling modules; fit path records `trainSource` and upserts the `panel` schedule row |
 | `pkg/plugin/limits.go` | Train-length / body caps, the pre-decode per-element budget, the one-window `maxForecastPoints` cap and the Fit / ForecastRange inflight semaphore |
 | `pkg/plugin/store.go` | SnapshotStore interface; bounded TTL read-through cache over pgx `forecast.snapshots` |
