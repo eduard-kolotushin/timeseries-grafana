@@ -283,3 +283,30 @@ func TestSweepRecreatesARowForAnOrphanSnapshot(t *testing.T) {
 		t.Fatalf("a second sweep collected something: %+v", again)
 	}
 }
+
+// TestSweepKeepsADisabledRow: an admin's "off" is a setting, not idleness. A
+// disabled row has frozen clocks by design, so deleting it as idle would let the
+// next panel load recreate it enabled with the deployment default cron.
+func TestSweepKeepsADisabledRow(t *testing.T) {
+	ctx := context.Background()
+	s := scratchPostgresStore(t, "forecast_retention_disabled")
+	key := strings.Repeat("a", 64)
+	if err := s.Upsert(ctx, 14, ScheduleRow{
+		Scope: scopePanel, Key: key, Cron: "*/2 * * * *", Timezone: "Europe/Moscow", Enabled: false,
+		Spec: json.RawMessage(`{"queries":[{"refId":"A"}]}`), NextRunAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	backdateRow(t, ctx, s, 14, scopePanel, key, 30*24*time.Hour)
+
+	if res := sweep(t, ctx, s); res != (sweepResult{}) {
+		t.Fatalf("sweep collected a disabled row: %+v", res)
+	}
+	row, ok, err := s.Row(ctx, 14, scopePanel, key)
+	if err != nil || !ok {
+		t.Fatalf("row: ok=%v err=%v", ok, err)
+	}
+	if row.Enabled || row.Cron != "*/2 * * * *" || row.Timezone != "Europe/Moscow" {
+		t.Fatalf("the admin's disabled row changed: %+v", row)
+	}
+}

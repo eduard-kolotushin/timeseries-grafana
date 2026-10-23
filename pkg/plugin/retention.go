@@ -42,7 +42,8 @@ DELETE FROM forecast.snapshots WHERE updated_at < now() - $1::interval
 // condition reduces to the two clocks the worker itself updates.
 const deleteIdleRowsSQL = `
 DELETE FROM forecast.retrain r
-WHERE r.next_run_at IS NOT NULL
+WHERE r.enabled
+  AND r.next_run_at IS NOT NULL
   AND r.next_run_at < now() - $1::interval
   AND (r.last_run_at IS NULL OR r.last_run_at < now() - $1::interval)
   AND (r.claimed_until IS NULL OR r.claimed_until < now())
