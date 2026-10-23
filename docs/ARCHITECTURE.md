@@ -310,7 +310,7 @@ Mixed overlay + Forecast query: the overlay plots POST forecast only. The Foreca
 
 ## Horizon clock
 
-Same as `timeseries-forecast`: grid `last + k * step` for `k ≥ 1`, clipped to the request `[from, to]`.
+Same as `timeseries-forecast`: grid `last + k * step` for any integer `k`, clipped to the request `[from, to]`. `k ≤ 0` is the final fitted state at or before the training last (backcast): values from the snapshot's state, bands only for the baseline's per-bucket SE, `null` bounds for every other model. The point cap counts the signed range.
 
 ## Load
 

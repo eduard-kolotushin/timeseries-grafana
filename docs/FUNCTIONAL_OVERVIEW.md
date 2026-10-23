@@ -247,7 +247,7 @@ snapshot, and the next tick gave the row back with the deployment default cron (
 | **Who can use** | **Alert rule** (Grafana alerting) or any datasource query. No Admin gate; the datasource's own jsonData carries the store (F20). |
 | **How configured** | Datasource provisioned jsonData — `storeUrl` as one DSN, or field-wise `storeHost`/`storePort`/… (the datasource's config editor renders only a read-only list of the `store*` keys it finds, never a value; F20) — or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
 | **Input params** | Query `{kind: "forecast"\|"lower"\|"upper", cacheKey, level?}` inside a normal `/api/ds/query` body with `from`/`to`. Each query's JSON is capped at 64 KiB (`maxQueryJSONBytes`); a larger one is rejected rather than decoded. |
-| **Expected result** | 200 with one frame per query and real values; a miss is an error: `needTrain: train on the Forecast overlay panel first`; unknown `kind` → 400. |
+| **Expected result** | 200 with one frame per query and real values; the same signed window as F2, so a range at or before the snapshot's last timestamp returns in-sample points (baseline bands; `null` bounds for other models); a miss is an error: `needTrain: train on the Forecast overlay panel first`; unknown `kind` → 400. |
 
 **Positive — Kubernetes:** `POST /api/ds/query` with `{"kind":"forecast","cacheKey":"1a…1a","level":0.95}` →
 200, `frames=1`, `values=60`; `{"kind":"upper"}` → 200, 60 values.
