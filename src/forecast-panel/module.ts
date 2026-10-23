@@ -13,6 +13,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       name: 'Model',
       description: 'Univariate model from timeseries-forecast',
       defaultValue: 'holt',
+      category: ['Training'],
       settings: {
         options: [
           { value: 'naive', label: 'Naive' },
@@ -25,20 +26,12 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
         ],
       },
     })
-    .addCustomEditor({
-      id: 'forecastRange',
-      path: 'forecastRange',
-      name: 'Forecast range',
-      description: 'From and To for forecast timestamps. Auto starts at dashboard now and lasts a model-based duration.',
-      defaultValue: { from: '', to: '' },
-      editor: TrainRangeEditor,
-      settings: { kind: 'forecast' },
-    })
     .addNumberInput({
       path: 'alpha',
       name: 'Alpha',
       description: 'Level smoothing (SES and Holt)',
       defaultValue: 0.8,
+      category: ['Training'],
       settings: { min: 0.001, max: 1, step: 0.05 },
       showIf: (opts) => opts.model === 'ses' || opts.model === 'holt',
     })
@@ -47,6 +40,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       name: 'Beta',
       description: 'Trend smoothing (Holt)',
       defaultValue: 0.2,
+      category: ['Training'],
       settings: { min: 0.001, max: 1, step: 0.05 },
       showIf: (opts) => opts.model === 'holt',
     })
@@ -54,6 +48,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'period',
       name: 'Seasonal period',
       defaultValue: 7,
+      category: ['Training'],
       settings: { min: 1, integer: true },
       showIf: (opts) => opts.model === 'seasonal',
     })
@@ -62,6 +57,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       name: 'Seasonality',
       description: 'Hour of day, day of week, hour of week, or minute of week',
       defaultValue: 'hour',
+      category: ['Training'],
       settings: {
         options: [
           { value: 'hour', label: 'Hour' },
@@ -77,6 +73,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       name: 'Calendar',
       description: 'Optional production calendar. Only years present in the file apply (RU is 2026); other years behave as Off.',
       defaultValue: '',
+      category: ['Training'],
       settings: {
         options: [
           { value: '', label: 'Off' },
@@ -85,26 +82,13 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       },
       showIf: (opts) => opts.model === 'baseline',
     })
-    .addBooleanSwitch({
-      path: 'showInterval',
-      name: 'Show prediction interval',
-      description: 'Overlay a Hyndman Gaussian band on the forecast',
-      defaultValue: true,
-    })
-    .addNumberInput({
-      path: 'interval',
-      name: 'Interval coverage',
-      description: 'Coverage in (0, 1). 0 hides the band.',
-      defaultValue: 0.95,
-      settings: { ...COVERAGE_SETTINGS },
-      showIf: (opts) => opts.showInterval !== false,
-    })
     .addCustomEditor({
       id: 'trainRange',
       path: 'trainRange',
       name: 'Training period',
       description: 'From and To for the fit, independent of the panel time range. Opens above the control. Auto uses the model window.',
       defaultValue: { from: '', to: '' },
+      category: ['Training'],
       editor: TrainRangeEditor,
       settings: { kind: 'train' },
     })
@@ -114,13 +98,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       description:
         'Duration lookback (e.g. 21d, or a bare day count) from before the Training period picker. Only a panel that never saved a training period trains from it, and the cacheKey always includes it, so keep a legacy panel’s stored value to reproduce the key its alert query carries. Empty is Auto: the model window.',
       defaultValue: '',
-    })
-    .addNumberInput({
-      path: 'maxInflightLoads',
-      name: 'Max in-flight loads',
-      description: 'How many overlay forecast loads this panel may run at once. Extra refreshes cancel the oldest. Minimum 1.',
-      defaultValue: 1,
-      settings: { min: 1, integer: true },
+      category: ['Training'],
     })
     // Button-only editors. They never call onChange; each has its own unused
     // path so a future onChange cannot clobber a real option like trainRange.
@@ -129,7 +107,42 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'retrainAction',
       name: 'Saved model',
       description: 'Reuse the fitted snapshot until Retrain or a query, model, or training-period change. Auto train windows do not re-query as time moves.',
+      category: ['Training'],
       editor: RetrainEditor,
+    })
+    .addCustomEditor({
+      id: 'forecastRange',
+      path: 'forecastRange',
+      name: 'Forecast range',
+      description: 'From and To for forecast timestamps. Auto starts at dashboard now and lasts a model-based duration.',
+      defaultValue: { from: '', to: '' },
+      category: ['Forecast'],
+      editor: TrainRangeEditor,
+      settings: { kind: 'forecast' },
+    })
+    .addNumberInput({
+      path: 'interval',
+      name: 'Interval coverage',
+      description: 'Coverage in (0, 1). 0 hides the band.',
+      defaultValue: 0.95,
+      category: ['Forecast'],
+      settings: { ...COVERAGE_SETTINGS },
+      showIf: (opts) => opts.showInterval !== false,
+    })
+    .addBooleanSwitch({
+      path: 'showInterval',
+      name: 'Show prediction interval',
+      description: 'Overlay a Hyndman Gaussian band on the forecast',
+      defaultValue: true,
+      category: ['Overlay'],
+    })
+    .addNumberInput({
+      path: 'maxInflightLoads',
+      name: 'Max in-flight loads',
+      description: 'How many overlay forecast loads this panel may run at once. Extra refreshes cancel the oldest. Minimum 1.',
+      defaultValue: 1,
+      category: ['Overlay'],
+      settings: { min: 1, integer: true },
     })
     .addCustomEditor({
       id: 'alertSeries',

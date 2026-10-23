@@ -25,6 +25,33 @@ function panelOptions() {
   return builder.getItems();
 }
 
+describe('panel option groups', () => {
+  it('registers every option under its group, in Training → Forecast → Overlay → Alerting order', () => {
+    // Grafana renders each first-level category as its own section, in the order the
+    // category first appears here; this sequence is the whole pane contract.
+    const items = panelOptions().map((option) => ({ path: option.path, category: option.category?.[0] ?? null }));
+    expect(items).toEqual([
+      { path: 'model', category: 'Training' },
+      { path: 'alpha', category: 'Training' },
+      { path: 'beta', category: 'Training' },
+      { path: 'period', category: 'Training' },
+      { path: 'season', category: 'Training' },
+      { path: 'calendar', category: 'Training' },
+      { path: 'trainRange', category: 'Training' },
+      { path: 'lookback', category: 'Training' },
+      { path: 'retrainAction', category: 'Training' },
+      { path: 'forecastRange', category: 'Forecast' },
+      { path: 'interval', category: 'Forecast' },
+      { path: 'showInterval', category: 'Overlay' },
+      { path: 'maxInflightLoads', category: 'Overlay' },
+      { path: 'alertSeries', category: 'Alerting' },
+      { path: 'alertLookback', category: 'Alerting' },
+      { path: 'alertTolerance', category: 'Alerting' },
+      { path: 'alertAction', category: 'Alerting' },
+    ]);
+  });
+});
+
 describe('the legacy lookback option', () => {
   it('is editable, so a panel written before the training-period picker can be reproduced', () => {
     const item = panelOptions().find((option) => option.path === 'lookback');
