@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
@@ -156,30 +159,38 @@ func TestHttpStatusForLoadErrors(t *testing.T) {
 	}
 }
 
-// TestCheckForecastWindowSignedGrid pins the plugin's mirror of the library's
-// signed window arithmetic: k <= 0 is a backcast on the same grid, so a past
-// window is counted instead of being clamped to k >= 1 (which would let an
-// arbitrarily wide past window through to the library).
+// TestCheckForecastWindowSignedGrid pins the plugin's adapter over
+// forecast.WindowBounds: k <= 0 is a backcast on the same grid, so a past window
+// is counted instead of being clamped to k >= 1 (which would let an arbitrarily
+// wide past window through), and only the cap becomes the plugin's 413.
 func TestCheckForecastWindowSignedGrid(t *testing.T) {
 	const last, step = int64(1000), int64(100)
 	tests := []struct {
 		name        string
+		step        int64
 		from, to    int64
 		wantTooMany bool
 	}{
-		{"future window", 1100, 1250, false},            // k = 1..2
-		{"straddling the last point", 850, 1250, false}, // k = -1..2
-		{"past only", 500, 900, false},                  // k = -5..-1
-		{"exactly the last point", 1000, 1000, false},   // k = 0
-		{"off-grid in the past", 950, 950, false},       // no grid point, the library answers
-		{"inverted", 1200, 1100, false},
-		{"one over the cap forward", 1100, last + step*(maxForecastPoints+1), true},
-		{"one over the cap backward", last - step*maxForecastPoints, 1000, true},
-		{"exactly the cap backward", last - step*(maxForecastPoints-1), 1000, false},
+		{"future window", step, 1100, 1250, false},            // k = 1..2
+		{"straddling the last point", step, 850, 1250, false}, // k = -1..2
+		{"past only", step, 500, 900, false},                  // k = -5..-1
+		{"exactly the last point", step, 1000, 1000, false},   // k = 0
+		{"off-grid in the past", step, 950, 950, false},       // no grid point, the library answers
+		{"inverted", step, 1200, 1100, false},
+		{"one over the cap forward", step, 1100, last + step*(maxForecastPoints+1), true},
+		{"one over the cap backward", step, last - step*maxForecastPoints, 1000, true},
+		{"exactly the cap backward", step, last - step*(maxForecastPoints-1), 1000, false},
+		// A zero step has no grid; a step wider than a time.Duration cannot be
+		// converted, so the adapter leaves both to the fit/library.
+		{"zero step", 0, 850, 1250, false},
+		{"step wider than a Duration", math.MaxInt64, 0, 2000, false},
+		// time.Time.Sub saturates at about 292 years: the library refuses instead
+		// of emitting points from a clamped distance.
+		{"saturated millisecond bounds", 1, math.MinInt64, math.MaxInt64, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := checkForecastWindow(last, step, tt.from, tt.to)
+			err := checkForecastWindow(last, tt.step, tt.from, tt.to)
 			if tt.wantTooMany {
 				if !errors.Is(err, errWindowTooManyPoints) {
 					t.Fatalf("err = %v, want errWindowTooManyPoints", err)
@@ -190,6 +201,33 @@ func TestCheckForecastWindowSignedGrid(t *testing.T) {
 				t.Fatalf("err = %v, want nil", err)
 			}
 		})
+	}
+}
+
+// TestCheckForecastWindowMatchesLibrary sweeps millisecond windows and requires
+// the adapter's answer to be exactly the library's: only a cap error becomes the
+// plugin's 413, every other library answer (empty, inverted, no step) is left to
+// the call that follows.
+func TestCheckForecastWindowMatchesLibrary(t *testing.T) {
+	rng := rand.New(rand.NewPCG(3, 5))
+	steps := []int64{1, 10, 1000, 60_000, 3_600_000}
+	const tenYearsMs = int64(10 * 365 * 24 * 60 * 60 * 1000)
+	for i := range 4000 {
+		lastMs := rng.Int64N(4_000_000_000_000) - 2_000_000_000_000
+		step := steps[rng.IntN(len(steps))]
+		fromMs := lastMs + rng.Int64N(tenYearsMs) - tenYearsMs/2
+		toMs := lastMs + rng.Int64N(tenYearsMs) - tenYearsMs/2
+
+		_, _, libErr := forecast.WindowBounds(
+			time.UnixMilli(lastMs),
+			time.Duration(step)*time.Millisecond,
+			time.UnixMilli(fromMs),
+			time.UnixMilli(toMs),
+		)
+		wantCap := errors.Is(libErr, forecast.ErrTooManyPoints)
+		if got := errors.Is(checkForecastWindow(lastMs, step, fromMs, toMs), errWindowTooManyPoints); got != wantCap {
+			t.Fatalf("iter %d: plugin cap=%v, library err=%v (last=%d step=%d from=%d to=%d)", i, got, libErr, lastMs, step, fromMs, toMs)
+		}
 	}
 }
 

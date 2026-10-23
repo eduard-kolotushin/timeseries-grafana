@@ -426,6 +426,32 @@ func TestQueryDataBackcast(t *testing.T) {
 		if v, ok := lower.Frames[0].Fields[1].At(0).(*float64); !ok || math.Abs(*v-wantLo) > 1e-9 {
 			t.Fatalf("lower = %v, want %v", lower.Frames[0].Fields[1].At(0), wantLo)
 		}
+		upper := run(t, key, "upper", 0.95, priorMonday, last)
+		if upper.Error != nil {
+			t.Fatalf("error=%v", upper.Error)
+		}
+		wantHi := 10 + math.Sqrt2*math.Erfinv(0.95)*2*math.Sqrt(1.5)
+		if v, ok := upper.Frames[0].Fields[1].At(0).(*float64); !ok || math.Abs(*v-wantHi) > 1e-9 {
+			t.Fatalf("upper = %v, want %v", upper.Frames[0].Fields[1].At(0), wantHi)
+		}
+	})
+
+	// The alerting/backtest use case: a window wholly before the snapshot's last
+	// timestamp restores the same per-bucket state, not a needTrain or an error.
+	t.Run("a fully past window serves the buckets", func(t *testing.T) {
+		got := run(t, key, "forecast", 0, priorMonday, priorMonday.Add(time.Hour))
+		if got.Error != nil {
+			t.Fatalf("error=%v", got.Error)
+		}
+		field := got.Frames[0].Fields[1]
+		if field.Len() != 2 {
+			t.Fatalf("len=%d, want 2", field.Len())
+		}
+		for i, want := range []float64{10, 1} {
+			if v, ok := field.At(i).(*float64); !ok || *v != want {
+				t.Fatalf("point %d = %v, want %v", i, field.At(i), want)
+			}
+		}
 	})
 
 	holtKey := strings.Repeat("ef", 32)
@@ -455,6 +481,22 @@ func TestQueryDataBackcast(t *testing.T) {
 			t.Fatalf("error=%v", got.Error)
 		}
 		if got.Status != backend.StatusBadRequest {
+			t.Fatalf("status=%v", got.Status)
+		}
+	})
+
+	// The cap is symmetric on the restore path too: the snapshot's own grid
+	// bounds a backcast before Restore or any forecast allocation.
+	capKey := strings.Repeat("12", 32)
+	seedSnapshot(t, store, orgID, capKey, ForecastRequest{
+		Times: []int64{0, 1}, Values: []nullableFloat{1, 2}, Model: "naive",
+	})
+	t.Run("an over-wide past window is 413", func(t *testing.T) {
+		got := run(t, capKey, "forecast", 0, time.UnixMilli(1-maxForecastPoints), time.UnixMilli(1))
+		if got.Error == nil || !strings.Contains(got.Error.Error(), errWindowTooManyPoints.Error()) {
+			t.Fatalf("error=%v", got.Error)
+		}
+		if got.Status != backend.Status(413) {
 			t.Fatalf("status=%v", got.Status)
 		}
 	})

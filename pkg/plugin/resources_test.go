@@ -950,6 +950,105 @@ func TestForecastInSampleWindow(t *testing.T) {
 			t.Fatalf("status=%d body=%s", status, raw)
 		}
 	})
+
+	// The use case behind the feature: the picker holds a window over the drawn
+	// history, so the backend must serve the fitted state across it.
+	t.Run("a picker window over the whole history", func(t *testing.T) {
+		from := last - (7 * 24 * time.Hour).Milliseconds()
+		status, raw := call(t, ForecastRequest{
+			Times: times, Values: []nullableFloat{8, 1, 12, 1},
+			Model: "baseline", Season: "hour", Level: 0.95,
+			From: from, To: last,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Times) != 169 || got.Times[0] != from || got.Times[len(got.Times)-1] != last {
+			t.Fatalf("times = %d points, first=%d last=%d", len(got.Times), got.Times[0], got.Times[len(got.Times)-1])
+		}
+		// Prior Tuesday 11:00 shares the workday 11:00 bucket (values 1 and 1).
+		if got.Values[0] != 1 || math.IsNaN(float64(got.Lower[0])) || float64(got.Lower[0]) != 1 {
+			t.Fatalf("first point = %v bounds %v %v, want 1 and a zero-width band", got.Values[0], got.Lower[0], got.Upper[0])
+		}
+	})
+
+	t.Run("a window entirely before the training range", func(t *testing.T) {
+		status, raw := call(t, ForecastRequest{
+			Times: times, Values: []nullableFloat{8, 1, 12, 1},
+			Model: "baseline", Season: "hour", Level: 0.95,
+			From: priorMonday, To: priorMonday + time.Hour.Milliseconds(),
+		})
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Times) != 2 || got.Values[0] != 10 || got.Values[1] != 1 {
+			t.Fatalf("times=%v values=%v, want two points 10 and 1", got.Times, got.Values)
+		}
+	})
+
+	t.Run("a window that straddles the training range", func(t *testing.T) {
+		to := last + (2 * time.Hour).Milliseconds()
+		status, raw := call(t, ForecastRequest{
+			Times: times, Values: []nullableFloat{8, 1, 12, 1},
+			Model: "baseline", Season: "hour", Level: 0.95,
+			From: priorMonday, To: to,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Times) != 196 || got.Times[0] != priorMonday || got.Times[len(got.Times)-1] != to {
+			t.Fatalf("times = %d points, first=%d last=%d, want 196 through %d", len(got.Times), got.Times[0], got.Times[len(got.Times)-1], to)
+		}
+		if got.Values[0] != 10 {
+			t.Fatalf("backcast half starts at %v, want the 10:00 bucket mean 10", got.Values[0])
+		}
+	})
+
+	// The cap is symmetric: an over-wide past window is refused before any fit,
+	// not discovered after a billion-point allocation.
+	t.Run("a past window over the cap is refused", func(t *testing.T) {
+		status, raw := call(t, ForecastRequest{
+			Times: []int64{0, 1}, Values: []nullableFloat{1, 2},
+			Model: "naive", From: 1 - maxForecastPoints, To: 1,
+		})
+		if status != http.StatusRequestEntityTooLarge || !strings.Contains(string(raw), errWindowTooManyPoints.Error()) {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+
+	t.Run("a one-point series fails like the fit", func(t *testing.T) {
+		status, raw := call(t, ForecastRequest{
+			Times: []int64{0}, Values: []nullableFloat{1},
+			Model: "naive", From: 0, To: 0,
+		})
+		if status != http.StatusBadRequest || !strings.Contains(string(raw), forecast.ErrNoFrequency.Error()) {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+
+	// A step at the Duration edge must not overflow the adapter; the library's
+	// saturation answers, and the process stays up.
+	t.Run("an unrepresentable step is left to the library", func(t *testing.T) {
+		status, raw := call(t, ForecastRequest{
+			Times: []int64{0, math.MaxInt64}, Values: []nullableFloat{1, 2},
+			Model: "naive", From: 0, To: 0,
+		})
+		if status != http.StatusRequestEntityTooLarge || !strings.Contains(string(raw), errWindowTooManyPoints.Error()) {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
 }
 
 // A cached load is bounded by the snapshot's own grid, so a far window is refused

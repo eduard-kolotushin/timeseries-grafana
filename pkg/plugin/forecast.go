@@ -134,51 +134,32 @@ func (f *nullableFloat) UnmarshalJSON(b []byte) error {
 }
 
 // checkForecastWindow rejects a requested [from, to] window that would make the
-// model emit more than maxForecastPoints points. It mirrors the library's signed
-// grid arithmetic (k0 = ceil((from-last)/step), k1 = floor((to-last)/step), both
-// any sign because k <= 0 is a backcast), computed in milliseconds, so it is
-// neither a false rejection nor a leak: the count is exact, and an empty window
-// is left to ForecastRange's ErrEmptyRange (which allocates nothing). Without
-// this guard a single request with a far `to` makes ForecastRange allocate a
-// slice of billions of points and the process dies with no error surfaced. The
-// library exports the same bound (forecast.MaxForecastPoints) and the same error
-// (forecast.ErrTooManyPoints), which httpStatusFor maps to this same 413, so a
-// path that reaches the library first is answered identically. The library owns
-// the saturation and |k|*step bounds; this mirror only caps the point count.
+// model emit more than maxForecastPoints points. The bound is
+// forecast.WindowBounds — the same signed grid arithmetic ForecastRange applies,
+// where k <= 0 is a backcast — so this pre-flight cannot drift from the library.
+// An empty or inverted window is left to the later ForecastRange call (it
+// allocates nothing), and only the point cap is answered here; the library
+// enforces the same cap, and httpStatusFor maps its ErrTooManyPoints to this
+// same 413. Without this guard a single request with a far `to` makes
+// ForecastRange allocate a slice of billions of points and the process dies with
+// no error surfaced.
 func checkForecastWindow(lastMs, stepMs, fromMs, toMs int64) error {
-	if stepMs <= 0 {
+	if stepMs <= 0 || stepMs > math.MaxInt64/int64(time.Millisecond) {
+		// A non-positive step has no grid, and one wider than a time.Duration
+		// cannot be converted without overflow: the fit (whose step saturates at
+		// the same edge) answers, and its ForecastRange applies the bound.
 		return nil
 	}
-	k0 := ceilDiv(fromMs-lastMs, stepMs)
-	k1 := floorDiv(toMs-lastMs, stepMs)
-	if k1 < k0 {
-		return nil
-	}
-	if k1-k0+1 > int64(maxForecastPoints) {
+	_, _, err := forecast.WindowBounds(
+		time.UnixMilli(lastMs),
+		time.Duration(stepMs)*time.Millisecond,
+		time.UnixMilli(fromMs),
+		time.UnixMilli(toMs),
+	)
+	if errors.Is(err, forecast.ErrTooManyPoints) {
 		return errWindowTooManyPoints
 	}
 	return nil
-}
-
-// ceilDiv is the library's ceilDuration on a millisecond grid: a signed exact
-// ceiling for den > 0 (positive remainders round up; negative ones already
-// truncate toward the ceiling).
-func ceilDiv(num, den int64) int64 {
-	q := num / den
-	if num > 0 && num%den != 0 {
-		q++
-	}
-	return q
-}
-
-// floorDiv is the library's floorDuration on a millisecond grid: a signed
-// floor for den > 0 (negative remainders round down).
-func floorDiv(num, den int64) int64 {
-	q := num / den
-	if num < 0 && num%den != 0 {
-		q--
-	}
-	return q
 }
 
 // checkForecastWindowRequest bounds the fit paths: the grid a response is emitted

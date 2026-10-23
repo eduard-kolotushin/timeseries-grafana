@@ -329,6 +329,16 @@ describe('resolveForecastWindow', () => {
     });
   });
 
+  // The panel's use case: the picker may hold a window over the drawn history,
+  // and the backend backcasts it — the resolver must not clamp it to now.
+  it('keeps an explicit past range instead of clamping it to now', () => {
+    const from = '2026-08-20T00:00:00.000Z';
+    const to = '2026-08-21T00:00:00.000Z';
+    expect(
+      resolveForecastWindow({ model: 'baseline', season: 'hour', forecastRange: { from, to } }, nowMs, 'utc')
+    ).toEqual({ fromMs: Date.parse(from), toMs: Date.parse(to) });
+  });
+
   it('marks an inverted range invalid instead of falling back to Auto', () => {
     const w = resolveForecastWindow(
       { model: 'holt', forecastRange: { from: 'now', to: 'now-1h' } },

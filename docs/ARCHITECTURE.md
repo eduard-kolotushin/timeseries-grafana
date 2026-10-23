@@ -312,6 +312,8 @@ Mixed overlay + Forecast query: the overlay plots POST forecast only. The Foreca
 
 Same as `timeseries-forecast`: grid `last + k * step` for any integer `k`, clipped to the request `[from, to]`. `k ≤ 0` is the final fitted state at or before the training last (backcast): values from the snapshot's state, bands only for the baseline's per-bucket SE, `null` bounds for every other model. The point cap counts the signed range.
 
+The fit and `QueryData` pre-flights call `forecast.WindowBounds` — the library's own computation — so the plugin does not re-implement the signed `ceil`/`floor` arithmetic or its limits; it converts the millisecond request to `time.Time`/`time.Duration`, maps `ErrTooManyPoints` to the local 413, and leaves an empty or inverted window to the `ForecastRange` call that follows.
+
 ## Load
 
 `gpx_forecast` is a separate process from Grafana, but a large train body or many concurrent Fit / `ForecastRange` calls can still OOM the plugin or stall Grafana’s plugin proxy. v11 bounds that:
