@@ -14,15 +14,15 @@ function Home() {
         <p>
           Mixed query A (metric) plus query B (Forecast datasource) is supported on the overlay. The overlay fits and
           plots the metric only; Forecast datasource frames are not fitted or drawn there. To plot Restore next to the
-          metric, use Grafana Time series. After training, fill the Forecast query editor yourself (model, train
-          strings, series name, source query). Copy source from query A is optional and copies the source fingerprint
-          only.
+          metric, use Grafana Time series. After training, copy a series&apos; baseline cache key from the panel&apos;s
+          Baseline keys option into a Forecast query&apos;s Baseline cache key field; the query editor has no model,
+          train-window or series fields.
         </p>
         <p>
           For Grafana alerting, query A stays the live metric and query B Restores the saved snapshot. Save the dashboard,
-          then use overlay options <strong>New alert rule</strong> to open Grafana&apos;s alerting editor with the live
-          panel queries (including Mixed Forecast rows). Grafana still shows the data-pane Alert tab only for Time series
-          and Graph. Panel menu More → New alert rule and Alerting → New alert rule remain.
+          then use overlay options <strong>New alert rule</strong>: it copies the metric queries and adds one key-only
+          Forecast query. Grafana still shows the data-pane Alert tab only for Time series and Graph. Panel menu More →
+          New alert rule and Alerting → New alert rule remain.
         </p>
         <p>
           High load is bounded: the backend rejects oversize train bodies and returns 429 when too many Fit /

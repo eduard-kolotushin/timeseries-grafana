@@ -10,7 +10,7 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`); the rows are the loa
 | `src/forecast-panel/` | Overlay visualization |
 | `src/forecast-panel/trainRewrite.ts` | Type-keyed training-query rewrite (Prom / OpenSearch / Postgres / Druid) |
 | `src/forecast-panel/extract.ts` | Time+numeric series from frames; train ↔ visible match |
-| `src/forecast-panel/cacheKey.ts` | Train-cache fingerprint (SHA-256); overlay and forecast datasource share this. SQL/expr identity; time macros match interpolated panel timestamps |
+| `src/forecast-panel/cacheKey.ts` | Train-cache fingerprint (SHA-256); the overlay fits by it and the option editors reproduce it. SQL/expr identity; time macros match interpolated panel timestamps |
 | `src/forecast-panel/sha256.ts` | WebCrypto digest with a pure-JS fallback; `crypto.subtle` is missing on plain-HTTP (non-localhost) Grafana |
 | `src/forecast-panel/abortable.ts` | Observable → Promise that unsubscribes on `AbortSignal`, so an aborted overlay load cancels the HTTP request (`postResource`, train query) |
 | `src/forecast-panel/mixed.ts` | Metric vs Forecast datasource targets/frames on Mixed overlay |
@@ -29,7 +29,6 @@ Grafana app plugin (frontend in `src/`, backend in `pkg/`); the rows are the loa
 | `src/forecast-panel/module.ts` | Panel registration: the option editors and `COVERAGE_SETTINGS` defaults |
 | `src/forecast-panel/retrain.ts` | Panel-side retrain queue: per-dashboard/panel-key dedupe plus a Retrain-all generation the overlay's next load consumes |
 | `src/forecast-panel/types.ts` | `ForecastOptions` and the model/season/calendar/severity unions the panel and the datasource share |
-| `src/forecast-datasource/queryModel.ts` | Forecast query ↔ `CacheKeyInput` bridge: the datasource computes the same `cacheKey` the overlay stored |
 | `conf/forecast.ini.template` | CI/CD merge snippet for `grafana.ini` (`[plugin.eduardkolotushin-forecast-app]` and `[plugin.eduardkolotushin-forecast-datasource]`) |
 | `pkg/vault/` | Stdlib Vault client (token / AppRole / Kubernetes auth, `pki/issue`), the half-life certificate manager, and the TLS helpers: rotating transport, pgx client config, local file pairs, PEM-as-path rejection |
 | `pkg/plugin/vault.go` | `vaultFromLookup`: the env / `GF_PLUGIN_*` / grafana.ini / jsonData chain for Vault and the per-component certificate settings; a configuration error still returns the partial component view so the store fails closed |

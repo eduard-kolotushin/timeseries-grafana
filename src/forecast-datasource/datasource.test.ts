@@ -20,8 +20,8 @@ function query(partial: Partial<ForecastDataQuery>): ForecastDataQuery {
 
 describe('filterQuery', () => {
   const cases: Array<[string, Partial<ForecastDataQuery>, boolean]> = [
-    // The editor computes `cacheKey` asynchronously, so a row that has none yet is still a
-    // real query: the backend answers it with `needTrain` instead of the panel showing `No data`.
+    // A row that has no key yet is still a real query: the backend answers it with
+    // `needTrain` instead of the panel showing `No data`.
     ['a row whose cacheKey has not landed yet', {}, true],
     ['a keyed row', { cacheKey: 'ab'.repeat(32) }, true],
     ['a hidden row', { cacheKey: 'ab'.repeat(32), hide: true }, false],
