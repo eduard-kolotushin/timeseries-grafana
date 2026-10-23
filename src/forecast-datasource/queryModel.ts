@@ -16,7 +16,6 @@ export function optionsFromQuery(query: ForecastDataQuery): ForecastOptions {
     interval: query.level ?? defaultForecastQuery.level,
     trainRange: query.trainRange ?? { from: '', to: '' },
     forecastRange: { from: '', to: '' },
-    lookback: query.lookback,
   };
 }
 
@@ -63,7 +62,6 @@ export function queryFromOptions(input: {
     calendar: options?.calendar ?? defaultForecastQuery.calendar,
     level: options?.interval ?? defaultForecastQuery.level,
     trainRange: options?.trainRange ?? defaultForecastQuery.trainRange,
-    lookback: options?.lookback,
     sourceTargets: input.sourceTargets,
   };
   if (input.seriesLabels && Object.keys(input.seriesLabels).length > 0) {

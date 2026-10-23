@@ -1,9 +1,6 @@
 import { PanelOptionsEditorBuilder, standardEditorsRegistry, StandardEditorContext } from '@grafana/data';
-import { resolveTrainWindow } from './lookback';
 import { plugin } from './module';
 import { ForecastOptions } from './types';
-
-const DAY_MS = 86_400_000;
 
 // Grafana core registers the standard option editors when its app boots; the options
 // builder resolves `addTextInput`/`addSelect`/… against that registry, so a unit test has
@@ -38,7 +35,6 @@ describe('panel option groups', () => {
       { path: 'season', category: 'Training' },
       { path: 'calendar', category: 'Training' },
       { path: 'trainRange', category: 'Training' },
-      { path: 'lookback', category: 'Training' },
       { path: 'retrainAction', category: 'Training' },
       { path: 'forecastRange', category: 'Forecast' },
       { path: 'interval', category: 'Forecast' },
@@ -49,32 +45,5 @@ describe('panel option groups', () => {
       { path: 'alertTolerance', category: 'Alerting' },
       { path: 'alertAction', category: 'Alerting' },
     ]);
-  });
-});
-
-describe('the legacy lookback option', () => {
-  it('is editable, so a panel written before the training-period picker can be reproduced', () => {
-    const item = panelOptions().find((option) => option.path === 'lookback');
-    // The cacheKey always includes `lookback`, so without an editor a stored value can
-    // never be put back and the key its alert query carries is unreachable from the UI.
-    expect(item).toBeDefined();
-  });
-
-  // The value the option edits is the one the panel path reads: with no saved training
-  // period, `resolveTrainWindow` resolves the window from exactly this field.
-  const now = Date.UTC(2026, 0, 8);
-  it.each<[string, number]>([
-    ['21d', 21 * DAY_MS],
-    ['5', 5 * DAY_MS],
-    ['auto', 14 * DAY_MS],
-    ['', 14 * DAY_MS],
-    ['nonsense', 14 * DAY_MS],
-  ])('lookback %s resolves a window %s ms wide', (lookback, lookbackMs) => {
-    expect(resolveTrainWindow({ model: 'baseline', season: 'hour', lookback }, now)).toEqual({
-      fromMs: now - lookbackMs,
-      toMs: now,
-      relative: true,
-      lookbackMs,
-    });
   });
 });

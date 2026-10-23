@@ -50,22 +50,12 @@ const QUICK_FUTURE: Array<{ from: string; to: string; display: string }> = [
 
 export type RangeEditorSettings = { kind?: 'train' | 'forecast' };
 
-function pickerRaw(
-  kind: 'train' | 'forecast',
-  value: TrainTimeRange | undefined,
-  lookback: string | undefined,
-  auto: string
-): TrainTimeRange {
+function pickerRaw(kind: 'train' | 'forecast', value: TrainTimeRange | undefined, auto: string): TrainTimeRange {
   if (value != null && !isExplicitAutoTrainRange(value)) {
     return value;
   }
   if (kind === 'forecast') {
     return { from: 'now', to: `now+${auto}` };
-  }
-  const override = lookback?.trim();
-  if (value == null && override && override.toLowerCase() !== 'auto') {
-    const duration = /^\d+(\.\d+)?$/.test(override) ? `${override}d` : override;
-    return { from: `now-${duration}`, to: 'now' };
   }
   return { from: `now-${auto}`, to: 'now' };
 }
@@ -111,7 +101,7 @@ export const TrainRangeEditor = ({
       ? autoForecastHorizon(context.options?.model ?? 'holt', context.options?.season)
       : autoLookback(context.options?.model ?? 'holt', context.options?.season);
   const isAuto = value == null || isExplicitAutoTrainRange(value);
-  const raw = pickerRaw(kind, value, context.options?.lookback, auto);
+  const raw = pickerRaw(kind, value, auto);
   const range = toPickerValue(raw, timeZone);
 
   const triggerRef = useRef<HTMLDivElement>(null);
@@ -127,12 +117,12 @@ export const TrainRangeEditor = ({
   // Opening the picker reloads the draft fields from the panel's current value.
   // That is a render-time derivation, not an effect: setting state in an effect
   // made React render the popup twice for data it already had.
-  const draftKey = [open, value?.from, value?.to, context.options?.lookback, auto, kind].join('\u0000');
+  const draftKey = [open, value?.from, value?.to, auto, kind].join('\u0000');
   const [draftedKey, setDraftedKey] = useState(draftKey);
   if (draftedKey !== draftKey) {
     setDraftedKey(draftKey);
     if (open) {
-      const next = pickerRaw(kind, value, context.options?.lookback, auto);
+      const next = pickerRaw(kind, value, auto);
       setFrom(next.from);
       setTo(next.to);
       setSearch('');

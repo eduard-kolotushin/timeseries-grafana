@@ -19,8 +19,6 @@ export interface ForecastOptions {
   interval: number;
   trainRange: TrainTimeRange;
   forecastRange: TrainTimeRange;
-  /** @deprecated Duration lookback (`15d`); used only when `trainRange` was never saved. */
-  lookback?: string;
   /** Max overlay forecast loads in flight for this panel. Default 1, minimum 1. */
   maxInflightLoads?: number;
   /** Series the alert rule is built for. Empty means the panel's only series. */

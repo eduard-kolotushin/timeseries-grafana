@@ -177,26 +177,6 @@ export function dashboardNowMs(timeZone?: string): number {
   return dateTime().valueOf();
 }
 
-export function resolveLookbackMs(options: {
-  model: ForecastModel;
-  season?: BaselineSeason;
-  lookback?: string;
-}): number {
-  const override = options.lookback?.trim();
-  if (override && override.toLowerCase() !== 'auto') {
-    const duration = /^\d+(\.\d+)?$/.test(override) ? `${override}d` : override;
-    try {
-      const ms = rangeUtil.intervalToMs(duration);
-      if (ms > 0) {
-        return ms;
-      }
-    } catch {
-      // fall through to Auto
-    }
-  }
-  return rangeUtil.intervalToMs(autoLookback(options.model, options.season));
-}
-
 export function isExplicitAutoTrainRange(range?: TrainTimeRange): boolean {
   if (range == null) {
     return false;
@@ -253,12 +233,11 @@ export function isInvalidTrainWindow(w: TrainWindow): w is { invalid: true } {
   return 'invalid' in w;
 }
 
-/** Training from/to window. Explicit empty picker is Auto (ignores legacy `lookback`). */
+/** Training from/to window. Explicit empty picker is Auto (the model's own window). */
 export function resolveTrainWindow(
   options: {
     model: ForecastModel;
     season?: BaselineSeason;
-    lookback?: string;
     trainRange?: TrainTimeRange;
   },
   panelToMs: number,
@@ -281,10 +260,7 @@ export function resolveTrainWindow(
     // the editor, so both report the same way (see resolveForecastWindow).
     return { invalid: true };
   }
-  const lookbackMs =
-    options.trainRange != null && isExplicitAutoTrainRange(options.trainRange)
-      ? rangeUtil.intervalToMs(autoLookback(options.model, options.season))
-      : resolveLookbackMs(options);
+  const lookbackMs = rangeUtil.intervalToMs(autoLookback(options.model, options.season));
   return { fromMs: panelToMs - lookbackMs, toMs: panelToMs, relative: true, lookbackMs };
 }
 

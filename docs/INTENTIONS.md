@@ -35,7 +35,7 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 
 - Nested panel option `showInterval` (default on); coverage applies only when the switch is on (`level` `0` when off)
 - Training window independent of the panel time range: a second datasource query for `[trainFrom, trainTo]`
-- Training period is a Grafana from/to time picker (relative or absolute), same as the dashboard time picker. Clear / Auto uses a model-based window ending at the panel `to`. Dashboards that still store a duration `lookback` (`15d`, `48h`) keep that meaning until a picker range is saved. Display still follows the panel query range
+- Training period is a Grafana from/to time picker (relative or absolute), same as the dashboard time picker. Clear / Auto uses a model-based window ending at the panel `to`. A duration `lookback` from before the picker was removed; a value still stored in old dashboard JSON is ignored. Display still follows the panel query range
 - Overlay does not plot the extra training points
 
 ## v4 must-have
@@ -183,7 +183,7 @@ A complete alert rule is one click away on a trained overlay panel, and it compa
 - Overlay options **Alerting** builds a complete Grafana alert rule from the panel's own state, so no Mixed
   datasource, hand-filled Forecast row, or **Copy source from query A** press is needed: **New alert rule** copies
   the panel's metric queries and synthesizes one Forecast-datasource query from the panel's fit options (model and
-  its parameters, training range, legacy lookback), with the visible metric targets as `sourceTargets`, the chosen
+  its parameters, training range), with the visible metric targets as `sourceTargets`, the chosen
   series name, that series' labels, and the **same cacheKey** the overlay fit wrote, so the rule restores the
   trained snapshot instead of answering `needTrain`
 - **Alert series** (a select shown only when the panel offers more than one series), **Alert lookback** (default

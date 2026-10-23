@@ -21,6 +21,15 @@ const visFrom = Date.UTC(2026, 7, 20, 10, 0, 0);
 const visTo = Date.UTC(2026, 7, 27, 16, 0, 0);
 
 describe('fingerprintPayload', () => {
+  it('carries no legacy lookback slot', () => {
+    // The pre-picker duration knob was removed with its fingerprint field, which rotated
+    // every key once. Re-adding it (even as a constant) silently restores the old hash
+    // contract; a plain equality on the payload makes that visible.
+    const payload = fingerprintPayload({ targets: [], options: baseOptions, seriesName: 'up' }) as Record<string, unknown>;
+    expect(Object.keys(payload).sort()).toEqual(['datasources', 'options', 'seriesName', 'targets', 'trainFrom', 'trainTo']);
+    expect(payload).not.toHaveProperty('lookback');
+  });
+
   it('is stable when only visible range timestamps change', () => {
     const targetA = {
       refId: 'A',

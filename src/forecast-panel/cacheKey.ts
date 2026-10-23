@@ -30,7 +30,6 @@ export function fingerprintPayload(input: CacheKeyInput): unknown {
     options: fitOptions(input.options),
     trainFrom: input.options.trainRange?.from ?? '',
     trainTo: input.options.trainRange?.to ?? '',
-    lookback: input.options.lookback ?? '',
     seriesName: input.seriesName,
   });
 }

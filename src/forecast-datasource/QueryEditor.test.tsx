@@ -79,17 +79,6 @@ describe('QueryEditor', () => {
     expect(coverage).toHaveAttribute('step', String(COVERAGE_SETTINGS.step));
   });
 
-  it('carries a legacy lookback into the query the panel key is computed for', async () => {
-    const { onChange } = renderEditor(query());
-
-    fireEvent.change(screen.getByRole('textbox', { name: 'Legacy lookback' }), { target: { value: '21d' } });
-
-    await act(async () => {});
-    expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({ lookback: '21d', cacheKey: expect.stringMatching(/^[a-f0-9]{64}$/) })
-    );
-  });
-
   it('does not let a stale auto-key flush overwrite a newer edit', async () => {
     const resolvers: Array<(q: ForecastDataQuery) => void> = [];
     mockWithCacheKey.mockImplementation(

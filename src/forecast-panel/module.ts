@@ -11,7 +11,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addSelect({
       path: 'model',
       name: 'Model',
-      description: 'Univariate model from timeseries-forecast',
+      description: 'Model fitted to the training window.',
       defaultValue: 'holt',
       category: ['Training'],
       settings: {
@@ -29,7 +29,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addNumberInput({
       path: 'alpha',
       name: 'Alpha',
-      description: 'Level smoothing (SES and Holt)',
+      description: 'Level smoothing (SES, Holt), 0–1.',
       defaultValue: 0.8,
       category: ['Training'],
       settings: { min: 0.001, max: 1, step: 0.05 },
@@ -38,7 +38,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addNumberInput({
       path: 'beta',
       name: 'Beta',
-      description: 'Trend smoothing (Holt)',
+      description: 'Trend smoothing (Holt), 0–1.',
       defaultValue: 0.2,
       category: ['Training'],
       settings: { min: 0.001, max: 1, step: 0.05 },
@@ -47,6 +47,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addNumberInput({
       path: 'period',
       name: 'Seasonal period',
+      description: 'Points per seasonal cycle, e.g. 7.',
       defaultValue: 7,
       category: ['Training'],
       settings: { min: 1, integer: true },
@@ -55,7 +56,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addSelect({
       path: 'season',
       name: 'Seasonality',
-      description: 'Hour of day, day of week, hour of week, or minute of week',
+      description: 'Seasonal bucket for the baseline, e.g. minute of week for 1-minute data.',
       defaultValue: 'hour',
       category: ['Training'],
       settings: {
@@ -71,7 +72,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addSelect({
       path: 'calendar',
       name: 'Calendar',
-      description: 'Optional production calendar. Only years present in the file apply (RU is 2026); other years behave as Off.',
+      description: 'Holiday calendar for the baseline; RU covers 2026 only.',
       defaultValue: '',
       category: ['Training'],
       settings: {
@@ -86,19 +87,11 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       id: 'trainRange',
       path: 'trainRange',
       name: 'Training period',
-      description: 'From and To for the fit, independent of the panel time range. Opens above the control. Auto uses the model window.',
+      description: 'Fit window, independent of the dashboard range. Empty is Auto.',
       defaultValue: { from: '', to: '' },
       category: ['Training'],
       editor: TrainRangeEditor,
       settings: { kind: 'train' },
-    })
-    .addTextInput({
-      path: 'lookback',
-      name: 'Legacy lookback',
-      description:
-        'Duration lookback (e.g. 21d, or a bare day count) from before the Training period picker. Only a panel that never saved a training period trains from it, and the cacheKey always includes it, so keep a legacy panel’s stored value to reproduce the key its alert query carries. Empty is Auto: the model window.',
-      defaultValue: '',
-      category: ['Training'],
     })
     // Button-only editors. They never call onChange; each has its own unused
     // path so a future onChange cannot clobber a real option like trainRange.
@@ -106,7 +99,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       id: 'retrain',
       path: 'retrainAction',
       name: 'Saved model',
-      description: 'Reuse the fitted snapshot until Retrain or a query, model, or training-period change. Auto train windows do not re-query as time moves.',
+      description: 'Reuse the saved fit until Retrain or a model/training-window change.',
       category: ['Training'],
       editor: RetrainEditor,
     })
@@ -114,7 +107,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       id: 'forecastRange',
       path: 'forecastRange',
       name: 'Forecast range',
-      description: 'From and To for forecast timestamps. Auto starts at dashboard now and lasts a model-based duration.',
+      description: 'Forecast window; empty is Auto (now → now + model horizon).',
       defaultValue: { from: '', to: '' },
       category: ['Forecast'],
       editor: TrainRangeEditor,
@@ -123,7 +116,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addNumberInput({
       path: 'interval',
       name: 'Interval coverage',
-      description: 'Coverage in (0, 1). 0 hides the band.',
+      description: 'Coverage in (0, 1), e.g. 0.95. 0 hides the band.',
       defaultValue: 0.95,
       category: ['Forecast'],
       settings: { ...COVERAGE_SETTINGS },
@@ -132,14 +125,14 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addBooleanSwitch({
       path: 'showInterval',
       name: 'Show prediction interval',
-      description: 'Overlay a Hyndman Gaussian band on the forecast',
+      description: 'Draw the Gaussian prediction band.',
       defaultValue: true,
       category: ['Overlay'],
     })
     .addNumberInput({
       path: 'maxInflightLoads',
       name: 'Max in-flight loads',
-      description: 'How many overlay forecast loads this panel may run at once. Extra refreshes cancel the oldest. Minimum 1.',
+      description: 'Concurrent forecast loads; extra refreshes cancel the oldest.',
       defaultValue: 1,
       category: ['Overlay'],
       settings: { min: 1, integer: true },
@@ -148,22 +141,21 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       id: 'alertSeries',
       path: 'alertSeries',
       name: 'Alert series',
-      description:
-        'Which metric series the alert rule is for; Grafana pairs the baseline with it by label, or the rule selects it by name where the series carry no labels. Shown only when the panel has more than one.',
+      description: 'Series the rule watches; shown when the panel has more than one.',
       category: ['Alerting'],
       editor: AlertSeriesEditor,
     })
     .addTextInput({
       path: 'alertLookback',
       name: 'Alert lookback',
-      description: 'Both rule queries read now - this … now. Empty is 10m.',
+      description: 'Both rule queries read now - this … now, e.g. 10m.',
       defaultValue: '',
       category: ['Alerting'],
     })
     .addNumberInput({
       path: 'alertTolerance',
       name: 'Alert tolerance',
-      description: 'Percent deviation from the baseline the rule fires above.',
+      description: 'Percent deviation from the baseline that fires the rule.',
       defaultValue: 20,
       settings: { min: 0 },
       category: ['Alerting'],
@@ -172,8 +164,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       id: 'alertFromPanel',
       path: 'alertAction',
       name: 'New alert rule',
-      description:
-        'Build a Grafana alert rule from this panel: its metric query plus the trained baseline over now - lookback … now, with a percent-deviation threshold. Save the dashboard first. Existing rules stay on the Alerting page.',
+      description: 'Create a rule from this panel’s query and saved baseline. Save the dashboard first.',
       category: ['Alerting'],
       editor: AlertEditor,
     });

@@ -100,7 +100,6 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
     query.calendar,
     query.trainRange?.from,
     query.trainRange?.to,
-    query.lookback,
     JSON.stringify(query.sourceTargets ?? []),
   ].join('\0');
 
@@ -262,17 +261,6 @@ export function QueryEditor({ query, onChange, onRunQuery, queries }: Props) {
             value={query.trainRange?.to ?? ''}
             placeholder="Auto"
             onChange={(e) => update((q) => ({ trainRange: { ...q.trainRange, to: e.currentTarget.value } }))}
-          />
-        </InlineField>
-        <InlineField
-          label="Legacy lookback"
-          tooltip="Duration lookback (e.g. 21d, or a bare day count) from before the training-period picker. Must match the overlay panel’s Legacy lookback to share its cacheKey. Empty is Auto."
-        >
-          <Input
-            width={16}
-            value={query.lookback ?? ''}
-            placeholder="Auto"
-            onChange={(e) => update({ lookback: e.currentTarget.value })}
           />
         </InlineField>
       </InlineFieldRow>

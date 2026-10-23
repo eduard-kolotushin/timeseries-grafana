@@ -1,5 +1,5 @@
 import { getTimeZone } from '@grafana/data';
-import { absoluteDayBound, applyLookbackRange, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, forecastLevel, isoUtc, isInvalidForecastWindow, isInvalidTrainWindow, resolveForecastWindow, resolveLookbackMs, resolveTrainWindow, timeZoneFromScene, trainMaxDataPoints, trainStepInterval, trainStepMs, type ResolvedTrainWindow, type TrainWindow } from './lookback';
+import { absoluteDayBound, applyLookbackRange, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, forecastLevel, isoUtc, isInvalidForecastWindow, isInvalidTrainWindow, resolveForecastWindow, resolveTrainWindow, timeZoneFromScene, trainMaxDataPoints, trainStepInterval, trainStepMs, type ResolvedTrainWindow, type TrainWindow } from './lookback';
 
 const day = 24 * 60 * 60 * 1000;
 
@@ -40,24 +40,6 @@ describe('autoLookback', () => {
   });
 });
 
-describe('resolveLookbackMs', () => {
-  it.each([
-    { lookback: 'auto', model: 'holt' as const, season: undefined, want: 7 * day },
-    { lookback: '', model: 'holt' as const, season: undefined, want: 7 * day },
-    { lookback: '30d', model: 'holt' as const, season: undefined, want: 30 * day },
-    { lookback: 'auto', model: 'baseline' as const, season: 'minute-week' as const, want: 21 * day },
-    { lookback: '15d', model: 'holt' as const, season: undefined, want: 15 * day },
-    { lookback: '15', model: 'holt' as const, season: undefined, want: 15 * day },
-    { lookback: '48h', model: 'holt' as const, season: undefined, want: 2 * day },
-  ])('$model lookback=$lookback → $want ms', ({ lookback, model, season, want }) => {
-    expect(resolveLookbackMs({ model, season, lookback })).toBe(want);
-  });
-
-  it('falls back to Auto when the override is not a duration', () => {
-    expect(resolveLookbackMs({ model: 'holt', lookback: 'nope' })).toBe(7 * day);
-  });
-});
-
 describe('resolveTrainWindow', () => {
   const panelTo = Date.UTC(2026, 7, 19, 12, 0, 0);
 
@@ -70,17 +52,8 @@ describe('resolveTrainWindow', () => {
     });
   });
 
-  it('keeps a legacy duration lookback when trainRange was never saved', () => {
-    expect(resolveTrainWindow({ model: 'holt', lookback: '30d' }, panelTo)).toEqual({
-      fromMs: panelTo - 30 * day,
-      toMs: panelTo,
-      relative: true,
-      lookbackMs: 30 * day,
-    });
-  });
-
-  it('ignores legacy lookback when the picker is cleared to Auto', () => {
-    expect(resolveTrainWindow({ model: 'holt', lookback: '30d', trainRange: { from: '', to: '' } }, panelTo)).toEqual({
+  it('uses Auto when the picker is cleared to Auto', () => {
+    expect(resolveTrainWindow({ model: 'holt', trainRange: { from: '', to: '' } }, panelTo)).toEqual({
       fromMs: panelTo - 7 * day,
       toMs: panelTo,
       relative: true,

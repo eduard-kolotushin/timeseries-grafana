@@ -17,7 +17,6 @@ export interface ForecastDataQuery extends DataQuery {
   /** Prediction-interval coverage in (0, 1). Used when kind is lower or upper. */
   level: number;
   trainRange: TrainTimeRange;
-  lookback?: string;
   /** Copy of overlay panel targets (query A) for the cacheKey fingerprint. */
   sourceTargets: unknown[];
   /**
