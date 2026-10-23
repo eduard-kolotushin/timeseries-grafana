@@ -24,7 +24,7 @@ const (
 	queryKindForecast = "forecast"
 	queryKindLower    = "lower"
 	queryKindUpper    = "upper"
-	msgNeedTrain      = "needTrain: train on the Forecast overlay panel first"
+	msgNeedTrain      = "No trained model yet. Train on the Forecast overlay panel first, then use its baseline cache key here."
 	msgStoreOff       = "snapshot store not configured (needTrain)"
 )
 

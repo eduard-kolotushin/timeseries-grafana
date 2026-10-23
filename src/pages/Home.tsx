@@ -1,35 +1,71 @@
 import React from 'react';
-import { PluginPage } from '@grafana/runtime';
+import { css } from '@emotion/css';
+import { config, PluginPage } from '@grafana/runtime';
+import { LinkButton, Stack, useStyles2 } from '@grafana/ui';
 import { testIds } from '../components/testIds';
 
 function Home() {
+  const styles = useStyles2((theme) => ({
+    body: css({
+      maxWidth: 760,
+      '& h2': {
+        marginTop: theme.spacing(3),
+        marginBottom: theme.spacing(1),
+      },
+      '& ol': {
+        paddingLeft: theme.spacing(3),
+      },
+    }),
+  }));
+
   return (
     <PluginPage>
-      <div data-testid={testIds.pageOne.container}>
-        <p>Add the Forecast overlay visualization to a dashboard panel and query any data source.</p>
+      <div data-testid={testIds.pageOne.container} className={styles.body}>
         <p>
-          The panel sends the series to this app&apos;s Go backend, which fits a model from{' '}
-          <code>timeseries-forecast</code> and overlays the forecast window on the history.
+          Overlay a forecast on any dashboard panel. The panel sends each numeric series to this app&apos;s Go backend;
+          the fit is stored in Postgres and reused until you retrain.
+        </p>
+        <h2>Start here</h2>
+        <ol>
+          <li>
+            Add the <strong>Forecast overlay</strong> panel to a dashboard and query your data source.
+          </li>
+          <li>
+            Set the training window (independent of the dashboard range) and the forecast window. Auto works for most
+            panels.
+          </li>
+          <li>
+            Open <strong>Training → Baseline keys</strong> to copy a series&apos; cache key for a Forecast query or an
+            alert rule. A Forecast query restores that snapshot by key alone.
+          </li>
+        </ol>
+        <h2>Next</h2>
+        <Stack direction="row" gap={2} wrap="wrap">
+          <LinkButton
+            variant="secondary"
+            href={`${config.appSubUrl}/plugins/eduardkolotushin-forecast-app?page=configuration`}
+          >
+            Configure retrain defaults
+          </LinkButton>
+          <LinkButton
+            variant="secondary"
+            href={`${config.appSubUrl}/plugins/eduardkolotushin-forecast-app?page=schedules`}
+          >
+            Review retrain schedules
+          </LinkButton>
+          <LinkButton variant="secondary" href={`${config.appSubUrl}/dashboards`}>
+            Open dashboards
+          </LinkButton>
+        </Stack>
+        <h2>Mixed queries and alerting</h2>
+        <p>
+          The overlay fits and plots metric targets only; Forecast datasource frames are ignored there. To plot a
+          restored snapshot next to the metric, use Grafana&apos;s <strong>Time series</strong> panel.
         </p>
         <p>
-          Mixed query A (metric) plus query B (Forecast datasource) is supported on the overlay. The overlay fits and
-          plots the metric only; Forecast datasource frames are not fitted or drawn there. To plot Restore next to the
-          metric, use Grafana Time series. After training, copy a series&apos; baseline cache key from the panel&apos;s
-          Baseline keys option into a Forecast query&apos;s Baseline cache key field; the query editor has no model,
-          train-window or series fields.
+          For alerting, save the dashboard, then choose <strong>New alert rule</strong> in the overlay options. It
+          copies the metric queries and adds one key-only Forecast query.
         </p>
-        <p>
-          For Grafana alerting, query A stays the live metric and query B Restores the saved snapshot. Save the dashboard,
-          then use overlay options <strong>New alert rule</strong>: it copies the metric queries and adds one key-only
-          Forecast query. Grafana still shows the data-pane Alert tab only for Time series and Graph. Panel menu More →
-          New alert rule and Alerting → New alert rule remain.
-        </p>
-        <p>
-          High load is bounded: the backend rejects oversize train bodies and returns 429 when too many Fit /
-          ForecastRange calls are already running. The overlay posts one series at a time and limits in-flight loads
-          (panel option, default 1).
-        </p>
-        <p>The Docker Grafana sandbox (minute-of-week overlay and Metrics vs baselines) is the sibling repo timeseries-grafana-sandbox.</p>
       </div>
     </PluginPage>
   );

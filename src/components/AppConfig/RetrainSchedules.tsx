@@ -18,6 +18,7 @@ import {
   useStyles2,
 } from '@grafana/ui';
 import { config } from '@grafana/runtime';
+import { GrafanaTheme2 } from '@grafana/data';
 import { reasonFromUnknown } from '../../forecast-panel/reasons';
 import {
   deleteSchedule,
@@ -99,7 +100,7 @@ type ScheduleColumns = React.ComponentProps<typeof InteractiveTable<ScheduleRow>
  * forcing the table (and the plugin details row it sits in) wider than the viewport
  * side panel allows.
  */
-const getStyles = () => ({
+const getStyles = (theme: GrafanaTheme2) => ({
   body: css({
     // Grafana's plugin details page sizes its content column at min-content, so a wide
     // table pushes the 250px sidebar off screen. Size containment makes this tab's width
@@ -119,16 +120,50 @@ const getStyles = () => ({
   nowrap: css({
     whiteSpace: 'nowrap',
   }),
-  // A column's `minWidth` is not applied by Grafana 12.2's InteractiveTable, which then lays
-  // such a column out at its content's min-content width — one character for a 64-char key,
-  // because the cell wraps anywhere — and the key printed one letter per line. Flooring the
-  // cell's own content holds on every version: a cell is never narrower than its content's
-  // min-content width, whatever the table does with the column definition.
-  keyCell: css({
-    minWidth: 180,
+  // The table keeps its own scroll area so a narrow viewport gets a scrollbar at a
+  // visible height instead of at the bottom of the whole row list.
+  tableWrap: css({
+    '& > div': {
+      maxHeight: '65vh',
+      overflow: 'auto',
+    },
+    // Fixed layout lets the key cell clip instead of demanding the full 64-char
+    // hash; the 780px floor keeps the columns readable and scrolls at tablet width.
+    '& table': {
+      tableLayout: 'fixed',
+      width: '100%',
+      minWidth: 780,
+    },
+    '& thead th': {
+      position: 'sticky',
+      top: 0,
+      zIndex: 1,
+      background: theme.colors.background.primary,
+    },
   }),
-  sourceCell: css({
-    minWidth: 200,
+  meta: css({
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
+  }),
+  key: css({
+    display: 'block',
+    flex: '1 1 auto',
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontFamily: theme.typography.fontFamilyMonospace,
+    fontSize: theme.typography.bodySmall.fontSize,
+  }),
+  clamp: css({
+    display: '-webkit-box',
+    WebkitLineClamp: 1,
+    WebkitBoxOrient: 'vertical',
+    overflow: 'hidden',
+    overflowWrap: 'anywhere',
+  }),
+  errorText: css({
+    color: theme.colors.error.text,
   }),
 });
 
@@ -268,155 +303,163 @@ export const RetrainSchedules = () => {
         // A panel row is identified by the dashboard panel that trained it: the title
         // links to that panel, and the series plus query say which of its targets this
         // row refits. A baseline row has none of this — its key is the metric hash.
-        minWidth: 260,
+        // Runs and state live here too, so the actions column does not slide off a
+        // 1440px screen behind the plugin details sidebar.
+        width: 240,
         cell: ({ row }) => {
           const source = row.original.source;
           const name = source?.panelTitle || source?.seriesName || '';
-          if (!source || !name) {
-            return <span className={styles.nowrap}>—</span>;
-          }
-          const href = dashboardHref(source);
-          const series = source.seriesName && source.seriesName !== name ? source.seriesName : '';
+          const href = source ? dashboardHref(source) : undefined;
+          const series = source?.seriesName && source.seriesName !== name ? source.seriesName : '';
+          const status = row.original.lastStatus?.startsWith('error')
+            ? 'error'
+            : row.original.lastStatus === 'ok'
+              ? 'ok'
+              : 'never';
           return (
-            <div className={cx(styles.wrap, styles.sourceCell)}>
-              {href ? <a href={href}>{name}</a> : <span>{name}</span>}
-              {(series || source.lookback || source.querySummary) && (
-                <div>
+            <div className={styles.wrap}>
+              <Stack direction="row" gap={1} alignItems="center" wrap="wrap">
+                {href ? (
+                  <a href={href}>{name}</a>
+                ) : (
+                  <span>{name || (row.original.scope === 'baseline' ? 'Fleet-wide baseline' : '—')}</span>
+                )}
+                <Badge text={row.original.scope} color={row.original.scope === 'baseline' ? 'purple' : 'blue'} />
+                {row.original.supersededAt && (
+                  <Badge
+                    text="Superseded"
+                    color="orange"
+                    tooltip={`No panel trains this key any more (since ${row.original.supersededAt}), so it is never retrained again. Delete the row to remove it.`}
+                  />
+                )}
+              </Stack>
+              {(series || source?.lookback || source?.querySummary) && (
+                <div className={styles.meta}>
                   {series && <code className={styles.wrap}>{series}</code>}
-                  {series && (source.lookback || source.querySummary) ? ' ' : null}
-                  {source.lookback && <span className={styles.nowrap}>{source.lookback}</span>}
-                  {source.lookback && source.querySummary ? ' ' : null}
-                  {source.querySummary && <span title={source.querySummary}>{source.querySummary}</span>}
+                  {series && (source?.lookback || source?.querySummary) ? ' ' : null}
+                  {source?.lookback && <span className={styles.nowrap}>{source.lookback}</span>}
                 </div>
               )}
+              {source?.querySummary && (
+                <div className={cx(styles.meta, styles.clamp)} title={source.querySummary}>
+                  {source.querySummary}
+                </div>
+              )}
+              <div className={styles.meta}>
+                <span className={styles.nowrap}>
+                  Next <span>{row.original.nextRunAt || '—'}</span>
+                </span>
+                {' · '}
+                <span className={styles.nowrap}>
+                  Last <span>{row.original.lastRunAt || '—'}</span>
+                </span>
+              </div>
+              <Stack direction="row" gap={1} alignItems="center">
+                <Badge
+                  text={status}
+                  color={status === 'ok' ? 'green' : status === 'error' ? 'red' : 'orange'}
+                  tooltip={row.original.lastStatus || 'Never run'}
+                />
+                {status === 'error' && (
+                  <span className={cx(styles.meta, styles.errorText, styles.clamp)} title={row.original.lastStatus}>
+                    {row.original.lastStatus}
+                  </span>
+                )}
+              </Stack>
             </div>
           );
         },
       },
-      { id: 'scope', header: 'Scope', cell: ({ row }) => row.original.scope },
       {
         id: 'key',
         header: 'Key',
-        // A panel key is a 64-char cache hash: give it room to wrap onto two lines instead
-        // of a one-character-wide sliver. Table width containment keeps this from pushing
-        // the plugin details sidebar out; the table scrolls inside its own container.
-        minWidth: 260,
-        cell: ({ row }) => (
-          <div className={styles.keyCell}>
-            <Stack direction="row" gap={1} alignItems="center">
-              <code className={styles.wrap}>{row.original.key}</code>
-              <ClipboardButton
-                getText={() => row.original.key}
-                icon="copy"
-                size="sm"
-                tooltip="Copy key"
-                aria-label={`${rowId(row.original)} copy key`}
-              />
-            </Stack>
-          </div>
-        ),
-      },
-      {
-        id: 'cron',
-        header: 'Cron',
-        width: 180,
-        cell: ({ row }) => (
-          <Input
-            aria-label={`${rowId(row.original)} cron`}
-            width={15}
-            value={row.original.cron}
-            onChange={(e) => patch(row.original, { cron: e.currentTarget.value })}
-          />
-        ),
-      },
-      {
-        id: 'timezone',
-        header: 'Timezone',
-        width: 180,
-        cell: ({ row }) => (
-          <Input
-            aria-label={`${rowId(row.original)} timezone`}
-            width={15}
-            value={row.original.timezone}
-            onChange={(e) => patch(row.original, { timezone: e.currentTarget.value })}
-          />
-        ),
-      },
-      {
-        id: 'nextRunAt',
-        header: 'Next run',
-        cell: ({ row }) => <span className={styles.nowrap}>{row.original.nextRunAt || '—'}</span>,
-      },
-      {
-        id: 'lastRunAt',
-        header: 'Last run',
-        cell: ({ row }) => <span className={styles.nowrap}>{row.original.lastRunAt || '—'}</span>,
-      },
-      {
-        id: 'lastStatus',
-        header: 'Status',
+        // The whole key stays in the DOM for search and tests; the cell clips it
+        // visually so a 64-char hash cannot claim 260px of a 789px column.
+        width: 150,
         cell: ({ row }) => (
           <Stack direction="row" gap={1} alignItems="center">
-            <span>{row.original.lastStatus ?? '—'}</span>
-            {row.original.supersededAt && (
-              <Badge
-                text="Superseded"
-                color="orange"
-                tooltip={`No panel trains this key any more (since ${row.original.supersededAt}), so it is never retrained again. Delete the row to remove it.`}
-              />
-            )}
+            <code className={styles.key} title={row.original.key}>
+              {row.original.key}
+            </code>
+            <ClipboardButton
+              getText={() => row.original.key}
+              icon="copy"
+              size="sm"
+              tooltip="Copy key"
+              aria-label={`${rowId(row.original)} copy key`}
+            />
           </Stack>
         ),
       },
       {
-        id: 'enabled',
-        header: 'Enabled',
-        width: 90,
+        id: 'schedule',
+        header: 'Schedule',
+        width: 160,
         cell: ({ row }) => (
-          <Switch
-            aria-label={`${rowId(row.original)} enabled`}
-            value={row.original.enabled}
-            onChange={(e) => {
-              const enabled = e.currentTarget.checked;
-              // Show the choice at once; `commit` puts it back if the PUT rejects.
-              patch(row.original, { enabled });
-              void commit({ ...row.original, enabled }, { enabled: row.original.enabled });
-            }}
-          />
+          <Stack direction="column" gap={0.5}>
+            <Input
+              aria-label={`${rowId(row.original)} cron`}
+              width={15}
+              value={row.original.cron}
+              onChange={(e) => patch(row.original, { cron: e.currentTarget.value })}
+            />
+            <Input
+              aria-label={`${rowId(row.original)} timezone`}
+              width={15}
+              value={row.original.timezone}
+              onChange={(e) => patch(row.original, { timezone: e.currentTarget.value })}
+            />
+          </Stack>
         ),
       },
       {
         id: 'actions',
-        header: '',
+        header: 'Actions',
+        width: 230,
         cell: ({ row }) => (
-          <Stack direction="row" gap={1}>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy === rowId(row.original)}
-              aria-label={`${rowId(row.original)} save`}
-              onClick={() => void commit(row.original)}
-            >
-              Save
-            </Button>
-            <Button
-              size="sm"
-              variant="destructive"
-              disabled={busy === rowId(row.original)}
-              aria-label={`${rowId(row.original)} delete`}
-              onClick={() => void remove(row.original)}
-            >
-              Delete
-            </Button>
-            <ConfirmButton
-              size="sm"
-              confirmVariant="destructive"
-              disabled={busy === rowId(row.original)}
-              confirmText="Delete stored model"
-              onConfirm={() => void removeModel(row.original)}
-            >
-              Delete model
-            </ConfirmButton>
+          <Stack direction="column" gap={1}>
+            <Stack direction="row" gap={1} alignItems="center">
+              <span className={styles.meta}>Enabled</span>
+              <Switch
+                aria-label={`${rowId(row.original)} enabled`}
+                value={row.original.enabled}
+                onChange={(e) => {
+                  const enabled = e.currentTarget.checked;
+                  // Show the choice at once; `commit` puts it back if the PUT rejects.
+                  patch(row.original, { enabled });
+                  void commit({ ...row.original, enabled }, { enabled: row.original.enabled });
+                }}
+              />
+            </Stack>
+            <Stack direction="row" gap={1} wrap="wrap">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy === rowId(row.original)}
+                aria-label={`${rowId(row.original)} save`}
+                onClick={() => void commit(row.original)}
+              >
+                Save
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={busy === rowId(row.original)}
+                aria-label={`${rowId(row.original)} delete`}
+                onClick={() => void remove(row.original)}
+              >
+                Delete
+              </Button>
+              <ConfirmButton
+                size="sm"
+                confirmVariant="destructive"
+                disabled={busy === rowId(row.original)}
+                confirmText="Delete stored model"
+                onConfirm={() => void removeModel(row.original)}
+              >
+                Delete model
+              </ConfirmButton>
+            </Stack>
           </Stack>
         ),
       },
@@ -430,20 +473,20 @@ export const RetrainSchedules = () => {
         <p>
           One row per stored model. <code>panel</code> rows are refreshed by this Grafana backend on their cron and
           belong to this org, which is the only org that lists them; <code>baseline</code> rows are claimed by the
-          baselines worker, are fleet-wide (they show in every org, and their cron, timezone and enable state are
-          shared by all of them) and are created by that worker, so only an existing one can be edited here. Deleting
-          a <code>baseline</code> row removes it for every org: the worker re-creates it on its next tick while the
-          metric still reports, which is how a retired hash&apos;s row stops being retrained.
+          baselines worker, are fleet-wide (they show in every org, and their cron, timezone and enable state are shared
+          by all of them) and are created by that worker, so only an existing one can be edited here. Deleting a{' '}
+          <code>baseline</code> row removes it for every org: the worker re-creates it on its next tick while the metric
+          still reports, which is how a retired hash&apos;s row stops being retrained.
         </p>
         <p>
-          A <code>panel</code> row whose panel no longer trains its key — the training window or the query changed —
-          is marked <em>Superseded</em>. The panel keeps writing the row that matches what it trains now; this one is
-          kept for its history and is never claimed again, so delete it to remove it.
+          A <code>panel</code> row whose panel no longer trains its key — the training window or the query changed — is
+          marked <em>Superseded</em>. The panel keeps writing the row that matches what it trains now; this one is kept
+          for its history and is never claimed again, so delete it to remove it.
         </p>
         <p>
-          A <code>baseline</code> row&apos;s key is the upstream <code>metric_hash</code> — the only identity this
-          store keeps for it — so copy the key to match a row against a metric, and use Search to find a{' '}
-          <code>panel</code> row by its dashboard panel, series or query.
+          A <code>baseline</code> row&apos;s key is the upstream <code>metric_hash</code> — the only identity this store
+          keeps for it — so copy the key to match a row against a metric, and use Search to find a <code>panel</code>{' '}
+          row by its dashboard panel, series or query.
         </p>
         {error && (
           <div data-testid={testIds.appConfig.retrainError}>
@@ -501,7 +544,9 @@ export const RetrainSchedules = () => {
             />
           </Field>
         </Stack>
-        <InteractiveTable columns={columns} data={pageRows} getRowId={rowId} pageSize={0} />
+        <div className={styles.tableWrap}>
+          <InteractiveTable columns={columns} data={pageRows} getRowId={rowId} pageSize={0} />
+        </div>
         <Pagination currentPage={currentPage} numberOfPages={pageCount} onNavigate={setPage} hideWhenSinglePage />
         {loading && <p>Loading schedules…</p>}
         {!loading && rows.length === 0 && <p>No schedules yet. Train the overlay once to create one.</p>}

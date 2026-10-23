@@ -85,6 +85,10 @@ describe('Components/AppConfig', () => {
     });
     expect(settingsBody.secureJsonData).toBeUndefined();
     expect(screen.queryByText(/Settings not saved/)).toBeNull();
+    expect(await screen.findByText('Saved')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: /^Cron/ }), { target: { value: '0 4 * * *' } });
+    expect(screen.queryByText('Saved')).toBeNull();
   });
 
   test('shows a rejected default schedule and saves nothing', async () => {

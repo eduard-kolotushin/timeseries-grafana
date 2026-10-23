@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { css } from '@emotion/css';
+import { css, cx } from '@emotion/css';
 import {
   dateTime,
   dateTimeFormat,
@@ -12,8 +12,17 @@ import {
   TimeRange,
 } from '@grafana/data';
 import { Button, Field, FilterInput, IconButton, Input, Stack, TimeRangeLabel, useStyles2 } from '@grafana/ui';
-import { absoluteDayBound, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, isExplicitAutoTrainRange } from './lookback';
+import {
+  absoluteDayBound,
+  autoForecastHorizon,
+  autoLookback,
+  CivilDate,
+  civilYmd,
+  dashboardTimeZone,
+  isExplicitAutoTrainRange,
+} from './lookback';
 import { TrainRangeCalendar } from './TrainRangeCalendar';
+import { pickerLayout, placePicker, PickerLayout } from './pickerPlacement';
 import { ForecastOptions, TrainTimeRange } from './types';
 
 const QUICK: Array<{ from: string; to: string; display: string }> = [
@@ -106,8 +115,10 @@ export const TrainRangeEditor = ({
 
   const triggerRef = useRef<HTMLDivElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const pickerId = useId();
   const [open, setOpen] = useState(false);
   const [placed, setPlaced] = useState(false);
+  const [layout, setLayout] = useState<PickerLayout>('wide');
   const [anchor, setAnchor] = useState({ left: 0, top: 0 });
   const [from, setFrom] = useState(raw.from);
   const [to, setTo] = useState(raw.to);
@@ -130,26 +141,42 @@ export const TrainRangeEditor = ({
     }
   }
 
-  const close = () => {
+  /** Return focus only when the picker itself closed the interaction. */
+  const close = useCallback((returnFocus = false) => {
     setOpen(false);
     setPlaced(false);
     setShowCalendar(false);
-  };
+    if (returnFocus) {
+      triggerRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    }
+  }, []);
 
   const place = useCallback(() => {
     const btn = triggerRef.current?.getBoundingClientRect();
     const pop = pickerRef.current;
-    if (!btn || !pop || pop.offsetWidth === 0) {
+    if (!btn || !pop) {
       return;
     }
-    const gap = 4;
-    const next = {
-      left: Math.max(8, btn.left - pop.offsetWidth - gap),
-      top: Math.max(8, btn.top - pop.offsetHeight - gap),
-    };
+    const nextLayout = pickerLayout(btn.left, window.innerWidth, window.innerHeight);
+    if (nextLayout !== layout) {
+      // Re-measure after the calendar moves inside the popover.
+      setLayout(nextLayout);
+      return;
+    }
+    const width = pop.offsetWidth;
+    const height = pop.offsetHeight;
+    if (width === 0 || height === 0) {
+      return;
+    }
+    const next = placePicker({
+      layout,
+      trigger: { left: btn.left, top: btn.top, bottom: btn.bottom },
+      picker: { width, height },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    });
     setAnchor((prev) => (prev.left === next.left && prev.top === next.top ? prev : next));
     setPlaced(true);
-  }, []);
+  }, [layout]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -179,20 +206,77 @@ export const TrainRangeEditor = ({
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        close();
+        // Capture phase: the panel editor also listens for Escape and would exit
+        // edit mode behind the open picker.
+        event.preventDefault();
+        event.stopPropagation();
+        close(true);
       }
     };
     document.addEventListener('mousedown', onDoc);
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
     return () => {
       document.removeEventListener('mousedown', onDoc);
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
     };
-  }, [open]);
+  }, [open, close]);
+
+  useEffect(() => {
+    if (!open || !placed) {
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      pickerRef.current?.querySelector<HTMLElement>('input, button')?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open, placed]);
+
+  const onPickerKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      close(true);
+      return;
+    }
+    if (event.key !== 'Tab') {
+      return;
+    }
+    const focusable = pickerRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    );
+    if (!focusable || focusable.length === 0) {
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   const apply = (next: TrainTimeRange) => {
     onChange({ from: next.from.trim(), to: next.to.trim() });
-    close();
+    close(true);
+  };
+
+  const toggleCalendar = () => {
+    const next = !showCalendar;
+    setShowCalendar(next);
+    if (next) {
+      requestAnimationFrame(() => {
+        pickerRef.current?.querySelector<HTMLButtonElement>('table[aria-label*="calendar"] td button')?.focus();
+      });
+    }
+  };
+
+  const selectRange = (start: CivilDate, end: CivilDate) => {
+    setFrom(absoluteDayBound(start, timeZone, false));
+    setTo(absoluteDayBound(end, timeZone, true));
+    setShowCalendar(false);
+    requestAnimationFrame(() => pickerRef.current?.querySelector<HTMLInputElement>('input')?.focus());
   };
 
   const quick = (kind === 'forecast' ? QUICK_FUTURE : QUICK).filter((q) =>
@@ -214,7 +298,10 @@ export const TrainRangeEditor = ({
           fullWidth
           className={styles.trigger}
           tooltip={tooltip}
-          onClick={() => (open ? close() : setOpen(true))}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-controls={open ? pickerId : undefined}
+          onClick={() => (open ? close(false) : setOpen(true))}
         >
           <span className={styles.label}>
             <TimeRangeLabel value={range} timeZone={timeZone} placeholder="Auto (by model)" />
@@ -232,49 +319,59 @@ export const TrainRangeEditor = ({
         createPortal(
           <div
             ref={pickerRef}
-            className={styles.picker}
+            id={pickerId}
+            role="dialog"
+            aria-label={kind === 'forecast' ? 'Forecast range' : 'Training period'}
+            onKeyDown={onPickerKeyDown}
+            className={cx(styles.picker, layout === 'stacked' && styles.pickerStack)}
             style={{ left: anchor.left, top: anchor.top, visibility: placed ? 'visible' : 'hidden' }}
           >
-            {showCalendar && (
+            {showCalendar && layout === 'wide' && (
               <div className={styles.calendarDock}>
-                <TrainRangeCalendar
-                  from={calFrom}
-                  to={calTo}
-                  timeZone={timeZone}
-                  onSelect={(start, end) => {
-                    setFrom(absoluteDayBound(start, timeZone, false));
-                    setTo(absoluteDayBound(end, timeZone, true));
-                    setShowCalendar(false);
-                  }}
-                />
+                <TrainRangeCalendar from={calFrom} to={calTo} timeZone={timeZone} onSelect={selectRange} />
               </div>
             )}
-            <div className={styles.body}>
-              <div className={styles.absolute}>
+            {showCalendar && layout === 'stacked' && (
+              <div className={styles.calendarStack}>
+                <TrainRangeCalendar from={calFrom} to={calTo} timeZone={timeZone} onSelect={selectRange} />
+              </div>
+            )}
+            <div className={cx(styles.body, layout === 'stacked' && styles.bodyStack)}>
+              <div className={cx(styles.absolute, layout === 'stacked' && styles.absoluteStack)}>
                 <div className={styles.section}>Absolute time range ({timezoneLabel(timeZone)})</div>
                 <Field label="From" noMargin className={styles.field}>
                   <div className={styles.inputRow}>
                     <div className={styles.inputGrow}>
-                      <Input value={from} placeholder={kind === 'forecast' ? 'now' : 'now-7d'} onChange={(e) => setFrom(e.currentTarget.value)} />
+                      <Input
+                        value={from}
+                        placeholder={kind === 'forecast' ? 'now' : 'now-7d'}
+                        onChange={(e) => setFrom(e.currentTarget.value)}
+                      />
                     </div>
                     <IconButton
                       name="calendar-alt"
                       type="button"
                       tooltip="Select range on calendar"
-                      onClick={() => setShowCalendar((c) => !c)}
+                      aria-expanded={showCalendar}
+                      onClick={toggleCalendar}
                     />
                   </div>
                 </Field>
                 <Field label="To" noMargin className={styles.field}>
                   <div className={styles.inputRow}>
                     <div className={styles.inputGrow}>
-                      <Input value={to} placeholder={kind === 'forecast' ? 'now+6h' : 'now'} onChange={(e) => setTo(e.currentTarget.value)} />
+                      <Input
+                        value={to}
+                        placeholder={kind === 'forecast' ? 'now+6h' : 'now'}
+                        onChange={(e) => setTo(e.currentTarget.value)}
+                      />
                     </div>
                     <IconButton
                       name="calendar-alt"
                       type="button"
                       tooltip="Select range on calendar"
-                      onClick={() => setShowCalendar((c) => !c)}
+                      aria-expanded={showCalendar}
+                      onClick={toggleCalendar}
                     />
                   </div>
                 </Field>
@@ -285,7 +382,7 @@ export const TrainRangeEditor = ({
                   </Button>
                 </Stack>
               </div>
-              <div className={styles.quick}>
+              <div className={cx(styles.quick, layout === 'stacked' && styles.quickStack)}>
                 <div className={styles.section}>Quick ranges</div>
                 <FilterInput value={search} placeholder="Search quick ranges" onChange={setSearch} />
                 <div className={styles.quickList}>
@@ -359,12 +456,21 @@ function getStyles(theme: GrafanaTheme2) {
     picker: css({
       position: 'fixed',
       zIndex: theme.zIndex.modal,
+      width: 440,
+      boxSizing: 'border-box',
       padding: theme.spacing(1.5),
       background: theme.colors.background.elevated,
       border: `1px solid ${theme.colors.border.weak}`,
       borderRadius: theme.shape.radius.lg,
       boxShadow: theme.shadows.z3,
       overflow: 'visible',
+    }),
+    // The calendar moves inside the popover and the whole box scrolls when the
+    // trigger is too close to the left edge for the docked layout.
+    pickerStack: css({
+      width: 'min(360px, calc(100vw - 16px))',
+      maxHeight: 'calc(100vh - 16px)',
+      overflowY: 'auto',
     }),
     calendarDock: css({
       position: 'absolute',
@@ -373,16 +479,28 @@ function getStyles(theme: GrafanaTheme2) {
       marginRight: theme.spacing(1),
       zIndex: 1,
     }),
+    calendarStack: css({
+      display: 'flex',
+      justifyContent: 'center',
+      marginBottom: theme.spacing(1.5),
+    }),
     body: css({
       display: 'flex',
       flexWrap: 'nowrap',
       alignItems: 'flex-start',
       gap: theme.spacing(2),
     }),
+    bodyStack: css({
+      flexDirection: 'column',
+    }),
     absolute: css({
       flex: '1 1 220px',
       minWidth: 200,
       overflow: 'visible',
+    }),
+    absoluteStack: css({
+      width: '100%',
+      minWidth: 0,
     }),
     field: css({
       marginBottom: theme.spacing(1),
@@ -409,6 +527,14 @@ function getStyles(theme: GrafanaTheme2) {
       gap: theme.spacing(0.5),
       borderLeft: `1px solid ${theme.colors.border.weak}`,
       paddingLeft: theme.spacing(1.5),
+    }),
+    quickStack: css({
+      flex: '1 1 auto',
+      width: '100%',
+      borderLeft: 'none',
+      borderTop: `1px solid ${theme.colors.border.weak}`,
+      paddingLeft: 0,
+      paddingTop: theme.spacing(1.5),
     }),
     section: css({
       fontWeight: theme.typography.fontWeightMedium,

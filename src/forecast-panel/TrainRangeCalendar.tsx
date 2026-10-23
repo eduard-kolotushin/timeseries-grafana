@@ -2,9 +2,10 @@ import React, { useMemo, useState } from 'react';
 import { css, cx } from '@emotion/css';
 import { dateTimeFormat, dateTimeParse, GrafanaTheme2 } from '@grafana/data';
 import { Button, IconButton, useStyles2 } from '@grafana/ui';
-import { CivilDate } from './lookback';
+import { CivilDate, civilYmd } from './lookback';
 
 const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
 function pad2(n: number): string {
   return n.toString().padStart(2, '0');
@@ -53,6 +54,19 @@ function monthTitle(year: number, month: number, timeZone: string): string {
   return `${year}-${pad2(month)}`;
 }
 
+/** Midday avoids a daylight-saving gap while still naming the civil date a cell shows. */
+function dayTitle(d: CivilDate, timeZone: string): string {
+  try {
+    const dt = dateTimeParse(`${d.year}-${pad2(d.month)}-${pad2(d.day)} 12:00:00`, { timeZone });
+    if (dt.isValid()) {
+      return dateTimeFormat(dt, { timeZone, format: 'MMMM D, YYYY' });
+    }
+  } catch {
+    // fall through
+  }
+  return `${d.year}-${pad2(d.month)}-${pad2(d.day)}`;
+}
+
 export function TrainRangeCalendar({
   from,
   to,
@@ -68,6 +82,14 @@ export function TrainRangeCalendar({
   const [cursor, setCursor] = useState(() => ({ year: from.year, month: from.month }));
   const [picking, setPicking] = useState<CivilDate | null>(null);
   const cells = useMemo(() => monthCells(cursor.year, cursor.month), [cursor.year, cursor.month]);
+  const weeks = useMemo(() => {
+    const rows: CivilDate[][] = [];
+    for (let i = 0; i < cells.length; i += 7) {
+      rows.push(cells.slice(i, i + 7));
+    }
+    return rows;
+  }, [cells]);
+  const [today] = useState(() => civilYmd(Date.now(), timeZone));
   const title = monthTitle(cursor.year, cursor.month, timeZone);
 
   const onDay = (d: CivilDate) => {
@@ -87,41 +109,68 @@ export function TrainRangeCalendar({
         <IconButton
           name="angle-left"
           tooltip="Previous month"
+          aria-label="Previous month"
+          className={styles.nav}
           onClick={() => setCursor((c) => addMonths(c.year, c.month, -1))}
         />
-        <div className={styles.title}>{title}</div>
+        <div className={styles.title} aria-live="polite">
+          {title}
+        </div>
         <IconButton
           name="angle-right"
           tooltip="Next month"
+          aria-label="Next month"
+          className={styles.nav}
           onClick={() => setCursor((c) => addMonths(c.year, c.month, 1))}
         />
       </div>
-      <div className={styles.weekdays}>
-        {WEEKDAYS.map((d) => (
-          <div key={d}>{d}</div>
-        ))}
+      <table className={styles.calendar} aria-label={`${title} calendar`}>
+        <thead>
+          <tr>
+            {WEEKDAYS.map((day, i) => (
+              <th key={day} scope="col" abbr={WEEKDAY_NAMES[i]} className={styles.weekday}>
+                {day}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {weeks.map((week, wi) => (
+            <tr key={wi}>
+              {week.map((d) => {
+                const inMonth = d.month === cursor.month;
+                const selected = picking
+                  ? isSameDay(d, picking)
+                  : isSameDay(d, from) || isSameDay(d, to) || between(d, from, to);
+                const edge = picking ? isSameDay(d, picking) : isSameDay(d, from) || isSameDay(d, to);
+                return (
+                  <td key={civilKey(d)} className={styles.dayCell}>
+                    <button
+                      type="button"
+                      className={cx(
+                        styles.day,
+                        !inMonth && styles.outside,
+                        selected && styles.range,
+                        edge && styles.edge
+                      )}
+                      aria-label={dayTitle(d, timeZone)}
+                      aria-pressed={selected}
+                      aria-current={isSameDay(d, today) ? 'date' : undefined}
+                      onClick={() => onDay(d)}
+                    >
+                      {d.day}
+                    </button>
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className={styles.hint} aria-live="polite">
+        {picking ? 'Click the end date' : 'Click start date, then end date'}
       </div>
-      <div className={styles.grid}>
-        {cells.map((d) => {
-          const inMonth = d.month === cursor.month;
-          const selected = picking
-            ? isSameDay(d, picking)
-            : isSameDay(d, from) || isSameDay(d, to) || between(d, from, to);
-          const edge = picking ? isSameDay(d, picking) : isSameDay(d, from) || isSameDay(d, to);
-          return (
-            <button
-              key={civilKey(d)}
-              type="button"
-              className={cx(styles.day, !inMonth && styles.outside, selected && styles.range, edge && styles.edge)}
-              onClick={() => onDay(d)}
-            >
-              {d.day}
-            </button>
-          );
-        })}
-      </div>
-      <div className={styles.hint}>{picking ? 'Click the end date' : 'Click start date, then end date'}</div>
-      <Button size="sm" variant="secondary" fill="outline" onClick={() => setPicking(null)}>
+      <Button type="button" size="sm" variant="secondary" fill="outline" onClick={() => setPicking(null)}>
         Reset selection
       </Button>
     </div>
@@ -148,29 +197,46 @@ function getStyles(theme: GrafanaTheme2) {
       fontWeight: theme.typography.fontWeightMedium,
       fontSize: theme.typography.bodySmall.fontSize,
     }),
-    weekdays: css({
-      display: 'grid',
-      gridTemplateColumns: 'repeat(7, 1fr)',
+    nav: css({
+      width: 28,
+      height: 28,
+      padding: 0,
+      '&:focus-visible': {
+        outline: `2px solid ${theme.colors.primary.main}`,
+        outlineOffset: 1,
+      },
+    }),
+    calendar: css({
+      width: '100%',
+      borderCollapse: 'collapse',
+      tableLayout: 'fixed',
       textAlign: 'center',
+    }),
+    weekday: css({
+      padding: `0 0 ${theme.spacing(0.5)}`,
       color: theme.colors.text.secondary,
       fontSize: 11,
-      marginBottom: theme.spacing(0.5),
+      fontWeight: theme.typography.fontWeightMedium,
     }),
-    grid: css({
-      display: 'grid',
-      gridTemplateColumns: 'repeat(7, 1fr)',
-      gap: 1,
+    dayCell: css({
+      padding: 0,
     }),
     day: css({
+      width: '100%',
       border: 'none',
       background: 'transparent',
       color: theme.colors.text.primary,
-      height: 26,
+      height: 28,
+      padding: 0,
       fontSize: 12,
       borderRadius: theme.shape.radius.default,
       cursor: 'pointer',
       '&:hover': {
         background: theme.colors.action.hover,
+      },
+      '&:focus-visible': {
+        outline: `2px solid ${theme.colors.primary.main}`,
+        outlineOffset: -2,
       },
     }),
     outside: css({

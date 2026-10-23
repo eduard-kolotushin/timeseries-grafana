@@ -1,12 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  applyFieldOverrides,
-  DataFrame,
-  dateTime,
-  FieldType,
-  MutableDataFrame,
-  PanelProps,
-} from '@grafana/data';
+import { applyFieldOverrides, DataFrame, dateTime, FieldType, MutableDataFrame, PanelProps } from '@grafana/data';
 import { locationService, PanelDataErrorView } from '@grafana/runtime';
 import { LegendDisplayMode, TooltipDisplayMode } from '@grafana/schema';
 import { Alert, Button, TimeSeries, TooltipPlugin, useTheme2 } from '@grafana/ui';
@@ -48,6 +41,7 @@ function PanelHeader({
   error: string | null;
   onRetrain: () => void;
 }) {
+  const theme = useTheme2();
   return (
     <div
       style={{
@@ -60,7 +54,20 @@ function PanelHeader({
         alignItems: 'center',
       }}
     >
-      {usedSaved && !error && <span style={{ fontSize: 12, opacity: 0.8 }}>Using saved model</span>}
+      {usedSaved && !error && (
+        <span
+          role="status"
+          style={{
+            fontSize: 12,
+            color: theme.colors.text.secondary,
+            background: theme.colors.background.secondary,
+            borderRadius: theme.shape.radius.default,
+            padding: theme.spacing(0.25, 1),
+          }}
+        >
+          Using saved model
+        </span>
+      )}
       <Button size="sm" variant="secondary" fill="outline" type="button" onClick={onRetrain}>
         Retrain
       </Button>
@@ -240,7 +247,9 @@ export const ForecastPanel: React.FC<Props> = ({
         frames: [
           ...history,
           ...result.forecasts.map((fc) =>
-            toForecastFrame(fc.name, fc.times, fc.values, fc.lower, fc.upper, theme.colors.warning.main)
+            // `warning.shade` is darkened in light and lightened in dark. The warning main
+            // (#FF9900) is only 2.1:1 on a white panel; this token clears 3:1 on both.
+            toForecastFrame(fc.name, fc.times, fc.values, fc.lower, fc.upper, theme.colors.warning.shade)
           ),
         ],
       });
@@ -263,7 +272,21 @@ export const ForecastPanel: React.FC<Props> = ({
       }
     };
     // `options` is a new object whenever any panel option changes, so it covers every field the load reads.
-  }, [id, key, queryKey, title, retrainNonce, data.request, graphable, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main, dashboardUid]);
+  }, [
+    id,
+    key,
+    queryKey,
+    title,
+    retrainNonce,
+    data.request,
+    graphable,
+    allTargets,
+    timeRange.to,
+    timeZone,
+    options,
+    theme.colors.warning.shade,
+    dashboardUid,
+  ]);
 
   // The load's frames once they answer the panel's current query, the current history
   // before that: a superseded load never leaves the previous range's frames on screen.
@@ -331,12 +354,7 @@ export const ForecastPanel: React.FC<Props> = ({
         legend={{ showLegend: true, displayMode: LegendDisplayMode.List, placement: 'bottom', calcs: [] }}
       >
         {(config, alignedFrame) => (
-          <TooltipPlugin
-            config={config}
-            data={alignedFrame}
-            timeZone={timeZone}
-            mode={TooltipDisplayMode.Multi}
-          />
+          <TooltipPlugin config={config} data={alignedFrame} timeZone={timeZone} mode={TooltipDisplayMode.Multi} />
         )}
       </TimeSeries>
     </div>
@@ -363,14 +381,18 @@ function toForecastFrame(
   }
   const loName = `${name} lower`;
   const hiName = `${name} upper`;
+  const bandColor = color ? { mode: 'fixed' as const, fixedColor: color } : undefined;
+  // One-pixel edges keep the interval boundary above 3:1 even where a 20% fill
+  // is too faint to see; the legend and tooltip stay focused on the forecast line.
   frame.addField({
     name: loName,
     type: FieldType.number,
     values: lo,
     config: {
       displayName: loName,
+      color: bandColor,
       custom: {
-        lineWidth: 0,
+        lineWidth: 1,
         fillOpacity: 0,
         hideFrom: { legend: true, tooltip: true, viz: false },
       },
@@ -382,8 +404,9 @@ function toForecastFrame(
     values: hi,
     config: {
       displayName: hiName,
+      color: bandColor,
       custom: {
-        lineWidth: 0,
+        lineWidth: 1,
         fillOpacity: 20,
         fillBelowTo: loName,
         hideFrom: { legend: true, tooltip: true, viz: false },
@@ -393,7 +416,12 @@ function toForecastFrame(
   return frame;
 }
 
-function toFrame(name: string, times: number[], values: Array<number | null | number>, color?: string): MutableDataFrame {
+function toFrame(
+  name: string,
+  times: number[],
+  values: Array<number | null | number>,
+  color?: string
+): MutableDataFrame {
   const frame = new MutableDataFrame();
   frame.refId = name;
   frame.addField({ name: 'Time', type: FieldType.time, values: times });

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **UI pass from the 2026-10-23 audit.** The range picker now stacks its calendar inside the popover
+  when the trigger is too close to the left edge, stays clamped to the viewport, moves focus into the
+  dialog, traps Tab, and closes on Escape without also exiting the panel editor. The calendar is a
+  native table with full-day labels, `aria-pressed` selection, 28px day/nav targets and a visible focus
+  ring. The forecast line uses `warning.shade` (darkened in light, lightened in dark) and the band has
+  1px edges, so the series clears 3:1 in both themes.
+- **Schedules table regrouped.** Source (identity, runs, status, scope), Key (clipped hash + copy),
+  Schedule (cron + timezone) and Actions (enabled, Save, Delete, Delete model) replace the nine
+  columns; a fixed 780px floor and a 65vh scroll area keep the actions and the scrollbar visible at
+  1440px, with a sticky header and horizontal scroll at tablet width.
+- **Copy and feedback.** Configuration now shows a **Saved** confirmation and a shorter explanation;
+  the landing page is a short orientation with links to Configuration, Retrain schedules and
+  Dashboards; the empty Forecast query explains the missing key in plain language; the miss error no
+  longer exposes the `needTrain` token; Alert lookback shows its 10m default; the cache-key field is
+  monospaced.
+
 ## 1.0.0 — 2026-10-23
 
 - **The Forecast datasource is identified by the trained baseline's cache key alone.** The query

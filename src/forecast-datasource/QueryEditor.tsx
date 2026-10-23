@@ -1,6 +1,7 @@
 import React from 'react';
-import { QueryEditorProps, SelectableValue } from '@grafana/data';
-import { InlineField, InlineFieldRow, Input, Select } from '@grafana/ui';
+import { css } from '@emotion/css';
+import { GrafanaTheme2, QueryEditorProps, SelectableValue } from '@grafana/data';
+import { InlineField, InlineFieldRow, Input, Select, useStyles2 } from '@grafana/ui';
 import { ForecastDataSource } from './datasource';
 import { COVERAGE_SETTINGS } from '../forecast-panel/types';
 import { CACHE_KEY_PATTERN, ForecastDataQuery, ForecastDataSourceOptions, ForecastOutputKind } from './types';
@@ -18,7 +19,21 @@ const KIND_OPTIONS: Array<SelectableValue<ForecastOutputKind>> = [
  * model and the training window, so this editor never asks for either. The key comes from
  * the overlay panel (Training → Baseline keys) or from New alert rule, which fills it in.
  */
+const getStyles = (theme: GrafanaTheme2) => ({
+  keyInput: css({
+    '& input': {
+      fontFamily: theme.typography.fontFamilyMonospace,
+    },
+  }),
+  hint: css({
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
+    margin: theme.spacing(1, 0, 0),
+  }),
+});
+
 export function QueryEditor({ query, onChange, onRunQuery }: Props) {
+  const styles = useStyles2(getStyles);
   const key = query.cacheKey ?? '';
   const invalid = key !== '' && !CACHE_KEY_PATTERN.test(key);
 
@@ -32,7 +47,10 @@ export function QueryEditor({ query, onChange, onRunQuery }: Props) {
   return (
     <div>
       <InlineFieldRow>
-        <InlineField label="Output" tooltip="One series per Grafana query row (refId). Add another query for lower or upper.">
+        <InlineField
+          label="Output"
+          tooltip="One series per Grafana query row (refId). Add another query for lower or upper."
+        >
           <Select
             width={20}
             options={KIND_OPTIONS}
@@ -51,6 +69,7 @@ export function QueryEditor({ query, onChange, onRunQuery }: Props) {
             invalid={invalid}
             value={key}
             placeholder="64 lowercase hex characters"
+            className={styles.keyInput}
             onChange={(e) => {
               const next = e.currentTarget.value.trim();
               // A partial key is stored while typing but never queried: the backend
@@ -73,6 +92,12 @@ export function QueryEditor({ query, onChange, onRunQuery }: Props) {
           </InlineField>
         )}
       </InlineFieldRow>
+      {key === '' && (
+        <p className={styles.hint}>
+          No baseline selected. Copy a key from the overlay panel&apos;s <strong>Training → Baseline keys</strong>, or
+          start from <strong>New alert rule</strong>.
+        </p>
+      )}
     </div>
   );
 }

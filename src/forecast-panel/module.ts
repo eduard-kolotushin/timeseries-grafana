@@ -159,8 +159,9 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
     .addTextInput({
       path: 'alertLookback',
       name: 'Alert lookback',
-      description: 'Both rule queries read now - this … now, e.g. 10m.',
+      description: 'Both rule queries read now - this … now. Defaults to 10m.',
       defaultValue: DEFAULT_FORECAST_OPTIONS.alertLookback,
+      settings: { placeholder: '10m' },
       category: ['Alerting'],
     })
     .addNumberInput({

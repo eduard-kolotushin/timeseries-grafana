@@ -256,12 +256,12 @@ snapshot, and the next tick gave the row back with the deployment default cron (
 | **Who can use** | **Alert rule** (Grafana alerting) or any datasource query. No Admin gate; the datasource's own jsonData carries the store (F20). |
 | **How configured** | Datasource provisioned jsonData — `storeUrl` as one DSN, or field-wise `storeHost`/`storePort`/… (the datasource's config editor renders only a read-only list of the `store*` keys it finds, never a value; F20) — or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`. The query editor asks only for the trained baseline's `cacheKey` (plus the output kind and, for a bound, coverage): the snapshot already holds the model and its training window, and the panel's *Baseline keys* option lists a copyable key per series. |
 | **Input params** | Query `{kind: "forecast"\|"lower"\|"upper", cacheKey, level?}` inside a normal `/api/ds/query` body with `from`/`to`. Each query's JSON is capped at 64 KiB (`maxQueryJSONBytes`); a larger one is rejected rather than decoded. |
-| **Expected result** | 200 with one frame per query and real values; the same signed window as F2, so a range at or before the snapshot's last timestamp returns in-sample points (baseline bands; `null` bounds for other models); a miss is an error: `needTrain: train on the Forecast overlay panel first`; unknown `kind` → 400. |
+| **Expected result** | 200 with one frame per query and real values; the same signed window as F2, so a range at or before the snapshot's last timestamp returns in-sample points (baseline bands; `null` bounds for other models); a miss is an error: `No trained model yet. Train on the Forecast overlay panel first, then use its baseline cache key here.`; unknown `kind` → 400. |
 
 **Positive — Kubernetes:** `POST /api/ds/query` with `{"kind":"forecast","cacheKey":"1a…1a","level":0.95}` →
 200, `frames=1`, `values=60`; `{"kind":"upper"}` → 200, 60 values.
 
-**Negative — Kubernetes:** a never-trained key → the frame carries `error: "needTrain: train on the Forecast overlay panel first"`;
+**Negative — Kubernetes:** a never-trained key → the frame carries `error: "No trained model yet. Train on the Forecast overlay panel first, then use its baseline cache key here."`;
 `{"kind":"nope"}` → 400 `forecast: unknown query kind: nope`.
 
 **Compose:** the same datasource answered its health check with `{"message":"ok","status":"OK"}`.
@@ -364,7 +364,7 @@ schedule.
 | **Who can use** | **Admin** (peer tab of Overview and Configuration on the plugin configuration page). |
 | **How configured** | Store required (F20). Rows come from the overlay's fits (F2) and from the worker (F25). |
 | **Input params** | Filters *Search* / *Scope* (All, panel, baseline) / *Enabled* (All, Enabled, Disabled) / *Status* (All, ok, error, never run); per-row cron, timezone and enabled editors; per-row *copy key*, *Save*, *Delete*, *Delete model*; a *Refresh* button; 20-row client-side paging; a *Source* deep link for `panel` rows. *Delete* removes the row (`DELETE /schedules?scope=&key=`, F5) and leaves the model; *Delete model* adds `drop=model`, which removes the snapshot with it, so the backend's retention reconcile cannot give the row back on its next tick (v14). |
-| **Expected result** | Columns *Source, Scope, Key, Cron, Timezone, Next run, Last run, Status, Enabled* + actions; a row a newer key superseded shows a *Superseded* marker beside its status and is never retrained again; errors surface as `Schedules failed` + the backend reason; a `drop=model` of a `baseline` row answers with a note that the model belongs to the worker's schema, which the page renders as an info alert. |
+| **Expected result** | Four columns: *Source* (panel title link or a `baseline` label, scope badge, series/lookback, a one-line query summary, next/last run, status badge, *Superseded* marker), *Key* (clipped hash with a copy button), *Schedule* (cron and timezone inputs stacked) and *Actions* (enabled switch, *Save*, *Delete*, *Delete model*). The table scrolls inside a 65vh area with a sticky header; at 1440px the four columns fit the plugin details column, and below 780px the same table scrolls horizontally instead of hiding the actions at the bottom of a long page. Errors surface as `Schedules failed` + the backend reason; a `drop=model` of a `baseline` row answers with a note that the model belongs to the worker's schema, which the page renders as an info alert. |
 
 **Positive — Compose:** the tab listed 6 then 5 rows; the `panel` rows showed the panel title and
 `value 21d Druid: minuteweek · minute` as their source with `/d/forecast-minute-week?viewPanel=N` links, and the
@@ -395,6 +395,14 @@ content (`min-width` 180 for the key, 200 for the source), which no table can un
 is 196px with a 130×61 (4-line) `<code>` on 12.2.10 and 260px with a 194×47 (3-line) one on 13.1.0, identical at
 all four widths, the `panel` row's source cell is 216px on 12.2.10, and the plugin details sidebar stays in place
 at 700px on both versions.
+
+**UI pass — regrouped columns.** The nine-column table was replaced by the four columns above: at 1440px the
+table is 789px inside its 789px container (Source 243, Key 152, Schedule 162, Actions 233), so Next/Last run,
+status, the enabled switch and all row actions are visible without horizontal scrolling; a 64-char key clips
+with an ellipsis and a copy button. The table wrapper is capped at 65vh, so its horizontal scrollbar sits at a
+visible height instead of below 20 rows, and the header is sticky. At 768px the 780px table floor keeps its
+columns readable and scrolls horizontally; the actions are one scroll away rather than at the bottom of the
+page. The Source cell clamps the query summary to one line with the full text in its tooltip.
 
 ### F13. Retrain action
 
@@ -948,11 +956,15 @@ One transaction per file, opened with `pg_advisory_xact_lock(0x666f726563617374)
 | --- | --- |
 | **Function** | The app's root page at `/a/<plugin id>` (the *Overview* tab, a peer of Configuration and Retrain schedules). |
 | **Who can use** | **Any user** who can open the plugin's page. |
-| **How configured** | Nothing: the page is static copy (`src/module.tsx`, `src/components/App/App.tsx`, `src/pages/Home.tsx`) and calls no plugin resource route. |
+| **How configured** | Nothing: the page is static copy with three links to the Configuration tab, the Retrain schedules tab and `/dashboards` (`src/module.tsx`, `src/components/App/App.tsx`, `src/pages/Home.tsx`); it calls no plugin resource route. |
 | **Input params** | None. |
-| **Expected result** | 200 rendering the plugin's own text, with no `/api/plugins/eduardkolotushin-forecast-app/resources/…` request issued by the page. |
+| **Expected result** | 200 rendering a short orientation page: one intro, **Start here** steps, **Next** links, and **Mixed queries and alerting**, with no `/api/plugins/eduardkolotushin-forecast-app/resources/…` request issued by the page. |
 
-**Positive — Compose (pass 5):** loading the page as an anonymous Admin rendered "Overlay univariate forecasts from timeseries-forecast on Grafana queries. Add the Forecast overlay visualization to a dashboard panel…" and the page made **no** `/resources/…` request (the only resource calls in that session came from the dashboard panels).
+**Positive — Compose (UI pass):** loading the page as an Admin rendered the intro, the three-step
+orientation, the Configuration/Retrain schedules/Dashboards links (each navigates to its tab) and the
+Mixed/alerting note; the page made **no** `/resources/…` request (the only resource calls in that
+session came from the dashboard panels). The copy column is capped at 760px, so the body measure stays
+readable at 1440px.
 
 ### F35. Per-component mTLS — compute hop, PVV, Postgres store, Vault
 
@@ -1318,7 +1330,7 @@ finding; read a `### F…` heading as a feature.
 | **F7** `/ping` ignored the method | GET-only, as ARCHITECTURE documents | `GET` 200, `PUT` 405, `DELETE` 405 |
 | **F9/F10** history lost datasource config; a superseded load kept drawing | history frames carry the source `field.config`/`meta`; the drawn frames are keyed to the panel's current query | both dashboards still draw history + forecast + bands, and the jest regression test pins the superseded-load case |
 | **F11** a relative Quick range was stored absolute | `resolveTrainWindow` marks a relative picker pair (`now-7d` → `now`) as `relative` with `lookbackMs` = its width | choosing **Last 7 days** posts `trainSource{relative:true, lookbackMs:604800000}` and the row reads `relative=true lookbackMs=604800000` (was `relative` absent and a frozen week) |
-| **F20** an empty `cacheKey` was a 400 | `QueryData` answers the miss `needTrain` error | `{"kind":"forecast","cacheKey":""}` → `needTrain: train on the Forecast overlay panel first` (was `400 forecast: cacheKey must be 64 lowercase hex chars`) |
+| **F20** an empty `cacheKey` was a 400 | `QueryData` answers the miss with a plain-language error | `{"kind":"forecast","cacheKey":""}` → `No trained model yet. Train on the Forecast overlay panel first, then use its baseline cache key here.` (was `400 forecast: cacheKey must be 64 lowercase hex chars`) |
 | **F23** interval width collapsed on large offsets | Welford buckets and a two-pass mean replace the raw moments | the offset-1e9 band is `2.1170029640197754` wide against `2.1170030603370598` for offset 0 (was `0`) |
 | **F24** an unvalidated `DRUID_MAX_RANGE` OOMed the worker | `Validate` requires ≥ 1m (or 0) and `windows()` refuses more than `1<<20` windows before allocating | `DRUID_MAX_RANGE=1ms` → exit 1 with `ERROR config err="DRUID_MAX_RANGE must be at least 1m (or 0 for one request per window)"` (was exit 137 under a 512 MiB cap) |
 | **F25/F26/F27/F28** | the store test creates the queue table so the SQL runs; an old `(scope, key)` table is named once; ownership is computed once per span; the publish comment credits the Kafka key | `timeseries-baselines/store_test.go`'s `TestPostgresRetrainQueue` and `TestPostgresScheduleStaleKey` pass against the sandbox store (no skip) |
@@ -1407,8 +1419,8 @@ Forecast datasource query), deleted afterwards:
   `cacheKey 25985f9e4577d19c4b4e1da348dce6d916b826e5412482f6acf68eaf67759474`, byte-identical to the key the panel
   had stored for the series `metrics-exporter:8000`. The datasource now takes that key directly, so the button, the
   source-query editor and `sourceTargets` are gone; `POST /api/ds/query` with the key still restores the snapshot
-  (`status 200`, one frame with real values) where an unknown key answers `needTrain: train on the Forecast overlay
-  panel first` — the v9 Mixed path and F7's contract;
+  (`status 200`, one frame with real values) where an unknown key answers `No trained model yet. Train on the
+  Forecast overlay panel first, then use its baseline cache key here.` — the v9 Mixed path and F7's contract;
 - the app landing page (`/a/eduardkolotushin-forecast-app`) rendered the plugin's own copy and issued no
   `/resources/…` request — F34.
 

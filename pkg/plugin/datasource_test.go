@@ -76,7 +76,7 @@ func TestQueryData(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := resp.Responses["B"]
-		if got.Error == nil || !strings.Contains(got.Error.Error(), "needTrain") {
+		if got.Error == nil || !strings.Contains(got.Error.Error(), "No trained model") {
 			t.Fatalf("error=%v", got.Error)
 		}
 		if len(got.Frames) != 0 {
@@ -98,7 +98,7 @@ func TestQueryData(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := resp.Responses["B"]
-		if got.Error == nil || !strings.Contains(got.Error.Error(), "needTrain") {
+		if got.Error == nil || !strings.Contains(got.Error.Error(), "snapshot store not configured") {
 			t.Fatalf("error=%v", got.Error)
 		}
 	})

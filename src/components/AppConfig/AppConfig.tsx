@@ -1,7 +1,7 @@
 import React, { ChangeEvent, useState } from 'react';
 import { AppPluginMeta, PluginConfigPageProps } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
-import { Alert, Button, Field, FieldSet, Input } from '@grafana/ui';
+import { Alert, Badge, Button, Field, FieldSet, Input, Stack } from '@grafana/ui';
 import { httpStatusFromUnknown, reasonFromUnknown } from '../../forecast-panel/reasons';
 import { postScheduleDefault } from '../../forecast-panel/scheduleApi';
 import { testIds } from '../testIds';
@@ -25,10 +25,12 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
   const [retrainCron, setRetrainCron] = useState(json.retrainCron ?? '0 3 * * *');
   const [retrainTimezone, setRetrainTimezone] = useState(json.retrainTimezone ?? 'UTC');
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const save = async () => {
     setSaving(true);
+    setSaved(false);
     try {
       // The backend is the only place that can prove the default cron parses and its zone
       // exists. An unvalidated default silently stops every new panel row from being
@@ -54,6 +56,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         },
       });
       setSaveError(null);
+      setSaved(true);
     } catch (e) {
       setSaveError(reasonFromUnknown(e));
     } finally {
@@ -64,38 +67,49 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
   return (
     <div data-testid={testIds.appConfig.submit}>
       <p>
-        Enable this app, then use the <strong>Forecast overlay</strong> panel on a dashboard. Fitted models are stored
-        in Postgres (schema <code>forecast</code>), not the Grafana SQL datasource and not Druid metadata.
+        Enable this app, then add the <strong>Forecast overlay</strong> panel to a dashboard. Fitted models are stored
+        in Postgres (schema <code>forecast</code>), not the Grafana SQL datasource.
       </p>
       <FieldSet label="Default retrain schedule">
         <p>
-          Written to <code>jsonData.retrainCron</code> / <code>jsonData.retrainTimezone</code> by the Save button below.
-          A model with no row of its own uses this cron and timezone; per-model rows are edited on the{' '}
+          Models without a row of their own use this cron and timezone. Per-model rows are on the{' '}
           <strong>Retrain schedules</strong> tab.
         </p>
         <Field label="Cron" description="5-field cron, or @hourly / @daily. The backend parses it per row.">
-          <Input value={retrainCron} onChange={(e: ChangeEvent<HTMLInputElement>) => setRetrainCron(e.target.value)} />
+          <Input
+            value={retrainCron}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => {
+              setRetrainCron(e.target.value);
+              setSaved(false);
+            }}
+          />
         </Field>
         <Field label="Timezone" description="IANA zone, e.g. UTC or Europe/Moscow.">
           <Input
             value={retrainTimezone}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => setRetrainTimezone(e.target.value)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => {
+              setRetrainTimezone(e.target.value);
+              setSaved(false);
+            }}
           />
         </Field>
       </FieldSet>
       <p>Plugin id: {plugin.meta.id}</p>
-      <p>
-        This page writes only <code>jsonData.retrainCron</code> / <code>jsonData.retrainTimezone</code>; every other
-        setting comes from deployment configuration and is left untouched by a save.
-      </p>
       {saveError && (
         <Alert title="Settings not saved" severity="error">
           {saveError}
         </Alert>
       )}
-      <Button onClick={save} disabled={saving}>
-        Save
-      </Button>
+      <Stack direction="row" gap={2} alignItems="center">
+        <Button onClick={save} disabled={saving}>
+          Save
+        </Button>
+        {saved && (
+          <span role="status">
+            <Badge text="Saved" color="green" />
+          </span>
+        )}
+      </Stack>
     </div>
   );
 };
