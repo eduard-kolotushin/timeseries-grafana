@@ -103,13 +103,22 @@ restored from `timeseries-grafana-sandbox/provisioning/dashboards/minute-week.js
 `200`, `len(times)=120 len(values)=120`, first point `now+60s`, last `now+7200s`, no nulls (1-minute step of the
 model grid, `k≥1`).
 
-**Positive — Compose, backcast:** 48 hourly `baseline` (`season:"hour"`) points ending now, `from=now-3h`, `to=now+1h`,
-`level:0.95` → `200`, 5 points; the four at or before the training last (`k ≤ 0`) carry the hour bucket's mean and
-its band (here a zero-width band: the bucket's two samples are equal), and the one after it (`k=1`) is the horizon
-point. The same window with
-`model:"holt"` → `200` with in-sample `lower`/`upper` `null` and finite bounds only at `now+1h`. A fully past
-`now-10h … now-5h` `baseline` window → `200`, 6 points. `now-2h+1s` (between grid steps) → 400
-`forecast: no forecast points in the requested range`.
+**Positive — Compose, backcast battle matrix** (48 hourly `baseline`/`season:"hour"` points ending now, `level:0.95`,
+`2026-10-23`):
+
+| Use case | Window / request | Measured |
+| --- | --- | --- |
+| Picker over the drawn history | `now-7d … now` | `200`, **169** points, every bound non-null |
+| Straddles the training last | `now-3h … now+1h` | `200`, 5 points; the four at/before `last` carry the bucket mean and band, `k=1` finite |
+| Wholly before training | `now-7d-3h … now-7d-1h` | `200`, 3 points — the seen bucket means `30,31,32` with their bands |
+| Non-baseline in-sample bounds | same straddle, `holt` α=.8 β=.2 | `200`; in-sample `lower`/`upper` `null`, `k=1` finite |
+| Final-state backcast | past week, `naive` | `200`, 25 points, all the final observation (`33`) |
+| Cap, backward | 1 ms grid, `from=1-1e6 … 1` | **413** `forecast: window has too many points` |
+| Unrepresentable step | times `[0, 2^53-1]` ms, `from=to=0` | **413** (saturation), and the next normal request is `200` |
+| No grid point | `now-2h+1s …` same | 400 `forecast: no forecast points in the requested range` |
+
+The same stored `cacheKey` through the Forecast datasource (`/api/ds/query`, `kind:"forecast"`, `now-3h … now`) →
+`200`, one frame with the four in-sample values `30,31,32,33`.
 
 **Negative — Compose:** `POST $B/forecast -d '{"cacheKey":"nope"}'` → 400 `forecast: cacheKey must be 64 lowercase hex chars`;
 `-d '{"times":[],"values":[],"model":"holt","from":1,"to":2}'` → 400 `forecast: series is empty`;
