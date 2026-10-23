@@ -450,9 +450,13 @@ carried and evaluated. Moving *Alert lookback* moved every node's window togethe
 **Positive — Compose, multi-series Prometheus panel** (a two-series labelled query over `overlay_gauge`, trained
 by the overlay into two snapshots): the *Alert series* dropdown appeared on the panel (a single-series panel shows
 no control), and clicking the button with no choice answered `Choose the metric series this alert rule is for.`
-without navigating. Choosing `{kind="alpha"}` produced the same six-row chain with
-`B.seriesName "{kind=\"alpha\"}"`, `B.seriesLabels {__name__: overlay_gauge, instance: metrics-exporter:8000,
-job: overlay, kind: alpha}` and `B.trainRange {now-30m → now}`, and the preview showed C = **2 series**
+without navigating. Choosing `{kind="alpha"}` produced the same six-row chain; the synthesized Forecast
+row is now `{refId: B, kind: forecast, cacheKey, seriesLabels: {__name__: overlay_gauge,
+instance: metrics-exporter:8000, job: overlay, kind: alpha}, maxDataPoints}` — the fit options and train
+window live in the snapshot, not in the query (the `seriesName` / `trainRange` fields in the original
+measurement predate the key-only editor; the corrected payload was re-checked live on 2026-10-23:
+a single-series rule produced `{refId: "B", kind: "forecast", cacheKey: "52ce77…", maxDataPoints: 15000}`).
+The preview showed C = **2 series**
 (alpha, beta), D = **1 series labelled `kind="alpha"`**, E = `1 items dropped from union(s)` with only the alpha
 series left, F = **one** instance (**Normal**). Rebuilding with `{kind="beta"}` flipped it: D labelled
 `kind="beta"`, the union warning dropped the **alpha** series, E = **6.53617** % and F evaluated on beta alone.
