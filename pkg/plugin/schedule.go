@@ -509,44 +509,6 @@ WHERE scope = $1 AND org_id = $2 AND key = $3 AND claimed_by = $4
 	return tag.RowsAffected() > 0, nil
 }
 
-// errScheduleStore stands in when the pool cannot be built, so the scheduler
-// reports a real error per attempt instead of a nil dereference.
-type errScheduleStore struct{ err error }
-
-func (s errScheduleStore) List(context.Context, int64) ([]ScheduleRow, error) { return nil, s.err }
-
-func (s errScheduleStore) Row(context.Context, int64, string, string) (ScheduleRow, bool, error) {
-	return ScheduleRow{}, false, s.err
-}
-
-func (s errScheduleStore) Upsert(context.Context, int64, ScheduleRow) error { return s.err }
-
-func (s errScheduleStore) Delete(context.Context, int64, string, string) error { return s.err }
-
-func (s errScheduleStore) Due(context.Context, int64, string, time.Time) (bool, error) {
-	return false, s.err
-}
-
-func (s errScheduleStore) Claim(context.Context, []int64, string, time.Duration, int) ([]ScheduleRow, error) {
-	return nil, s.err
-}
-
-func (s errScheduleStore) Finish(context.Context, string, int64, string, string, time.Time, string, int) error {
-	return s.err
-}
-
-func (s errScheduleStore) Extend(context.Context, string, int64, string, string, time.Duration) (bool, error) {
-	return false, s.err
-}
-
-func (s errScheduleStore) Identify(context.Context, int64, string, PanelProvenance) error {
-	return s.err
-}
-
-func (s errScheduleStore) Supersede(context.Context, int64, string, int, []string) error {
-	return s.err
-}
-
 // nextRun is the cron arithmetic both the plugin and the worker follow: the
 // expression is evaluated in the row's own timezone and stored as UTC, so a DST
 // transition shifts the wall-clock schedule without shifting the stored instant.

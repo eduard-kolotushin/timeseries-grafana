@@ -7,7 +7,6 @@ import (
 
 	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 	"github.com/eduard-kolotushin/timeseries-grafana/pkg/vault"
-	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 )
 
 const (
@@ -35,28 +34,34 @@ func connectStore(ctx context.Context, dsn string, tlsCfg storeTLSConfig) (Snaps
 	if dsn == "" {
 		return nil, nil
 	}
-	pg, err := openPostgresStore(ctx, dsn, tlsCfg)
-	if err != nil {
-		log.DefaultLogger.Error("forecast store", "err", err.Error())
-		return errStore{err: err}, nil
-	}
-	return withCache(pg), pg.Close
+	lazy := newLazyStores(func(ctx context.Context) (SnapshotStore, ScheduleStore, func(), error) {
+		pg, err := openPostgresStore(ctx, dsn, tlsCfg)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return withCache(pg), nil, pg.Close, nil
+	})
+	return lazy, lazy.Close
 }
 
 // connectStores opens one pool and hands it back as both the snapshot store and
 // the schedule store, so the app process never dials Postgres twice for the same
-// database. A DSN that cannot even be parsed yields error stores rather than nil:
-// the scheduler keeps ticking and logging per attempt instead of silently idling.
+// database. The pool is opened lazily: a DSN that cannot be parsed, or a Vault
+// store certificate that is not issued yet, is retried by the next operation
+// instead of replacing the store with a permanent error. The scheduler then keeps
+// ticking and logging per attempt, and recovers without a restart.
 func connectStores(ctx context.Context, dsn string, tlsCfg storeTLSConfig) (SnapshotStore, ScheduleStore, func()) {
 	if dsn == "" {
 		return nil, nil, nil
 	}
-	pg, err := openPostgresStore(ctx, dsn, tlsCfg)
-	if err != nil {
-		log.DefaultLogger.Error("forecast store", "err", err.Error())
-		return errStore{err: err}, errScheduleStore{err: err}, nil
-	}
-	return withCache(pg), pg, pg.Close
+	lazy := newLazyStores(func(ctx context.Context) (SnapshotStore, ScheduleStore, func(), error) {
+		pg, err := openPostgresStore(ctx, dsn, tlsCfg)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return withCache(pg), pg, pg.Close, nil
+	})
+	return lazy, lazy, lazy.Close
 }
 
 // SnapshotStore persists fitted snapshots. A nil store means persist is off.
