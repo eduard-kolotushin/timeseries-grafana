@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	forecast "github.com/eduard-kolotushin/timeseries-forecast"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
 
@@ -149,12 +151,20 @@ func TestCallResource(t *testing.T) {
 		Alpha:  1,
 		Beta:   1,
 	})
+	// Between two grid points, so the signed grid still has no point to emit.
 	emptyWindowBody, _ := json.Marshal(ForecastRequest{
 		Times:  []int64{0, 1000, 2000, 3000},
 		Values: []nullableFloat{1, 2, 3, 4},
 		Model:  "naive",
+		From:   500,
+		To:     500,
+	})
+	backcastBody, _ := json.Marshal(ForecastRequest{
+		Times:  []int64{0, 1000, 2000, 3000},
+		Values: []nullableFloat{1, 2, 3, 4},
+		Model:  "naive",
 		From:   0,
-		To:     2000,
+		To:     1000,
 	})
 	invertedBody, _ := json.Marshal(ForecastRequest{
 		Times:  []int64{0, 1000, 2000, 3000},
@@ -357,6 +367,27 @@ func TestCallResource(t *testing.T) {
 				}
 				if got.Times[0] != 5000 || got.Times[1] != 6000 {
 					t.Fatalf("skip-ahead times=%v", got.Times)
+				}
+			},
+		},
+		{
+			name:      "backcast window 200",
+			method:    http.MethodPost,
+			path:      "forecast",
+			body:      backcastBody,
+			expStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var got ForecastResponse
+				if err := json.Unmarshal(body, &got); err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Values) != 2 || got.Times[0] != 0 || got.Times[1] != 1000 {
+					t.Fatalf("backcast times=%v values=%v", got.Times, got.Values)
+				}
+				for i, v := range got.Values {
+					if v != 4 {
+						t.Fatalf("backcast value %d = %v, want the final observation 4", i, v)
+					}
 				}
 			},
 		},
@@ -799,6 +830,128 @@ func TestForecastCapBoundaries(t *testing.T) {
 	})
 }
 
+// TestForecastInSampleWindow pins the backcast contract of POST /forecast: the
+// window may reach into or before the training range, the values come from the
+// fitted state, and only the seasonal baseline has bands there.
+func TestForecastInSampleWindow(t *testing.T) {
+	app, err := newApp(context.Background(), backend.AppInstanceSettings{}, newMemoryStore(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Dispose)
+
+	call := func(t *testing.T, in ForecastRequest) (int, []byte) {
+		t.Helper()
+		body, err := json.Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r mockCallResourceResponseSender
+		if err := app.CallResource(context.Background(), &backend.CallResourceRequest{
+			PluginContext: backend.PluginContext{OrgID: 1},
+			Method:        http.MethodPost,
+			Path:          "forecast",
+			Body:          body,
+		}, &r); err != nil {
+			t.Fatal(err)
+		}
+		return r.response.Status, r.response.Body
+	}
+
+	start := time.Date(2026, 1, 12, 10, 0, 0, 0, time.UTC) // Monday 10:00
+	times := []int64{
+		start.UnixMilli(),
+		start.Add(time.Hour).UnixMilli(),
+		start.Add(24 * time.Hour).UnixMilli(),
+		start.Add(25 * time.Hour).UnixMilli(),
+	}
+	last := times[3]
+	priorMonday := start.AddDate(0, 0, -7).UnixMilli()
+
+	t.Run("baseline backcasts values and per-key bands", func(t *testing.T) {
+		status, raw := call(t, ForecastRequest{
+			Times: times, Values: []nullableFloat{8, 1, 12, 1},
+			Model: "baseline", Season: "hour", Level: 0.95,
+			From: priorMonday, To: last,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		// A week of hourly points through the training last: 7*24 + 25 + 1.
+		if len(got.Times) != 194 || got.Times[0] != priorMonday || got.Times[len(got.Times)-1] != last {
+			t.Fatalf("times = %d points, first=%d last=%d", len(got.Times), got.Times[0], got.Times[len(got.Times)-1])
+		}
+		if got.Values[0] != 10 {
+			t.Fatalf("workday 10:00 bucket = %v, want 10", got.Values[0])
+		}
+		z := math.Sqrt2 * math.Erfinv(0.95)
+		se := 2 * math.Sqrt(1.5)
+		if math.Abs(float64(got.Lower[0])-(10-z*se)) > 1e-9 || math.Abs(float64(got.Upper[0])-(10+z*se)) > 1e-9 {
+			t.Fatalf("in-sample bounds = %v %v, want %v %v", got.Lower[0], got.Upper[0], 10-z*se, 10+z*se)
+		}
+	})
+
+	t.Run("non-baseline in-sample bounds are null", func(t *testing.T) {
+		status, raw := call(t, ForecastRequest{
+			Times: times, Values: []nullableFloat{8, 1, 12, 1},
+			Model: "holt", Alpha: 0.5, Beta: 0.5, Level: 0.95,
+			From: priorMonday, To: last,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Lower) != len(got.Times) || len(got.Upper) != len(got.Times) {
+			t.Fatalf("bounds = %d %d points, want %d", len(got.Lower), len(got.Upper), len(got.Times))
+		}
+		for i := range got.Times {
+			if !math.IsNaN(float64(got.Lower[i])) || !math.IsNaN(float64(got.Upper[i])) {
+				t.Fatalf("k<=0 bound %d = %v %v, want null null", i, got.Lower[i], got.Upper[i])
+			}
+			if math.IsNaN(float64(got.Values[i])) {
+				t.Fatalf("value %d is null", i)
+			}
+		}
+	})
+
+	t.Run("naive past window repeats the final observation", func(t *testing.T) {
+		status, raw := call(t, ForecastRequest{
+			Times: times, Values: []nullableFloat{8, 1, 12, 1},
+			Model: "naive", From: priorMonday, To: last,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+		var got ForecastResponse
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		for i, v := range got.Values {
+			if v != 1 {
+				t.Fatalf("backcast value %d = %v, want 1", i, v)
+			}
+		}
+	})
+
+	t.Run("a past window between grid points still answers a reason", func(t *testing.T) {
+		at := last + 30*time.Minute.Milliseconds()
+		status, raw := call(t, ForecastRequest{
+			Times: times, Values: []nullableFloat{8, 1, 12, 1},
+			Model: "naive", From: at, To: at,
+		})
+		if status != http.StatusBadRequest || !strings.Contains(string(raw), forecast.ErrEmptyRange.Error()) {
+			t.Fatalf("status=%d body=%s", status, raw)
+		}
+	})
+}
+
 // A cached load is bounded by the snapshot's own grid, so a far window is refused
 // before Restore even though the overlay sent no training points.
 func TestForecastCachedWindowCap(t *testing.T) {
@@ -832,6 +985,28 @@ func TestForecastCachedWindowCap(t *testing.T) {
 	if status, raw := probe(2, 1+maxForecastPoints+1); status != http.StatusRequestEntityTooLarge ||
 		!strings.Contains(string(raw), errWindowTooManyPoints.Error()) {
 		t.Fatalf("over the cap: status=%d body=%s", status, raw)
+	}
+	// The signed grid: the same cap bounds a backcast, so an over-wide past
+	// window is refused before Restore and a modest one returns in-sample points.
+	if status, raw := probe(1-maxForecastPoints, 1); status != http.StatusRequestEntityTooLarge ||
+		!strings.Contains(string(raw), errWindowTooManyPoints.Error()) {
+		t.Fatalf("over the cap backward: status=%d body=%s", status, raw)
+	}
+	pastStatus, pastRaw := probe(-2, 1)
+	if pastStatus != http.StatusOK {
+		t.Fatalf("past window: status=%d body=%s", pastStatus, pastRaw)
+	}
+	var past ForecastResponse
+	if err := json.Unmarshal(bytes.TrimSpace(pastRaw), &past); err != nil {
+		t.Fatal(err)
+	}
+	if !past.Cached || len(past.Times) != 4 || past.Times[0] != -2 || past.Times[3] != 1 {
+		t.Fatalf("past window: cached=%v times=%v", past.Cached, past.Times)
+	}
+	for i, v := range past.Values {
+		if v != 2 {
+			t.Fatalf("past value %d = %v, want the final observation 2", i, v)
+		}
 	}
 	at := int64(1 + maxForecastPoints)
 	status, raw := probe(at, at)

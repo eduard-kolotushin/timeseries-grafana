@@ -156,6 +156,43 @@ func TestHttpStatusForLoadErrors(t *testing.T) {
 	}
 }
 
+// TestCheckForecastWindowSignedGrid pins the plugin's mirror of the library's
+// signed window arithmetic: k <= 0 is a backcast on the same grid, so a past
+// window is counted instead of being clamped to k >= 1 (which would let an
+// arbitrarily wide past window through to the library).
+func TestCheckForecastWindowSignedGrid(t *testing.T) {
+	const last, step = int64(1000), int64(100)
+	tests := []struct {
+		name        string
+		from, to    int64
+		wantTooMany bool
+	}{
+		{"future window", 1100, 1250, false},            // k = 1..2
+		{"straddling the last point", 850, 1250, false}, // k = -1..2
+		{"past only", 500, 900, false},                  // k = -5..-1
+		{"exactly the last point", 1000, 1000, false},   // k = 0
+		{"off-grid in the past", 950, 950, false},       // no grid point, the library answers
+		{"inverted", 1200, 1100, false},
+		{"one over the cap forward", 1100, last + step*(maxForecastPoints+1), true},
+		{"one over the cap backward", last - step*maxForecastPoints, 1000, true},
+		{"exactly the cap backward", last - step*(maxForecastPoints-1), 1000, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkForecastWindow(last, step, tt.from, tt.to)
+			if tt.wantTooMany {
+				if !errors.Is(err, errWindowTooManyPoints) {
+					t.Fatalf("err = %v, want errWindowTooManyPoints", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestCheckPanelKeys(t *testing.T) {
 	atCap := make([]string, maxPanelKeys)
 	for i := range atCap {

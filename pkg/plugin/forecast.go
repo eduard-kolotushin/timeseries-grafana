@@ -134,25 +134,23 @@ func (f *nullableFloat) UnmarshalJSON(b []byte) error {
 }
 
 // checkForecastWindow rejects a requested [from, to] window that would make the
-// model emit more than maxForecastPoints points. It mirrors the library's own
-// grid arithmetic (k0 = max(1, ceil((from-last)/step)), k1 = (to-last)/step),
-// computed in milliseconds, so it is neither a false rejection nor a leak: the
-// count is exact, and an empty window is left to ForecastRange's ErrEmptyRange
-// (which allocates nothing). Without this guard a single request with a far `to`
-// makes ForecastRange allocate a slice of billions of points and the process
-// dies with no error surfaced. The library exports the same bound
-// (forecast.MaxForecastPoints) and the same error (forecast.ErrTooManyPoints),
-// which httpStatusFor maps to this same 413, so a path that reaches the library
-// first is answered identically.
+// model emit more than maxForecastPoints points. It mirrors the library's signed
+// grid arithmetic (k0 = ceil((from-last)/step), k1 = floor((to-last)/step), both
+// any sign because k <= 0 is a backcast), computed in milliseconds, so it is
+// neither a false rejection nor a leak: the count is exact, and an empty window
+// is left to ForecastRange's ErrEmptyRange (which allocates nothing). Without
+// this guard a single request with a far `to` makes ForecastRange allocate a
+// slice of billions of points and the process dies with no error surfaced. The
+// library exports the same bound (forecast.MaxForecastPoints) and the same error
+// (forecast.ErrTooManyPoints), which httpStatusFor maps to this same 413, so a
+// path that reaches the library first is answered identically. The library owns
+// the saturation and |k|*step bounds; this mirror only caps the point count.
 func checkForecastWindow(lastMs, stepMs, fromMs, toMs int64) error {
 	if stepMs <= 0 {
 		return nil
 	}
 	k0 := ceilDiv(fromMs-lastMs, stepMs)
-	if k0 < 1 {
-		k0 = 1
-	}
-	k1 := (toMs - lastMs) / stepMs
+	k1 := floorDiv(toMs-lastMs, stepMs)
 	if k1 < k0 {
 		return nil
 	}
@@ -162,13 +160,25 @@ func checkForecastWindow(lastMs, stepMs, fromMs, toMs int64) error {
 	return nil
 }
 
-// ceilDiv is the library's ceilDuration on a millisecond grid: an exact ceiling
-// for positive operands, and 0 for zero or negative ones (the caller clamps to 1).
+// ceilDiv is the library's ceilDuration on a millisecond grid: a signed exact
+// ceiling for den > 0 (positive remainders round up; negative ones already
+// truncate toward the ceiling).
 func ceilDiv(num, den int64) int64 {
-	if num <= 0 {
-		return 0
+	q := num / den
+	if num > 0 && num%den != 0 {
+		q++
 	}
-	return (num + den - 1) / den
+	return q
+}
+
+// floorDiv is the library's floorDuration on a millisecond grid: a signed
+// floor for den > 0 (negative remainders round down).
+func floorDiv(num, den int64) int64 {
+	q := num / den
+	if num < 0 && num%den != 0 {
+		q--
+	}
+	return q
 }
 
 // checkForecastWindowRequest bounds the fit paths: the grid a response is emitted

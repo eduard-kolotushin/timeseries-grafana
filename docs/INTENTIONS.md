@@ -43,6 +43,7 @@ Grafana plugin that overlays univariate forecasts on dashboard queries. This plu
 - Nested panel option `forecastRange` `{from,to}` (Grafana raw strings). Empty / Auto is Grafana dashboard `now` through `now` + a model-based duration (independent of the dashboard range)
 - Replace the numeric horizon with that from/to picker (same UX as the training picker)
 - `POST /forecast` sends `from` / `to` unix ms; backend calls `ForecastRange` (and `ForecastIntervalRange` when bands are on)
+- The window may reach into or before the training range: every `last+k×step` grid point in `[from, to]` is emitted for any integer `k`, so `k ≤ 0` backcasts the final fitted state. Bands there come only from the baseline's stored per-key SEs; every other model answers `null` bounds. A window with no grid point still shows its reason
 - Plot `to` extends to include the forecast window so Auto `now→now+duration` is visible
 - If the forecast window has no drawable points, the panel shows a specific reason (no silent empty overlay; no silent fit of the visible series when the train query is empty)
 

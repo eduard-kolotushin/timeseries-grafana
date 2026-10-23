@@ -356,6 +356,110 @@ func TestQueryData(t *testing.T) {
 	})
 }
 
+// TestQueryDataBackcast pins the datasource half of the signed grid: a window
+// that ends at or before the snapshot's last timestamp restores the model and
+// serves in-sample points, with the baseline's per-key bands and null bounds for
+// every other model.
+func TestQueryDataBackcast(t *testing.T) {
+	ctx := context.Background()
+	const orgID int64 = 1
+	key := strings.Repeat("cd", 32)
+	start := time.Date(2026, 1, 12, 10, 0, 0, 0, time.UTC) // Monday 10:00
+	times := []int64{
+		start.UnixMilli(),
+		start.Add(time.Hour).UnixMilli(),
+		start.Add(24 * time.Hour).UnixMilli(),
+		start.Add(25 * time.Hour).UnixMilli(),
+	}
+	values := []nullableFloat{8, 1, 12, 1}
+	priorMonday := start.AddDate(0, 0, -7)
+	last := start.Add(25 * time.Hour)
+
+	store := newMemoryStore()
+	seedSnapshot(t, store, orgID, key, ForecastRequest{
+		Times: times, Values: values, Model: "baseline", Season: "hour",
+	})
+	ds, err := newDatasource(ctx, backend.DataSourceInstanceSettings{}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(t *testing.T, cacheKey, kind string, level float64, from, to time.Time) backend.DataResponse {
+		t.Helper()
+		resp, err := ds.QueryData(ctx, &backend.QueryDataRequest{
+			PluginContext: backend.PluginContext{OrgID: orgID},
+			Queries: []backend.DataQuery{{
+				RefID:     "B",
+				JSON:      queryJSON(t, kind, cacheKey, level),
+				TimeRange: backend.TimeRange{From: from, To: to},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Responses["B"]
+	}
+
+	t.Run("baseline serves in-sample values and bands", func(t *testing.T) {
+		got := run(t, key, "forecast", 0, priorMonday, last)
+		if got.Error != nil {
+			t.Fatalf("error=%v", got.Error)
+		}
+		if len(got.Frames) != 1 {
+			t.Fatalf("frames=%d", len(got.Frames))
+		}
+		field := got.Frames[0].Fields[1]
+		if field.Len() != 194 {
+			t.Fatalf("len=%d want 194 hourly points", field.Len())
+		}
+		if ts, ok := got.Frames[0].Fields[0].At(0).(time.Time); !ok || !ts.Equal(priorMonday) {
+			t.Fatalf("first time = %v, want %v", got.Frames[0].Fields[0].At(0), priorMonday)
+		}
+		if v, ok := field.At(0).(*float64); !ok || *v != 10 {
+			t.Fatalf("prior Monday 10:00 value = %v, want the bucket mean 10", field.At(0))
+		}
+
+		lower := run(t, key, "lower", 0.95, priorMonday, last)
+		if lower.Error != nil {
+			t.Fatalf("error=%v", lower.Error)
+		}
+		wantLo := 10 - math.Sqrt2*math.Erfinv(0.95)*2*math.Sqrt(1.5)
+		if v, ok := lower.Frames[0].Fields[1].At(0).(*float64); !ok || math.Abs(*v-wantLo) > 1e-9 {
+			t.Fatalf("lower = %v, want %v", lower.Frames[0].Fields[1].At(0), wantLo)
+		}
+	})
+
+	holtKey := strings.Repeat("ef", 32)
+	seedSnapshot(t, store, orgID, holtKey, ForecastRequest{
+		Times: times, Values: values, Model: "holt", Alpha: 0.5, Beta: 0.5,
+	})
+	t.Run("non-baseline in-sample bounds are null", func(t *testing.T) {
+		got := run(t, holtKey, "lower", 0.95, priorMonday, last)
+		if got.Error != nil {
+			t.Fatalf("error=%v", got.Error)
+		}
+		field := got.Frames[0].Fields[1]
+		if field.Len() != 194 {
+			t.Fatalf("len=%d want 194 hourly points", field.Len())
+		}
+		for i := range field.Len() {
+			if v, ok := field.At(i).(*float64); !ok || v != nil {
+				t.Fatalf("in-sample bound %d = %v, want null", i, field.At(i))
+			}
+		}
+	})
+
+	t.Run("off-grid past window answers a reason", func(t *testing.T) {
+		at := last.Add(30 * time.Minute)
+		got := run(t, key, "forecast", 0, at, at)
+		if got.Error == nil || !strings.Contains(got.Error.Error(), forecast.ErrEmptyRange.Error()) {
+			t.Fatalf("error=%v", got.Error)
+		}
+		if got.Status != backend.StatusBadRequest {
+			t.Fatalf("status=%v", got.Status)
+		}
+	})
+}
+
 // TestQueryDataCaps pins the two answers the alerting datasource owes a caller
 // whose query cannot be served: an absent cacheKey is the miss the overlay also
 // gets (the query editor writes the key asynchronously, so a just-added row arrives

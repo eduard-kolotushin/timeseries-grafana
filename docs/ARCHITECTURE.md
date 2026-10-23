@@ -274,7 +274,7 @@ Train step follows the model, not the dashboard interval:
 | seasonal naive | 24h |
 | naive, mean, drift, SES, Holt | 6h |
 
-The backend emits `last + k×step` points inside that window (skip-ahead; no backcast before `last+step`). One window is capped at `maxForecastPoints` (1e6) points on every path: a `[from, to]` that needs more is a 413 reason, and the library enforces the same bound as `forecast.MaxForecastPoints`.
+The backend emits every `last + k×step` grid point inside that window for any integer `k`: `k ≥ 1` is the forecast horizon, `k ≤ 0` evaluates the final fitted state at or before the training range's last timestamp (a backcast), from the snapshot's state alone. Bands at `k ≤ 0` exist only for the seasonal baseline (its per-key SE is looked up by timestamp); every other model returns `null` bounds there, which the panel draws as a gap. A window with no grid point (e.g. one entirely between two steps) is still a 400 reason. One window is capped at `maxForecastPoints` (1e6) points on every path, counted over the signed `k` range: a `[from, to]` that needs more is a 413 reason, and the library enforces the same bound as `forecast.MaxForecastPoints`.
 
 ## Resource routes
 
