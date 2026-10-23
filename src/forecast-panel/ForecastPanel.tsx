@@ -14,7 +14,7 @@ import { FORECAST_RESOURCE } from '../constants';
 import { postResource } from './abortable';
 import { dashboardUidFromPath } from './alertFromPanel';
 import { cacheKey, fitOptions } from './cacheKey';
-import { extractSeries, historyFrame } from './extract';
+import { extractSeries, graphableFrames, historyFrame } from './extract';
 import {
   dashboardNowMs,
   forecastLevel,
@@ -90,10 +90,7 @@ export const ForecastPanel: React.FC<Props> = ({
   // Frames the panel can actually draw. A frame with no rows — an instant query evaluated
   // past its data — has nothing to plot and Grafana's TimeSeries panel throws on one, where
   // Grafana's own panel answers the same frame with `No data`; such a frame is never plotted.
-  const graphableFrames = useMemo(
-    () => historyFrames.filter((frame) => extractSeries(frame, historyFrames).length > 0),
-    [historyFrames]
-  );
+  const graphable = useMemo(() => graphableFrames(historyFrames), [historyFrames]);
   const [load, setLoad] = useState<LoadedFrames>();
   const [error, setError] = useState<string | null>(null);
   const [forecastToMs, setForecastToMs] = useState<number | undefined>();
@@ -135,7 +132,7 @@ export const ForecastPanel: React.FC<Props> = ({
       const nowMs = dashboardNowMs(timeZone);
       const window = resolveForecastWindow(options, nowMs, timeZone);
 
-      const visible = graphableFrames.flatMap((series) => extractSeries(series, graphableFrames));
+      const visible = graphable.flatMap((series) => extractSeries(series, graphable));
       for (const points of visible) {
         history.push(historyFrame(points));
       }
@@ -266,20 +263,20 @@ export const ForecastPanel: React.FC<Props> = ({
       }
     };
     // `options` is a new object whenever any panel option changes, so it covers every field the load reads.
-  }, [id, key, queryKey, title, retrainNonce, data.request, graphableFrames, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main, dashboardUid]);
+  }, [id, key, queryKey, title, retrainNonce, data.request, graphable, allTargets, timeRange.to, timeZone, options, theme.colors.warning.main, dashboardUid]);
 
   // The load's frames once they answer the panel's current query, the current history
   // before that: a superseded load never leaves the previous range's frames on screen.
   const plotFrames = useMemo(
     () =>
       applyFieldOverrides({
-        data: drawableFrames(load, queryKey, graphableFrames),
+        data: drawableFrames(load, queryKey, graphable),
         fieldConfig,
         replaceVariables,
         theme,
         timeZone,
       }),
-    [load, queryKey, graphableFrames, fieldConfig, replaceVariables, theme, timeZone]
+    [load, queryKey, graphable, fieldConfig, replaceVariables, theme, timeZone]
   );
 
   const retrainNow = () => {

@@ -128,3 +128,14 @@ export function trainingForFit(display: SeriesPoints, trained: SeriesPoints[]): 
   }
   return pickTrainingPoints(display, trained);
 }
+
+/**
+ * Frames the overlay can draw: a frame with no extractable series (no time
+ * field, no numeric field, or no rows) is never plotted. The panel and every
+ * editor that reproduces its cacheKey must apply this same filter, because
+ * `getFieldDisplayName` derives a field's name from the frame list it is read
+ * with: an undrawable sibling frame otherwise changes the name — and the key.
+ */
+export function graphableFrames(frames: DataFrame[]): DataFrame[] {
+  return frames.filter((frame) => extractSeries(frame, frames).length > 0);
+}

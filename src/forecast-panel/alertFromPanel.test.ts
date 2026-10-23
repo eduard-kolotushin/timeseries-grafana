@@ -28,6 +28,7 @@ import {
   REASON_ALERT_SERIES_AMBIGUOUS,
   REASON_ALERT_SERIES_MISSING,
   REASON_ALERT_SERIES_REQUIRED,
+  REASON_ALERT_SERIES_NOT_ALERTING,
   REASON_ALERT_SQL_OFF,
   REASON_DASHBOARD_NOT_SAVED,
   REASON_FORECAST_DATASOURCE,
@@ -178,6 +179,25 @@ describe('panelSeries', () => {
     expect(panelSeries([f], [druid])).toEqual([
       { name: extractSeries(f, [f])[0].name, refId: 'A', labels: { host: 'a' }, fieldName: 'Value', legacyMeta: true },
     ]);
+  });
+
+  it('ignores a non-drawable sibling frame so a key matches the overlay', () => {
+    // Grafana prefixes a field with its frame name when the frame list has more
+    // than one name, so an empty sibling changes every displayed name unless the
+    // editor applies the same drawability filter the overlay does.
+    const drawable = frame('A');
+    drawable.name = 'A';
+    const empty = toDataFrame({
+      name: 'B',
+      refId: 'B',
+      fields: [
+        { name: 'Time', type: FieldType.time, values: [] },
+        { name: 'Value', type: FieldType.number, values: [] },
+      ],
+    });
+    const overlayName = extractSeries(drawable, [drawable])[0].name;
+    expect(extractSeries(drawable, [drawable, empty])[0].name).not.toBe(overlayName);
+    expect(panelSeries([drawable, empty], [druid])[0].name).toBe(overlayName);
   });
 
   it('skips a Forecast row’s own frames', () => {
@@ -355,6 +375,15 @@ describe('absoluteRangeMs', () => {
     const got = absoluteRangeMs({ from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T00:15:00.000Z' });
     expect(got.visibleFromMs).toBe(Date.UTC(2026, 0, 1));
     expect(got.visibleToMs).toBe(Date.UTC(2026, 0, 1, 0, 15));
+  });
+
+  it('resolves a zoneless picker string in the dashboard timezone', () => {
+    const got = absoluteRangeMs(
+      { from: '2026-01-01 00:00:00', to: '2026-01-01 01:00:00' },
+      'Europe/Moscow'
+    );
+    expect(got.visibleFromMs).toBe(Date.UTC(2025, 11, 31, 21));
+    expect(got.visibleToMs).toBe(Date.UTC(2025, 11, 31, 22));
   });
 
   it('is empty without a range', () => {
@@ -551,6 +580,14 @@ describe('ruleDefaultsFromPanel', () => {
       REASON_ALERT_SERIES_REQUIRED,
     ],
     ['a stale series choice', { options: { ...options, alertSeries: 'gone' } }, REASON_ALERT_SERIES_MISSING],
+    [
+      'a chosen series whose query cannot alert',
+      {
+        series: [{ name: 'hidden', refId: 'C', labels: { host: 'b' }, fieldName: 'hidden', legacyMeta: true }],
+        options: { ...options, alertSeries: 'hidden' },
+      },
+      REASON_ALERT_SERIES_NOT_ALERTING,
+    ],
     [
       'two label-free series nothing can name',
       {

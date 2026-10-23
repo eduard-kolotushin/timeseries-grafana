@@ -2,7 +2,7 @@ import { DataFrame, rangeUtil } from '@grafana/data';
 import { config, getDataSourceSrv, locationService } from '@grafana/runtime';
 import { cacheKey } from './cacheKey';
 import { FORECAST_DATASOURCE_TYPE } from '../forecast-datasource/types';
-import { extractSeries } from './extract';
+import { extractSeries, graphableFrames } from './extract';
 import { isForecastTarget, splitPanelFrames } from './mixed';
 import { DEFAULT_FORECAST_OPTIONS, ForecastOptions } from './types';
 
@@ -17,6 +17,8 @@ export const REASON_ALERT_SERIES_MISSING =
   'No matching metric series in this panel. Load it once, then pick the series this alert rule is for.';
 export const REASON_ALERT_SERIES_AMBIGUOUS =
   'This panel’s series carry no labels and no distinct series name, so the alert rule cannot say which one it is for. Give the query a per-series column or label, or split the series into separate panels.';
+export const REASON_ALERT_SERIES_NOT_ALERTING =
+  'The selected series is not produced by an alerting query; pick a series from a query that can alert.';
 export const REASON_ALERT_SQL_OFF =
   'This panel’s series carry no labels, so the rule has to pick one inside a SQL expression, and SQL expressions are off in this Grafana. Enable the `sqlExpressions` feature toggle, or label the series.';
 export const REASON_FORECAST_DATASOURCE =
@@ -86,7 +88,7 @@ export type PanelSeries = {
 export const DEFAULT_RELATIVE_TIME_RANGE: RelativeTimeRange = { from: 600, to: 0 };
 
 /** Percent deviation from the baseline the rule fires above unless the panel says otherwise. */
-export const DEFAULT_ALERT_TOLERANCE = 20;
+export const DEFAULT_ALERT_TOLERANCE = DEFAULT_FORECAST_OPTIONS.alertTolerance ?? 20;
 
 export function datasourceUid(ref: DatasourceRef, fallback?: DatasourceRef): string {
   const picked = ref ?? fallback;
@@ -192,7 +194,10 @@ export function windowFrom(alertLookback: string | undefined): RelativeTimeRange
  * has already interpolated into absolute times, so a key computed without it would differ
  * from the one the overlay fit wrote.
  */
-export function absoluteRangeMs(time?: { from: string; to: string }): {
+export function absoluteRangeMs(
+  time?: { from: string; to: string },
+  timeZone?: Parameters<typeof rangeUtil.convertRawToRange>[1]
+): {
   visibleFromMs?: number;
   visibleToMs?: number;
 } {
@@ -200,7 +205,9 @@ export function absoluteRangeMs(time?: { from: string; to: string }): {
     return {};
   }
   try {
-    const range = rangeUtil.convertRawToRange(time);
+    // The panel resolves its request range in the dashboard timezone; resolve the
+    // same picker text the same way so an absolute range cannot change the key.
+    const range = rangeUtil.convertRawToRange(time, timeZone);
     return { visibleFromMs: range.from.valueOf(), visibleToMs: range.to.valueOf() };
   } catch {
     return {};
@@ -216,10 +223,13 @@ export function absoluteRangeMs(time?: { from: string; to: string }): {
 export function panelSeries(frames: DataFrame[] | undefined, targets: PanelTarget[] | undefined): PanelSeries[] {
   const all = frames ?? [];
   const history = splitPanelFrames(all, targets ?? []).history;
+  // Same two steps as the overlay: the filter is judged over the split history,
+  // then names are read from the drawable subset.
+  const graphable = graphableFrames(history);
   const out: PanelSeries[] = [];
   const seen = new Set<string>();
-  for (const frame of history) {
-    for (const points of extractSeries(frame, history)) {
+  for (const frame of graphable) {
+    for (const points of extractSeries(frame, graphable)) {
       if (seen.has(points.name)) {
         continue;
       }
@@ -596,6 +606,13 @@ export async function ruleDefaultsFromPanel(input: {
     return { ok: false, reason: picked.reason };
   }
   const chosen = picked.series;
+  // The rule's metric rows must contain the chosen series: falling back to every
+  // row would compare another series with this series' baseline. A frame with no
+  // refId cannot be matched to a row, so it is accepted only when there is one.
+  const seriesRows = chosen.refId ? rows.filter((target) => target.refId === chosen.refId) : rows;
+  if (seriesRows.length === 0 || (!chosen.refId && rows.length > 1)) {
+    return { ok: false, reason: REASON_ALERT_SERIES_NOT_ALERTING };
+  }
   // How this rule says which series it is for. A labelled row pairs by label; a label-free
   // row is named the way the evaluation names it (Grafana's synthesized `__name__`, or a
   // SQL column the condition selects); a row nothing can name is refused, because Grafana
@@ -616,8 +633,7 @@ export async function ruleDefaultsFromPanel(input: {
   const queries: AlertQuery[] = [];
   // One series is compared with one baseline, so the rule carries the metric rows that
   // produced the chosen series; the baseline row identifies its snapshot by cacheKey.
-  const seriesRows = rows.filter((target) => !chosen.refId || target.refId === chosen.refId);
-  for (const target of seriesRows.length > 0 ? seriesRows : rows) {
+  for (const target of seriesRows) {
     // The SQL branch addresses the metric table by refId, so a target refId that is not a
     // bare SQL identifier gets a generated one — every other branch keeps the panel's.
     const declared = typeof target.refId === 'string' && target.refId ? target.refId : '';

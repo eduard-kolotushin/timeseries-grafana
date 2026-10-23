@@ -46,6 +46,9 @@ export const DEFAULT_FORECAST_OPTIONS: ForecastOptions = {
   trainRange: { from: '', to: '' },
   forecastRange: { from: '', to: '' },
   maxInflightLoads: 1,
+  alertSeries: '',
+  alertLookback: '',
+  alertTolerance: 20,
 };
 
 /**

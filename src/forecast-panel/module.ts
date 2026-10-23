@@ -152,6 +152,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'alertSeries',
       name: 'Alert series',
       description: 'Series the rule watches; shown when the panel has more than one.',
+      defaultValue: DEFAULT_FORECAST_OPTIONS.alertSeries,
       category: ['Alerting'],
       editor: AlertSeriesEditor,
     })
@@ -159,14 +160,14 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'alertLookback',
       name: 'Alert lookback',
       description: 'Both rule queries read now - this … now, e.g. 10m.',
-      defaultValue: '',
+      defaultValue: DEFAULT_FORECAST_OPTIONS.alertLookback,
       category: ['Alerting'],
     })
     .addNumberInput({
       path: 'alertTolerance',
       name: 'Alert tolerance',
       description: 'Percent deviation from the baseline that fires the rule.',
-      defaultValue: 20,
+      defaultValue: DEFAULT_FORECAST_OPTIONS.alertTolerance,
       settings: { min: 0 },
       category: ['Alerting'],
     })

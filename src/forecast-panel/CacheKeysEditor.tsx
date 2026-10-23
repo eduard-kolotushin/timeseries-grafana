@@ -4,6 +4,7 @@ import { ClipboardButton, useStyles2 } from '@grafana/ui';
 import { css } from '@emotion/css';
 import { absoluteRangeMs, livePanel, panelIdFromLocation, panelSeries } from './alertFromPanel';
 import { BaselineKey, baselineKeys } from './baselineKeys';
+import { dashboardTimeZone } from './lookback';
 import { DEFAULT_FORECAST_OPTIONS, ForecastOptions } from './types';
 
 type Computed = { signature: string; rows: BaselineKey[] };
@@ -37,7 +38,7 @@ export const CacheKeysEditor: React.FC<StandardEditorProps<unknown, unknown, For
       return;
     }
     let cancelled = false;
-    const range = absoluteRangeMs(time);
+    const range = absoluteRangeMs(time, dashboardTimeZone());
     void baselineKeys({
       targets,
       names,

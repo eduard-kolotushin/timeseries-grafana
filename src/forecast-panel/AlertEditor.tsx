@@ -14,6 +14,7 @@ import {
   REASON_DASHBOARD_NOT_SAVED,
   ruleDefaultsFromPanel,
 } from './alertFromPanel';
+import { dashboardTimeZone } from './lookback';
 import { metricTargets } from './mixed';
 import { ForecastOptions } from './types';
 
@@ -41,7 +42,7 @@ export const AlertEditor: React.FC<StandardEditorProps<unknown, unknown, Forecas
         options: context.options,
         series: panelSeries(context.data, panel.targets),
         metricTargets: metricTargets(panel.targets ?? []),
-        ...absoluteRangeMs(live.time),
+        ...absoluteRangeMs(live.time, dashboardTimeZone()),
         alertingUids: alertingUidsFor(panel.targets ?? [], panel.datasource),
         forecastDatasourceUid: forecastDatasourceUid(panel.targets ?? []),
       });
