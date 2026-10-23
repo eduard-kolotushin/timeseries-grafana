@@ -495,6 +495,39 @@ func TestPVVConfigResolution(t *testing.T) {
 	}
 }
 
+func TestPVVRequiresAnHTTPSURL(t *testing.T) {
+	t.Parallel()
+	// The certificate material is irrelevant: the URL check runs before it is loaded.
+	for _, tc := range []struct {
+		name string
+		cfg  retrainConfig
+		want string
+	}{
+		{
+			name: "plain http",
+			cfg:  retrainConfig{PVVMTLS: true, PVVURL: "http://pvv:8080"},
+			want: "must be https",
+		},
+		{
+			name: "no scheme",
+			cfg:  retrainConfig{PVVMTLS: true, PVVURL: "pvv:8080"},
+			want: "must be https",
+		},
+		{
+			name: "fallback to a plain Grafana URL",
+			cfg:  retrainConfig{PVVMTLS: true, GrafanaURL: "http://grafana:3000"},
+			want: "must be https",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newGrafanaPoster(tc.cfg)
+			if p.pvvInitErr == nil || !strings.Contains(p.pvvInitErr.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", p.pvvInitErr, tc.want)
+			}
+		})
+	}
+}
+
 func TestPVVCertParamsArePaths(t *testing.T) {
 	tests := []struct {
 		name string
@@ -503,17 +536,17 @@ func TestPVVCertParamsArePaths(t *testing.T) {
 	}{
 		{
 			name: "client certificate content is not a path",
-			cfg:  retrainConfig{PVVMTLS: true, PVVClientCert: "-----BEGIN CERTIFICATE-----\n", PVVClientKey: "/k"},
+			cfg:  retrainConfig{PVVMTLS: true, PVVURL: "https://pvv", PVVClientCert: "-----BEGIN CERTIFICATE-----\n", PVVClientKey: "/k"},
 			want: "FORECAST_PVV_CLIENT_CERT must be a file path",
 		},
 		{
 			name: "client key content is not a path",
-			cfg:  retrainConfig{PVVMTLS: true, PVVClientCert: "/c", PVVClientKey: "-----BEGIN PRIVATE KEY-----\n"},
+			cfg:  retrainConfig{PVVMTLS: true, PVVURL: "https://pvv", PVVClientCert: "/c", PVVClientKey: "-----BEGIN PRIVATE KEY-----\n"},
 			want: "FORECAST_PVV_CLIENT_KEY must be a file path",
 		},
 		{
 			name: "CA content is not a path",
-			cfg:  retrainConfig{PVVMTLS: true, PVVClientCert: "/c", PVVClientKey: "/k", PVVCA: "-----BEGIN CERTIFICATE-----\n"},
+			cfg:  retrainConfig{PVVMTLS: true, PVVURL: "https://pvv", PVVClientCert: "/c", PVVClientKey: "/k", PVVCA: "-----BEGIN CERTIFICATE-----\n"},
 			want: "FORECAST_PVV_CA_CERT must be a file path",
 		},
 	}

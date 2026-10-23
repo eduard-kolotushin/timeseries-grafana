@@ -509,6 +509,39 @@ func TestFetchFrames(t *testing.T) {
 	})
 }
 
+// TestFramesFromResultsFollowRefIDOrder: the reply is a map, so an unnamed spec
+// must not fit a different series on different ticks. Flattening in refId order
+// makes the choice stable; an error result fails the whole fetch as before.
+func TestFramesFromResultsFollowRefIDOrder(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_700_000_000, 0).UTC()
+	times := []time.Time{base, base.Add(time.Minute)}
+	results := map[string]dsQueryResult{
+		"B": {Frames: data.Frames{data.NewFrame("B", data.NewField("Time", nil, times), data.NewField("v", nil, []*float64{f64ptr(2), f64ptr(3)}))}},
+		"A": {Frames: data.Frames{data.NewFrame("A", data.NewField("Time", nil, times), data.NewField("v", nil, []*float64{f64ptr(1), f64ptr(2)}))}},
+	}
+	for i := 0; i < 100; i++ {
+		frames, err := framesFromResults(results)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(frames) != 2 || frames[0].Name != "A" || frames[1].Name != "B" {
+			t.Fatalf("order = %v, want A then B", frameNames(frames))
+		}
+	}
+	if _, err := framesFromResults(map[string]dsQueryResult{"A": {Error: "boom"}}); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("err = %v, want the reply error", err)
+	}
+}
+
+func frameNames(frames data.Frames) []string {
+	names := make([]string, len(frames))
+	for i, f := range frames {
+		names[i] = f.Name
+	}
+	return names
+}
+
 func TestSeriesFromFrames(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	minutes := func(n int) []time.Time {

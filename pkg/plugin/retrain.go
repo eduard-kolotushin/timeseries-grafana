@@ -418,6 +418,14 @@ func newGrafanaPoster(cfg retrainConfig) *grafanaPoster {
 	if !p.pvvEnabled {
 		return p
 	}
+	// An http URL silently ignores the TLS client config, so the client
+	// certificate is unused and the row's org/panel identifiers travel in the
+	// clear. Refuse the combination instead of downgrading, as compute and the
+	// Vault client do.
+	if u, err := url.Parse(p.pvvURL); err != nil || u.Scheme != "https" || u.Host == "" {
+		p.pvvInitErr = errors.New("forecast: FORECAST_PVV_URL must be https when PVV mTLS is enabled")
+		return p
+	}
 	if cfg.PVVManager != nil {
 		if err := rejectCertPEM("FORECAST_PVV_CA_CERT", cfg.PVVCA); err != nil {
 			p.pvvInitErr = err
@@ -571,12 +579,34 @@ func (p *grafanaPoster) orgID(ctx context.Context) (int64, error) {
 
 // dsQueryResponse is the subset of the /api/ds/query reply the scheduler reads.
 // Frames decode through the SDK's own data.Frame unmarshaller.
+type dsQueryResult struct {
+	Status int         `json:"status"`
+	Error  string      `json:"error"`
+	Frames data.Frames `json:"frames"`
+}
+
 type dsQueryResponse struct {
-	Results map[string]struct {
-		Status int         `json:"status"`
-		Error  string      `json:"error"`
-		Frames data.Frames `json:"frames"`
-	} `json:"results"`
+	Results map[string]dsQueryResult `json:"results"`
+}
+
+// framesFromResults flattens a /api/ds/query reply in refId order. The reply is a
+// map, so iterating it directly made an unnamed retrain spec fit whichever frame
+// the runtime happened to visit first.
+func framesFromResults(results map[string]dsQueryResult) (data.Frames, error) {
+	keys := make([]string, 0, len(results))
+	for refID := range results {
+		keys = append(keys, refID)
+	}
+	sort.Strings(keys)
+	frames := make(data.Frames, 0, len(results))
+	for _, refID := range keys {
+		res := results[refID]
+		if res.Error != "" {
+			return nil, fmt.Errorf("forecast: /api/ds/query: %s", res.Error)
+		}
+		frames = append(frames, res.Frames...)
+	}
+	return frames, nil
 }
 
 func (p *grafanaPoster) fetchFrames(ctx context.Context, row ScheduleRow) (data.Frames, error) {
@@ -632,12 +662,9 @@ func (p *grafanaPoster) fetchFrames(ctx context.Context, row ScheduleRow) (data.
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("forecast: /api/ds/query: %w", err)
 	}
-	frames := make(data.Frames, 0, len(out.Results))
-	for _, res := range out.Results {
-		if res.Error != "" {
-			return nil, fmt.Errorf("forecast: /api/ds/query: %s", res.Error)
-		}
-		frames = append(frames, res.Frames...)
+	frames, err := framesFromResults(out.Results)
+	if err != nil {
+		return nil, err
 	}
 	if len(frames) == 0 {
 		return nil, errors.New("forecast: /api/ds/query returned no frames")
@@ -1558,8 +1585,8 @@ func retryStatus(err error, attempts int) string {
 }
 
 // trainFromSpec re-runs the fit the browser did, from the stored spec alone.
-// The frame fetch stays outside the compute limiter, so a slow datasource does
-// not hold a Fit slot; only Fit and SnapshotOf are limited.
+// The frame fetch and the snapshot encode stay outside the compute limiter, so a
+// slow datasource or store does not hold a Fit slot; only the fit itself is limited.
 func (a *App) trainFromSpec(ctx context.Context, row ScheduleRow) error {
 	if row.Scope != scopePanel {
 		return fmt.Errorf("forecast: %q is not a panel schedule", row.Scope)
