@@ -64,17 +64,21 @@ export const CacheKeysEditor: React.FC<StandardEditorProps<unknown, unknown, For
     <div className={styles.list}>
       {rows.map((row) => (
         <div key={row.name} className={styles.row}>
-          <span className={styles.name} title={row.name}>
-            {row.name}
-          </span>
+          <div className={styles.head}>
+            <span className={styles.name} title={row.name}>
+              {row.name}
+            </span>
+            <ClipboardButton
+              getText={() => row.key}
+              icon="copy"
+              size="sm"
+              variant="secondary"
+              fill="text"
+              tooltip="Copy key"
+              aria-label={`Copy cache key for ${row.name}`}
+            />
+          </div>
           <code className={styles.key}>{row.key}</code>
-          <ClipboardButton
-            getText={() => row.key}
-            icon="copy"
-            size="sm"
-            tooltip="Copy key"
-            aria-label={`Copy cache key for ${row.name}`}
-          />
         </div>
       ))}
     </div>
@@ -90,28 +94,43 @@ function getStyles(theme: GrafanaTheme2) {
     list: css({
       display: 'flex',
       flexDirection: 'column',
-      gap: theme.spacing(0.5),
+      gap: theme.spacing(1),
       width: '100%',
     }),
+    // One series per block: the name and its copy button share a line, and the key gets
+    // the full width of the pane so it can wrap instead of overflowing.
     row: css({
       display: 'flex',
+      flexDirection: 'column',
+      gap: theme.spacing(0.25),
+      minWidth: 0,
+    }),
+    head: css({
+      display: 'flex',
       alignItems: 'center',
-      gap: theme.spacing(1),
+      gap: theme.spacing(0.5),
       minWidth: 0,
     }),
     name: css({
-      flex: '0 1 auto',
+      flex: '1 1 auto',
       minWidth: 0,
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap',
+      fontWeight: theme.typography.fontWeightMedium,
     }),
+    // Grafana's global stylesheet pins `code` to nowrap, so whiteSpace has to be reset
+    // for a 64-char key to wrap inside the narrow options pane.
     key: css({
-      flex: '1 1 auto',
-      minWidth: 0,
+      display: 'block',
+      width: '100%',
+      whiteSpace: 'normal',
+      overflowWrap: 'anywhere',
+      wordBreak: 'break-all',
       fontFamily: theme.typography.fontFamilyMonospace,
       fontSize: theme.typography.bodySmall.fontSize,
-      overflowWrap: 'anywhere',
+      color: theme.colors.text.secondary,
+      userSelect: 'all',
     }),
   };
 }

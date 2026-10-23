@@ -109,8 +109,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       id: 'cacheKeys',
       path: 'cacheKeysAction',
       name: 'Baseline keys',
-      description:
-        'Cache keys of the series this panel trains. Copy one into a Forecast datasource query or a hand-built alert rule.',
+      description: 'Cache key per series; copy one into a Forecast query or alert rule.',
       category: ['Training'],
       editor: CacheKeysEditor,
     })
