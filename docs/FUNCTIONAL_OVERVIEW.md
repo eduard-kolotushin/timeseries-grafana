@@ -103,6 +103,14 @@ restored from `timeseries-grafana-sandbox/provisioning/dashboards/minute-week.js
 `200`, `len(times)=120 len(values)=120`, first point `now+60s`, last `now+7200s`, no nulls (1-minute step of the
 model grid, `k≥1`).
 
+**Positive — Compose, backcast:** 48 hourly `baseline` (`season:"hour"`) points ending now, `from=now-3h`, `to=now+1h`,
+`level:0.95` → `200`, 5 points; the four at or before the training last (`k ≤ 0`) carry the hour bucket's mean and
+its band (here a zero-width band: the bucket's two samples are equal), and the one after it (`k=1`) is the horizon
+point. The same window with
+`model:"holt"` → `200` with in-sample `lower`/`upper` `null` and finite bounds only at `now+1h`. A fully past
+`now-10h … now-5h` `baseline` window → `200`, 6 points. `now-2h+1s` (between grid steps) → 400
+`forecast: no forecast points in the requested range`.
+
 **Negative — Compose:** `POST $B/forecast -d '{"cacheKey":"nope"}'` → 400 `forecast: cacheKey must be 64 lowercase hex chars`;
 `-d '{"times":[],"values":[],"model":"holt","from":1,"to":2}'` → 400 `forecast: series is empty`;
 `model:"nope"` with otherwise valid points → 400 `forecast: unknown model: nope`.
