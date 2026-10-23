@@ -22,12 +22,14 @@ export const CacheKeysEditor: React.FC<StandardEditorProps<unknown, unknown, For
   const live = livePanel(panelId);
   const targets = live.panel?.targets ?? [];
   const series = panelSeries(context.data, targets);
-  const range = absoluteRangeMs(live.time);
+  const time = live.time;
   const names = series.map((s) => s.name);
   const ready = names.length > 0 && targets.length > 0;
   // The live scene rebuilds its objects every render; this string is the value set the
-  // computation reads, so only a real change re-runs it.
-  const signature = JSON.stringify({ targets, names, options, range });
+  // computation reads, so only a real change re-runs it. `time` is the raw picker range,
+  // not its resolution: `now-6h` resolves to a new absolute instant on every render, and
+  // keying the effect on that would restart it on its own result.
+  const signature = JSON.stringify({ targets, names, options, time });
   const [computed, setComputed] = useState<Computed | null>(null);
 
   useEffect(() => {
@@ -35,6 +37,7 @@ export const CacheKeysEditor: React.FC<StandardEditorProps<unknown, unknown, For
       return;
     }
     let cancelled = false;
+    const range = absoluteRangeMs(time);
     void baselineKeys({
       targets,
       names,
@@ -62,25 +65,28 @@ export const CacheKeysEditor: React.FC<StandardEditorProps<unknown, unknown, For
   }
   return (
     <div className={styles.list}>
-      {rows.map((row) => (
-        <div key={row.name} className={styles.row}>
-          <div className={styles.head}>
-            <span className={styles.name} title={row.name}>
-              {row.name}
-            </span>
-            <ClipboardButton
-              getText={() => row.key}
-              icon="copy"
-              size="sm"
-              variant="secondary"
-              fill="text"
-              tooltip="Copy key"
-              aria-label={`Copy cache key for ${row.name}`}
-            />
+      {rows.length > 3 && <div className={styles.count}>{rows.length} series</div>}
+      <div className={styles.scroll}>
+        {rows.map((row) => (
+          <div key={row.name} className={styles.row}>
+            <div className={styles.head}>
+              <span className={styles.name} title={row.name}>
+                {row.name}
+              </span>
+              <ClipboardButton
+                getText={() => row.key}
+                icon="copy"
+                size="sm"
+                variant="secondary"
+                fill="text"
+                tooltip="Copy key"
+                aria-label={`Copy cache key for ${row.name}`}
+              />
+            </div>
+            <code className={styles.key}>{row.key}</code>
           </div>
-          <code className={styles.key}>{row.key}</code>
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 };
@@ -94,8 +100,24 @@ function getStyles(theme: GrafanaTheme2) {
     list: css({
       display: 'flex',
       flexDirection: 'column',
-      gap: theme.spacing(1),
+      gap: theme.spacing(0.5),
       width: '100%',
+      minWidth: 0,
+    }),
+    // A panel can show hundreds of series (a fit runs per series), so the list is a
+    // bounded scroll area instead of one block per series stretching the options pane.
+    count: css({
+      color: theme.colors.text.secondary,
+      fontSize: theme.typography.bodySmall.fontSize,
+    }),
+    scroll: css({
+      display: 'flex',
+      flexDirection: 'column',
+      gap: theme.spacing(1),
+      maxHeight: 240,
+      overflowY: 'auto',
+      minWidth: 0,
+      paddingRight: theme.spacing(0.5),
     }),
     // One series per block: the name and its copy button share a line, and the key gets
     // the full width of the pane so it can wrap instead of overflowing.
