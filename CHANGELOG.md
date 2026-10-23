@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.0 — 2026-10-23
+
 - **The Forecast datasource is identified by the trained baseline's cache key alone.** The query
   editor no longer asks for the model, alpha/beta/period/season/calendar, the training range, the
   source query or the series name: those existed only because the browser recomputed the overlay's
@@ -127,7 +129,7 @@
 - **The Forecast datasource's fingerprint can match a multi-target panel.** *Copy source from query A* (and the DataSourcePicker path) copied exactly one metric sibling into `sourceTargets`, while the overlay fingerprints **every** visible metric target — so on a Mixed panel with two metric rows the alerting query's `cacheKey` could never equal a stored snapshot and `QueryData` answered its `needTrain` miss forever. Both writers now store the full ordered sibling set, and a live check confirmed the copied key is byte-identical to the panel's stored key and that `QueryData` restores it
 - **The overview documents the second shipped executable.** `docs/FUNCTIONAL_OVERVIEW.md` gained the `gpx_forecast_migrate` row with its `--dsn`/`--dry-run`/`--timeout` contract and the ledger/lock facts, the retention and `drop=model` behaviour (F5/F12/F16/F20), the app's landing page (F34), and a dated **pass-5** measurement of the current head with the artifact hashes, the migrator transcripts (a scratch database's `pending` → `applied` → `nothing to apply`) and the live retention/copy/restore observations; its own contradictions were fixed (the datasource editor's key list, the `timeseries-forecast` version, the `superseded_at` column in the scheduler diagram, the two dangling audit pointers, the button-only option keys) and CI now type-checks the plugin-tools `Magefile.go`, which only `gofmt` saw before
 
-## 1.0.0
+### Initial release
 
 - App plugin with Go `/forecast` resource
 - Nested Forecast overlay panel
