@@ -1,26 +1,15 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { DataSourceInstanceSettings } from '@grafana/data';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { COVERAGE_SETTINGS } from '../forecast-panel/types';
 import { ForecastDataSource } from './datasource';
 import { QueryEditor } from './QueryEditor';
 import { defaultForecastQuery, ForecastDataQuery, FORECAST_DATASOURCE_TYPE } from './types';
-import { withCacheKey } from './queryModel';
 
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
-  DataSourcePicker: () => null,
   getDataSourceSrv: () => ({ get: jest.fn() }),
 }));
-
-// The digest is real by default; a test that needs to control resolution order overrides it.
-jest.mock('./queryModel', () => ({
-  ...jest.requireActual('./queryModel'),
-  withCacheKey: jest.fn(),
-}));
-
-const mockWithCacheKey = withCacheKey as jest.MockedFunction<typeof withCacheKey>;
-const actualQueryModel = () => jest.requireActual<{ withCacheKey: typeof withCacheKey }>('./queryModel');
 
 const settings = {
   uid: 'fc',
@@ -33,80 +22,72 @@ const settings = {
 } as unknown as DataSourceInstanceSettings;
 
 const datasource = new ForecastDataSource(settings);
+const key = '0123456789abcdef'.repeat(4);
 
 function query(partial: Partial<ForecastDataQuery> = {}): ForecastDataQuery {
-  return { refId: 'B', ...defaultForecastQuery, seriesName: 'up', sourceTargets: [], ...partial };
+  return { refId: 'B', ...defaultForecastQuery, ...partial };
 }
 
 function renderEditor(q: ForecastDataQuery) {
   const onChange = jest.fn();
   const onRunQuery = jest.fn();
-  render(<QueryEditor datasource={datasource} query={q} onChange={onChange} onRunQuery={onRunQuery} queries={[q]} />);
+  // Controlled harness: the editor's invalid state derives from the query prop, so a
+  // change has to come back as a new prop exactly as Grafana would deliver it.
+  function Harness() {
+    const [query, setQuery] = useState(q);
+    return (
+      <QueryEditor
+        datasource={datasource}
+        query={query}
+        onChange={(next) => {
+          onChange(next);
+          setQuery(next);
+        }}
+        onRunQuery={onRunQuery}
+      />
+    );
+  }
+  render(<Harness />);
   return { onChange, onRunQuery };
 }
 
 describe('QueryEditor', () => {
-  beforeEach(() => {
-    mockWithCacheKey.mockImplementation((q) => actualQueryModel().withCacheKey(q));
-  });
-
-  it('composes two train-range edits made in one tick', async () => {
+  it('stores a pasted key and runs it once complete', () => {
     const { onChange, onRunQuery } = renderEditor(query());
 
-    await act(async () => {
-      fireEvent.change(screen.getByRole('textbox', { name: 'Train from' }), { target: { value: 'now-7d' } });
-      fireEvent.change(screen.getByRole('textbox', { name: 'Train to' }), { target: { value: 'now' } });
-    });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Baseline cache key' }), { target: { value: key } });
 
-    // Neither edit may drop the other, and the row is pushed with the key for what it holds.
-    expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        seriesName: 'up',
-        trainRange: { from: 'now-7d', to: 'now' },
-        cacheKey: expect.stringMatching(/^[a-f0-9]{64}$/),
-      })
-    );
-    expect(onRunQuery).toHaveBeenCalled();
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ cacheKey: key }));
+    expect(onRunQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('stores a partial key without querying it', () => {
+    const { onChange, onRunQuery } = renderEditor(query());
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Baseline cache key' }), { target: { value: '0123' } });
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ cacheKey: '0123' }));
+    // The backend refuses a malformed key, so an unfinished paste must not run.
+    expect(onRunQuery).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: 'Baseline cache key' })).toHaveAttribute('aria-invalid', 'true');
   });
 
   it('bounds Coverage with the same rule the panel option clamps to', () => {
     renderEditor(query({ kind: 'lower' }));
 
-    // Unclamped, the input accepted coverage outside (0, 1) while the overlay clamped it.
     const coverage = screen.getByRole('spinbutton', { name: 'Coverage' });
     expect(coverage).toHaveAttribute('min', String(COVERAGE_SETTINGS.min));
     expect(coverage).toHaveAttribute('max', String(COVERAGE_SETTINGS.max));
     expect(coverage).toHaveAttribute('step', String(COVERAGE_SETTINGS.step));
   });
 
-  it('does not let a stale auto-key flush overwrite a newer edit', async () => {
-    const resolvers: Array<(q: ForecastDataQuery) => void> = [];
-    mockWithCacheKey.mockImplementation(
-      (q) =>
-        new Promise<ForecastDataQuery>((resolve) => {
-          resolvers.push((next) => resolve(next));
-          void q;
-        })
-    );
+  it('asks for no fit parameter: the key is the whole identity', () => {
+    renderEditor(query());
 
-    const { onChange } = renderEditor(query());
-    await act(async () => {});
-    expect(resolvers).toHaveLength(1); // the mount effect's auto-key call
-
-    fireEvent.change(screen.getByRole('textbox', { name: 'Train from' }), { target: { value: 'now-2d' } });
-    await act(async () => {});
-    expect(resolvers).toHaveLength(2); // the edit's own call, still in flight
-
-    await act(async () => {
-      resolvers[1]({ ...query(), cacheKey: 'newer' });
-    });
-    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ cacheKey: 'newer' }));
-
-    // The pre-edit flush resolves last; it must be dropped, not pushed over the edit.
-    await act(async () => {
-      resolvers[0]({ ...query(), cacheKey: 'stale' });
-    });
-    expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ cacheKey: 'stale' }));
-    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ cacheKey: 'newer' }));
+    // The snapshot behind the key already holds the model and its training window.
+    expect(screen.queryByRole('combobox', { name: 'Model' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Train from' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Series name' })).toBeNull();
+    expect(screen.queryByText('Source query')).toBeNull();
   });
 });

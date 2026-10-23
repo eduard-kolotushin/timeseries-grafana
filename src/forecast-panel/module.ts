@@ -1,10 +1,11 @@
 import { PanelPlugin } from '@grafana/data';
-import { COVERAGE_SETTINGS, ForecastOptions } from './types';
+import { COVERAGE_SETTINGS, DEFAULT_FORECAST_OPTIONS, ForecastOptions } from './types';
 import { ForecastPanel } from './ForecastPanel';
 import { TrainRangeEditor } from './TrainRangeEditor';
 import { RetrainEditor } from './RetrainEditor';
 import { AlertEditor } from './AlertEditor';
 import { AlertSeriesEditor } from './AlertSeriesEditor';
+import { CacheKeysEditor } from './CacheKeysEditor';
 
 export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOptions((builder) => {
   return builder
@@ -12,7 +13,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'model',
       name: 'Model',
       description: 'Model fitted to the training window.',
-      defaultValue: 'holt',
+      defaultValue: DEFAULT_FORECAST_OPTIONS.model,
       category: ['Training'],
       settings: {
         options: [
@@ -30,7 +31,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'alpha',
       name: 'Alpha',
       description: 'Level smoothing (SES, Holt), 0–1.',
-      defaultValue: 0.8,
+      defaultValue: DEFAULT_FORECAST_OPTIONS.alpha,
       category: ['Training'],
       settings: { min: 0.001, max: 1, step: 0.05 },
       showIf: (opts) => opts.model === 'ses' || opts.model === 'holt',
@@ -39,7 +40,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'beta',
       name: 'Beta',
       description: 'Trend smoothing (Holt), 0–1.',
-      defaultValue: 0.2,
+      defaultValue: DEFAULT_FORECAST_OPTIONS.beta,
       category: ['Training'],
       settings: { min: 0.001, max: 1, step: 0.05 },
       showIf: (opts) => opts.model === 'holt',
@@ -48,7 +49,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'period',
       name: 'Seasonal period',
       description: 'Points per seasonal cycle, e.g. 7.',
-      defaultValue: 7,
+      defaultValue: DEFAULT_FORECAST_OPTIONS.period,
       category: ['Training'],
       settings: { min: 1, integer: true },
       showIf: (opts) => opts.model === 'seasonal',
@@ -57,7 +58,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'season',
       name: 'Seasonality',
       description: 'Seasonal bucket for the baseline, e.g. minute of week for 1-minute data.',
-      defaultValue: 'hour',
+      defaultValue: DEFAULT_FORECAST_OPTIONS.season,
       category: ['Training'],
       settings: {
         options: [
@@ -73,7 +74,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'calendar',
       name: 'Calendar',
       description: 'Holiday calendar for the baseline; RU covers 2026 only.',
-      defaultValue: '',
+      defaultValue: DEFAULT_FORECAST_OPTIONS.calendar,
       category: ['Training'],
       settings: {
         options: [
@@ -88,13 +89,14 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'trainRange',
       name: 'Training period',
       description: 'Fit window, independent of the dashboard range. Empty is Auto.',
-      defaultValue: { from: '', to: '' },
+      defaultValue: { ...DEFAULT_FORECAST_OPTIONS.trainRange },
       category: ['Training'],
       editor: TrainRangeEditor,
       settings: { kind: 'train' },
     })
-    // Button-only editors. They never call onChange; each has its own unused
-    // path so a future onChange cannot clobber a real option like trainRange.
+    // Editors that never call onChange — the two buttons and the read-only key list.
+    // Each has its own unused path so a future onChange cannot clobber a real option
+    // like trainRange.
     .addCustomEditor({
       id: 'retrain',
       path: 'retrainAction',
@@ -104,11 +106,20 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       editor: RetrainEditor,
     })
     .addCustomEditor({
+      id: 'cacheKeys',
+      path: 'cacheKeysAction',
+      name: 'Baseline keys',
+      description:
+        'Cache keys of the series this panel trains. Copy one into a Forecast datasource query or a hand-built alert rule.',
+      category: ['Training'],
+      editor: CacheKeysEditor,
+    })
+    .addCustomEditor({
       id: 'forecastRange',
       path: 'forecastRange',
       name: 'Forecast range',
       description: 'Forecast window; empty is Auto (now → now + model horizon).',
-      defaultValue: { from: '', to: '' },
+      defaultValue: { ...DEFAULT_FORECAST_OPTIONS.forecastRange },
       category: ['Forecast'],
       editor: TrainRangeEditor,
       settings: { kind: 'forecast' },
@@ -117,7 +128,7 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'interval',
       name: 'Interval coverage',
       description: 'Coverage in (0, 1), e.g. 0.95. 0 hides the band.',
-      defaultValue: 0.95,
+      defaultValue: DEFAULT_FORECAST_OPTIONS.interval,
       category: ['Forecast'],
       settings: { ...COVERAGE_SETTINGS },
       showIf: (opts) => opts.showInterval !== false,
@@ -126,14 +137,14 @@ export const plugin = new PanelPlugin<ForecastOptions>(ForecastPanel).setPanelOp
       path: 'showInterval',
       name: 'Show prediction interval',
       description: 'Draw the Gaussian prediction band.',
-      defaultValue: true,
+      defaultValue: DEFAULT_FORECAST_OPTIONS.showInterval,
       category: ['Overlay'],
     })
     .addNumberInput({
       path: 'maxInflightLoads',
       name: 'Max in-flight loads',
       description: 'Concurrent forecast loads; extra refreshes cancel the oldest.',
-      defaultValue: 1,
+      defaultValue: DEFAULT_FORECAST_OPTIONS.maxInflightLoads,
       category: ['Overlay'],
       settings: { min: 1, integer: true },
     })

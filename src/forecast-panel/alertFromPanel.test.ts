@@ -402,7 +402,7 @@ describe('ruleDefaultsFromPanel', () => {
     ]);
   });
 
-  it('synthesizes the forecast query from the panel fit and the overlay’s own cacheKey', async () => {
+  it('synthesizes the key-only forecast query the overlay wrote', async () => {
     const got = await build();
     expect(got.ok).toBe(true);
     if (!got.ok) {
@@ -410,27 +410,16 @@ describe('ruleDefaultsFromPanel', () => {
     }
     const fc = got.defaults.queries[1];
     expect(fc.queryType).toBe('');
-    expect(fc.model).toMatchObject({
+    // The whole point of the synthesized row: the panel's own fit key, so the rule restores
+    // the trained snapshot instead of answering needTrain. No fit option is repeated — the
+    // snapshot holds the model and its training window.
+    expect(fc.model).toEqual({
+      refId: 'B',
       kind: 'forecast',
-      seriesName: 'p95',
-      model: 'baseline',
-      season: 'minute-week',
-      alpha: 0.8,
-      beta: 0.2,
-      period: 7,
-      calendar: '',
-      level: 0.95,
-      trainRange: { from: 'now-21d', to: 'now' },
-      sourceTargets: [druid],
+      cacheKey: await cacheKey({ targets: [druid], visibleFromMs, visibleToMs, options, seriesName: 'p95' }),
       seriesLabels: { host: 'a' },
-      datasource: { uid: 'fc', type: FORECAST_DATASOURCE_TYPE },
       maxDataPoints: 15000,
     });
-    // The whole point of the synthesized row: the panel's own fit key, so the rule restores
-    // the trained snapshot instead of answering needTrain.
-    expect(fc.model.cacheKey).toBe(
-      await cacheKey({ targets: [druid], visibleFromMs, visibleToMs, options, seriesName: 'p95' })
-    );
     expect(fc.model.cacheKey).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -471,8 +460,9 @@ describe('ruleDefaultsFromPanel', () => {
     // The panel's own rows keep their refIds; the synthesized row takes the first free letter
     // (`A`, since only `C` is taken), and the metric reduce reads the chosen series' row.
     expect(dataRows(got.defaults.queries).map((q) => q.refId)).toEqual(['C', 'A']);
-    expect(got.defaults.queries[1].model.seriesName).toBe('p99');
-    expect(got.defaults.queries[1].model.sourceTargets).toEqual([druid, c]);
+    expect(got.defaults.queries[1].model.cacheKey).toBe(
+      await cacheKey({ targets: [druid, c], visibleFromMs, visibleToMs, options, seriesName: 'p99' })
+    );
     expect(got.defaults.queries[2].model.expression).toBe('C');
     expect(got.defaults.queries[3].model.expression).toBe('A');
   });

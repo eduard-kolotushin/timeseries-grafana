@@ -36,6 +36,7 @@ describe('panel option groups', () => {
       { path: 'calendar', category: 'Training' },
       { path: 'trainRange', category: 'Training' },
       { path: 'retrainAction', category: 'Training' },
+      { path: 'cacheKeysAction', category: 'Training' },
       { path: 'forecastRange', category: 'Forecast' },
       { path: 'interval', category: 'Forecast' },
       { path: 'showInterval', category: 'Overlay' },

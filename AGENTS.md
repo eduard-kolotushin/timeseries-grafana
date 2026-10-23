@@ -67,7 +67,7 @@ Nested forecast datasource for Grafana alerting queries (`QueryData` Restore + `
 
 ## v9 in scope
 
-Mixed metric + Forecast datasource on the overlay: ignore Forecast frames for fit/plot/cacheKey; no draw-mode option; Forecast query editor stays manual (optional Copy source from query A). Grafana Alert tab only on Time series / Graph when that viz opened the editor; use re-open, panel menu New alert rule, or the Alerting page. Do not ship alert rules.
+Mixed metric + Forecast datasource on the overlay: ignore Forecast frames for fit/plot/cacheKey; no draw-mode option; the Forecast query editor takes the trained baseline's `cacheKey` (the panel's Baseline keys lists a copyable key per series). Grafana Alert tab only on Time series / Graph when that viz opened the editor; use re-open, panel menu New alert rule, or the Alerting page. Do not ship alert rules.
 
 ## v10 in scope
 
@@ -99,7 +99,7 @@ Fitting capacity scales on its own, selected by one deployment variable. `FORECA
 
 ## v17 in scope
 
-Overlay options **Alerting** builds the whole rule from panel state: metric queries copied, one Forecast query synthesized (fit options, `sourceTargets`, chosen series name and labels, the overlay's `cacheKey`), both over `now - <Alert lookback> … now`, with two Reduce(`last`) nodes, a Math percent-deviation node and a Threshold on it as the alert condition; **Alert series** is offered only when the panel has more than one series (a `Select a series` placeholder until one is picked), and a metric row whose series carry no labels answers a reason instead of a rule that would alert on every series. The label-free row is handled first by the synthesized-name rule above and otherwise by a `sql` expression as the alert condition (feature-gated on Grafana's `sqlExpressions`), which selects the series by name and computes the deviation in SQL. No Mixed datasource or Forecast row is required. The nested datasource's `QueryData` labels its frame from the query model's `seriesLabels`. Do not ship alert rules.
+Overlay options **Alerting** builds the whole rule from panel state: metric queries copied, one Forecast query synthesized (the overlay's `cacheKey` plus the chosen series' labels; the snapshot holds the fit options), both over `now - <Alert lookback> … now`, with two Reduce(`last`) nodes, a Math percent-deviation node and a Threshold on it as the alert condition; **Alert series** is offered only when the panel has more than one series (a `Select a series` placeholder until one is picked), and a metric row whose series carry no labels answers a reason instead of a rule that would alert on every series. The label-free row is handled first by the synthesized-name rule above and otherwise by a `sql` expression as the alert condition (feature-gated on Grafana's `sqlExpressions`), which selects the series by name and computes the deviation in SQL. No Mixed datasource or Forecast row is required. The nested datasource's `QueryData` labels its frame from the query model's `seriesLabels`. Do not ship alert rules.
 
 ## v18 in scope
 

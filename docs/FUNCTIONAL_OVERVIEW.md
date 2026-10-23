@@ -254,7 +254,7 @@ snapshot, and the next tick gave the row back with the deployment default cron (
 | --- | --- |
 | **Function** | Turn a stored snapshot back into a frame so Grafana alerting can query the forecast and its interval by `refId`. This is the **only** way to read a snapshot from another datum. |
 | **Who can use** | **Alert rule** (Grafana alerting) or any datasource query. No Admin gate; the datasource's own jsonData carries the store (F20). |
-| **How configured** | Datasource provisioned jsonData — `storeUrl` as one DSN, or field-wise `storeHost`/`storePort`/… (the datasource's config editor renders only a read-only list of the `store*` keys it finds, never a value; F20) — or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`. Query editor is manual — no auto-fill; *Copy source from query A* is opt-in. |
+| **How configured** | Datasource provisioned jsonData — `storeUrl` as one DSN, or field-wise `storeHost`/`storePort`/… (the datasource's config editor renders only a read-only list of the `store*` keys it finds, never a value; F20) — or the merged `[plugin.eduardkolotushin-forecast-datasource]` ini section. Alerting `QueryData` also falls back to the parent app's `AppInstanceSettings`. The query editor asks only for the trained baseline's `cacheKey` (plus the output kind and, for a bound, coverage): the snapshot already holds the model and its training window, and the panel's *Baseline keys* option lists a copyable key per series. |
 | **Input params** | Query `{kind: "forecast"\|"lower"\|"upper", cacheKey, level?}` inside a normal `/api/ds/query` body with `from`/`to`. Each query's JSON is capped at 64 KiB (`maxQueryJSONBytes`); a larger one is rejected rather than decoded. |
 | **Expected result** | 200 with one frame per query and real values; the same signed window as F2, so a range at or before the snapshot's last timestamp returns in-sample points (baseline bands; `null` bounds for other models); a miss is an error: `needTrain: train on the Forecast overlay panel first`; unknown `kind` → 400. |
 
@@ -312,7 +312,7 @@ history, forecast and bands, and no reason text.
 | --- | --- |
 | **Function** | Choose the model, the two windows, the band and the panel's load cap. |
 | **Who can use** | **Panel** (any user who can edit the dashboard). |
-| **How configured** | Panel options, stored in the dashboard JSON, in four groups in this order: **Training** (*Model*, *Alpha*, *Beta*, *Seasonal period*, *Seasonality*, *Calendar*, *Training period*, *Saved model*), **Forecast** (*Forecast range*, *Interval coverage*), **Overlay** (*Show prediction interval*, *Max in-flight loads*), **Alerting** (*Alert series*, *Alert lookback*, *Alert tolerance*, *New alert rule*). Keys: `model`, `forecastRange`, `alpha`, `beta`, `period`, `season`, `calendar`, `showInterval`, `interval`, `trainRange`, `maxInflightLoads` (source: `src/forecast-panel/module.ts`). The same file registers two button-only editors whose keys store nothing — `retrainAction` (*Saved model*) and `alertAction` (*New alert rule*): they never call `onChange`, so they are named after actions rather than options. |
+| **How configured** | Panel options, stored in the dashboard JSON, in four groups in this order: **Training** (*Model*, *Alpha*, *Beta*, *Seasonal period*, *Seasonality*, *Calendar*, *Training period*, *Saved model*, *Baseline keys*), **Forecast** (*Forecast range*, *Interval coverage*), **Overlay** (*Show prediction interval*, *Max in-flight loads*), **Alerting** (*Alert series*, *Alert lookback*, *Alert tolerance*, *New alert rule*). Keys: `model`, `forecastRange`, `alpha`, `beta`, `period`, `season`, `calendar`, `showInterval`, `interval`, `trainRange`, `maxInflightLoads` (source: `src/forecast-panel/module.ts`). The same file registers three editors whose keys store nothing — `retrainAction` (*Saved model*), `cacheKeysAction` (*Baseline keys*, read-only) and `alertAction` (*New alert rule*): they never call `onChange`, so they are named after actions rather than options. |
 | **Input params** | `forecastRange`/`trainRange` are `{from,to}` raw strings — empty means **Auto** (`now` → `now` + model duration; the last model window ending at the panel's `to`). `interval` 0 hides the band; `maxInflightLoads` minimum 1 (default 1). |
 | **Expected result** | The panel redraws with the new option. The cacheKey fingerprint no longer carries the removed legacy lookback, so each panel refits once under a new key; an alert rule already carrying an older key restores its old snapshot until retention sweeps it. |
 
@@ -425,14 +425,14 @@ at 700px on both versions.
 | **Function** | Build a complete Grafana alert rule from the panel: its metric query plus a synthesized Forecast query that restores the trained baseline, both over one window ending now. |
 | **Who can use** | **Panel** (needs the dashboard saved and, in Grafana, permission to create rules). |
 | **How configured** | Panel options → *Alerting*: **Alert lookback** (default 10m), **Alert tolerance** (% deviation, default 20) and **Alert series** (a dropdown rendered only when the panel has more than one series); then *New alert rule*. No Mixed datasource and no hand-filled Forecast row is involved. |
-| **Input params** | The metric series, and only on a multi-series panel. The defaults carry the panel title, the metric rows, the synthesized Forecast row (fit options, `sourceTargets`, series name, the overlay's `cacheKey`, and `seriesLabels` — the chosen series' own labels, or `{__name__: …}` where Grafana synthesizes that name), the deviation as two Reduce(`last`) + Math + Threshold nodes — or, for a row no label or synthesized name can point at, one `sql` expression as the condition — and the dashboard/panel annotations. |
+| **Input params** | The metric series, and only on a multi-series panel. The defaults carry the panel title, the metric rows, the synthesized Forecast row (`kind`, the overlay's `cacheKey`, and `seriesLabels` — the chosen series' own labels, or `{__name__: …}` where Grafana synthesizes that name; no fit option is repeated, because the snapshot holds them), the deviation as two Reduce(`last`) + Math + Threshold nodes — or, for a row no label or synthesized name can point at, one `sql` expression as the condition — and the dashboard/panel annotations. |
 | **Expected result** | The browser lands on `/alerting/new?defaults=…` with a four-node expression chain that conditions on the Threshold over the Math, or with a `sql` condition where the series can only be named inside SQL. An unsaved dashboard answers `Dashboard must be saved before alerts can be added.`; a panel with no alerting-capable query answers `Cannot create alerts from this panel because no query to an alerting capable datasource is found.`; a multi-series panel with no choice answers `Choose the metric series this alert rule is for.`; a row no label or synthesized name can point at answers `This panel’s series carry no labels, so the rule has to pick one inside a SQL expression, …` when Grafana's `sqlExpressions` feature is off and `This panel’s series carry no labels and no distinct series name, …` when no column can name it either; a deployment without a Forecast datasource instance answers `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` None of them navigates. |
 
 **Positive — Compose, single-series Druid panel** (`Forecast minute-of-week demo` → panel 3, *Seasonal baseline (minute of week, with variance)*):
 clicking *New alert rule* landed on `/alerting/new?defaults=…` carrying the panel title, the
 `__dashboardUid__` / `__panelId__` annotations, and six rows — A = the panel's Druid SQL target (`druid`),
-B = a synthesized `forecast` row (`seriesName "value"`, `sourceTargets ["A"]`, the panel's `trainRange`, a 64-hex
-`cacheKey`), C = Reduce(`last`) over A, D = Reduce(`last`) over B, E = Math `abs(($C - $D) / $D) * 100`,
+B = a synthesized `forecast` row (the overlay's 64-hex `cacheKey`; the fit options and `sourceTargets` it used to
+repeat were dropped, leaving `kind`, the key and `seriesLabels`), C = Reduce(`last`) over A, D = Reduce(`last`) over B, E = Math `abs(($C - $D) / $D) * 100`,
 F = Threshold `IS ABOVE 20` with `condition: "F"`. **Every** node carried `relativeTimeRange {from: 600, to: 0}`,
 where the behaviour this replaces was one dashboard-derived `{from: 21600, to: -10800}` for both data rows — which
 ended the metric query at *now* and rendered the forecast row from *now* into the future. The rule form rendered
@@ -533,7 +533,7 @@ ran through `make helm-grafana`'s port-forward, which serves the same pod).
 | --- | --- |
 | **Function** | Let one panel draw the metric *and* hold a Forecast datasource query for alerting, without letting the Forecast frames affect the fit or the cache key. |
 | **Who can use** | **Panel**. |
-| **How configured** | Panel datasource `-- Mixed --`, query A = the metric, query B = the Forecast datasource. No draw-mode option; the Forecast editor is filled by hand (*Copy source from query A* is optional and copies the source fingerprint only). |
+| **How configured** | Panel datasource `-- Mixed --`, query A = the metric, query B = the Forecast datasource. No draw-mode option; query B's editor takes the trained baseline's `cacheKey` (from the panel's *Baseline keys* list, or filled by *New alert rule*). |
 | **Input params** | Any metric target plus a `forecast` target. |
 | **Expected result** | One forecast series from the metric; the `cacheKey` is computed from the metric targets only; with no metric target nothing is fitted or drawn. |
 
@@ -1159,7 +1159,6 @@ source and are **not** backed by a live observation in this run:
 | `This panel’s series carry no labels and no distinct series name, …` | `src/forecast-panel/alertFromPanel.ts` (`REASON_ALERT_SERIES_AMBIGUOUS`) | Needs a multi-series row where neither `__metric_name__` nor `__display_name__` is distinct and no label exists. Both sandbox shapes that were tried name their series: the TestData row synthesizes `__name__`, and a two-target Postgres panel aliasing both metrics `metric` collapses to **one** series in `panelSeries` (the plugin's fit identity is name-based, so those two frames are one series to the whole plugin) and builds the six-row chain. Unit-tested. |
 | `Cannot create an alert rule: add a Forecast datasource query to this panel, or keep exactly one Forecast datasource instance.` | `src/forecast-panel/alertFromPanel.ts` (`REASON_FORECAST_DATASOURCE`) | Needs a deployment with zero (or two) Forecast datasource instances; both sandbox and chart provision exactly one, and deleting it would break every other alerting check in this document. Unit-tested (`forecastDatasourceUid` cases). |
 | Scheduler auto-disable after repeated 401/403 | `pkg/plugin/retrain.go` (`errGrafanaUnauthorized`) | Needs three consecutive rejected fetches across cron ticks; the Compose sandbox uses anonymous Admin and the token path was only exercised in its working (empty-token) form. |
-| `Copy source from query A` (Forecast editor) | `src/forecast-datasource/` | Opt-in, manual feature; the Forecast editor was not driven by hand. |
 | `DRUID_MAX_INFLIGHT` saturation | `timeseries-baselines/druid.go`, `timeseries-baselines/limits.go` | `DRUID_MAX_RPS` was verified; the inflight cap was not driven to saturation. |
 | `FORECAST_MAX_INFLIGHT` env/ini precedence | `pkg/plugin/limits.go` | The jsonData **value** path is now measured (`maxInflight: 2` in the app jsonData gave exactly 2 in flight and 62 × `429 forecast: busy` in a 64-wide burst); the env and ini spellings remain unexercised, since neither environment sets them. |
 | `FORECAST_COMPUTE_MTLS=true` together with an `http` compute URL | `pkg/plugin/compute.go` | Unit-tested (`errComputeScheme`); no live deployment points an mTLS-enabled plugin at a plain compute URL. |
@@ -1399,12 +1398,13 @@ Forecast datasource query), deleted afterwards:
   `trainSource`), which answers the pass-3 question behind the F12 row below: **Grafana supplies the panel's
   datasource on every target it sends**, so the panel's own fallback was dead weight and was deleted
   (`trainQuery.ts`);
-- *Copy source from query A* — the one item pass 4 recorded as unexercised — copied **both** metric siblings into
-  `sourceTargets`, and the datasource query then carried
+- *Copy source from query A* — **removed**: it copied every metric sibling into `sourceTargets` so the editor could
+  recompute the overlay's key; at the time it produced
   `cacheKey 25985f9e4577d19c4b4e1da348dce6d916b826e5412482f6acf68eaf67759474`, byte-identical to the key the panel
-  had stored for the series `metrics-exporter:8000`; `POST /api/ds/query` with that key restored the snapshot
-  (`status 200`, one frame with real values) where an unknown key still answered `needTrain: train on the Forecast
-  overlay panel first` — the v9 Mixed path and F7's contract;
+  had stored for the series `metrics-exporter:8000`. The datasource now takes that key directly, so the button, the
+  source-query editor and `sourceTargets` are gone; `POST /api/ds/query` with the key still restores the snapshot
+  (`status 200`, one frame with real values) where an unknown key answers `needTrain: train on the Forecast overlay
+  panel first` — the v9 Mixed path and F7's contract;
 - the app landing page (`/a/eduardkolotushin-forecast-app`) rendered the plugin's own copy and issued no
   `/resources/…` request — F34.
 

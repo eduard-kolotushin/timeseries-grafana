@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **The Forecast datasource is identified by the trained baseline's cache key alone.** The query
+  editor no longer asks for the model, alpha/beta/period/season/calendar, the training range, the
+  source query or the series name: those existed only because the browser recomputed the overlay's
+  fingerprint from them. It now takes the 64-character key (the panel's new **Baseline keys** option
+  lists one per visible series with a copy button, and **New alert rule** fills it in), plus the
+  output kind and, for a bound, coverage. The synthesized alert row is likewise `kind` + `cacheKey` +
+  `seriesLabels`, so a rule holds the key the overlay wrote and repeats no fit option. Stored queries
+  with the old fields keep working — the backend always read only the key, kind and level.
+
+- **Panel options are grouped and their descriptions fit on a line.** *Training*, *Forecast*,
+  *Overlay* and *Alerting* sections in that order; *Legacy lookback* is gone end to end (panel option,
+  Forecast editor field, training-window fallback, `ForecastOptions` / `ForecastDataQuery` fields and
+  the cacheKey slot), which rotates every cacheKey once: a panel refits under a new key, and an alert
+  rule carrying an older key restores its old snapshot until retention sweeps it. Descriptions are one
+  concrete line each, with examples for seasonality, calendar, coverage and the alert window.
+
 - **The compute hop, PVV and the Postgres store can now use local certificate files instead of Vault PKI.**
   Each existing `FORECAST_COMPUTE_MTLS` / `FORECAST_PVV_MTLS` / `FORECAST_STORE_MTLS` switch selects TLS,
   and a configured Vault role still wins; with no role, `FORECAST_COMPUTE_CLIENT_CERT` / `_KEY` (plus the

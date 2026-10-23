@@ -93,7 +93,7 @@ Train step follows the model, not the dashboard interval: minute-of-week `1m`, h
 ## v9 must-have
 
 - Mixed panel (metric query A + Forecast datasource query B) is a supported overlay scenario. Overlay history, cacheKey, and train rewrite use only metric targets; Forecast datasource frames are not fitted and are not plotted (overlay POST is the overlay forecast). No Overlay/Query/Compare draw mode
-- Forecast query editor stays manual (kind, model, train-range strings, series name, source query). Do not auto-fill from siblings or overlay options. An optional **Copy source from query A** button may copy `sourceTargets` for the fingerprint only
+- Forecast query editor takes the trained baseline's `cacheKey` (kind, and coverage for a bound, and nothing else). No fit parameters and no source query: the snapshot holds the model and training window. The panel's **Baseline keys** option lists a copyable key per series
 - Grafana shows the panel **Alert** tab only for Time series and Graph, and only if that visualization was current when the editor data pane was created. Switching from this overlay to Time series in the same edit session does not add the tab. Working paths: Time series panel opened as Time series (or leave edit and re-open after switching); panel menu More → New alert rule; Alerting → New alert rule. Do not ship alert rules
 
 ## v10 must-have
@@ -182,9 +182,8 @@ A complete alert rule is one click away on a trained overlay panel, and it compa
 
 - Overlay options **Alerting** builds a complete Grafana alert rule from the panel's own state, so no Mixed
   datasource, hand-filled Forecast row, or **Copy source from query A** press is needed: **New alert rule** copies
-  the panel's metric queries and synthesizes one Forecast-datasource query from the panel's fit options (model and
-  its parameters, training range), with the visible metric targets as `sourceTargets`, the chosen
-  series name, that series' labels, and the **same cacheKey** the overlay fit wrote, so the rule restores the
+  the panel's metric queries and synthesizes one Forecast-datasource query carrying the **same cacheKey** the
+  overlay fit wrote plus the chosen series' labels (the snapshot holds the fit options), so the rule restores the
   trained snapshot instead of answering `needTrain`
 - **Alert series** (a select shown only when the panel offers more than one series), **Alert lookback** (default
   `10m`) and **Alert tolerance** (percent, default 20) are panel options; the series is the only input the operator
@@ -419,7 +418,7 @@ Do not add these without first updating this document:
 - Invalid model/series/level/forecast range map to HTTP 400
 - Table-driven tests cover golden paths for the resource and datasource `QueryData`, plus oversize / busy (413/429) load limits
 - Table-driven tests cover the schedule resource (method/status matrix, Admin gate, upsert→list round-trip, invalid cron, the baseline-row rules — an existing worker key can be retimed, an invented one is `404`, either scope can be deleted — per-org key isolation where two orgs share one cache key and keep separate rows, the derived `source` summary and its cap, and that a listing never echoes the stored query objects) and `needTrain`-when-due
-- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, forecast-query `cacheKey`, overlay New alert rule synthesis (the shared metric/baseline window, the two Reduce nodes, the Math deviation, the Threshold condition, the chosen series' `seriesName` / `seriesLabels` / `sourceTargets`, and a `cacheKey` equal to the overlay's — plus `seriesTarget`'s identity decision (labels → the synthesized `__name__` → the SQL column → a reason) and `deviationSQL`'s golden statement), overlay load limits, `trainSource` capture, the schedule API, and the schedule UI
+- Table-driven frontend tests cover train rewrite, extract/match, cache fingerprint, mixed metric vs Forecast frames, overlay New alert rule synthesis (the shared metric/baseline window, the two Reduce nodes, the Math deviation, the Threshold condition, the chosen series' `seriesLabels`, and a `cacheKey` equal to the overlay's — plus `seriesTarget`'s identity decision (labels → the synthesized `__name__` → the SQL column → a reason) and `deviationSQL`'s golden statement), overlay load limits, `trainSource` capture, the schedule API, and the schedule UI
 - `trainSource` must not enter the `cacheKey` fingerprint: adding or editing a scheduled retrain must not invalidate a stored snapshot
 - The retrain scheduler must never fail a query: an unreachable `/api/ds/query`, a disabled scheduler, or a claim error leaves `needTrain` as the retrain path
 - A schedule row belongs to one org: `forecast.retrain` keeps `(scope, org_id, key)` unique, `0002_retrain.sql` rewrites an older table to it in place, and a table left on the old key fails the schedule store instead of sharing rows between orgs

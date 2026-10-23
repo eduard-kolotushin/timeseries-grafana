@@ -30,6 +30,25 @@ export interface ForecastOptions {
 }
 
 /**
+ * The panel's registered option defaults. The registration uses these values, and the
+ * alert synthesis / cache-key listing fall back to them when an options object is partial,
+ * so a key computed outside the panel matches the one the overlay wrote.
+ */
+export const DEFAULT_FORECAST_OPTIONS: ForecastOptions = {
+  model: 'holt',
+  alpha: 0.8,
+  beta: 0.2,
+  period: 7,
+  season: 'hour',
+  calendar: '',
+  showInterval: true,
+  interval: 0.95,
+  trainRange: { from: '', to: '' },
+  forecastRange: { from: '', to: '' },
+  maxInflightLoads: 1,
+};
+
+/**
  * Prediction-interval coverage bounds. The overlay's Interval coverage option and the
  * Forecast datasource's Coverage input are the same knob, so they share one rule.
  */

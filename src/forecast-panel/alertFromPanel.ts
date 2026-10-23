@@ -1,11 +1,10 @@
 import { DataFrame, rangeUtil } from '@grafana/data';
 import { config, getDataSourceSrv, locationService } from '@grafana/runtime';
-import { cacheKeyInputFromQuery, queryFromOptions } from '../forecast-datasource/queryModel';
-import { FORECAST_DATASOURCE_TYPE } from '../forecast-datasource/types';
 import { cacheKey } from './cacheKey';
+import { FORECAST_DATASOURCE_TYPE } from '../forecast-datasource/types';
 import { extractSeries } from './extract';
 import { isForecastTarget, splitPanelFrames } from './mixed';
-import { ForecastOptions } from './types';
+import { DEFAULT_FORECAST_OPTIONS, ForecastOptions } from './types';
 
 export const EXPRESSION_DATASOURCE_UID = '__expr__';
 export const EXPRESSION_DATASOURCE_TYPE = '__expr__';
@@ -585,13 +584,14 @@ export async function ruleDefaultsFromPanel(input: {
     return { ok: false, reason: REASON_DASHBOARD_NOT_SAVED };
   }
 
+  const options = input.options ?? DEFAULT_FORECAST_OPTIONS;
   const panelDs = input.panel?.datasource;
   const rows = metricAlertTargets(input.metricTargets, panelDs, input.alertingUids);
   if (rows.length === 0) {
     return { ok: false, reason: REASON_NO_ALERTING_QUERY };
   }
 
-  const picked = pickSeries(input.series, input.options?.alertSeries);
+  const picked = pickSeries(input.series, options.alertSeries);
   if ('reason' in picked) {
     return { ok: false, reason: picked.reason };
   }
@@ -612,11 +612,10 @@ export async function ruleDefaultsFromPanel(input: {
     return { ok: false, reason: REASON_FORECAST_DATASOURCE };
   }
 
-  const window = windowFrom(input.options?.alertLookback);
+  const window = windowFrom(options.alertLookback);
   const queries: AlertQuery[] = [];
   // One series is compared with one baseline, so the rule carries the metric rows that
-  // produced the chosen series — every visible metric target still rides along in the
-  // forecast query's sourceTargets, which is what the cacheKey is computed from.
+  // produced the chosen series; the baseline row identifies its snapshot by cacheKey.
   const seriesRows = rows.filter((target) => !chosen.refId || target.refId === chosen.refId);
   for (const target of seriesRows.length > 0 ? seriesRows : rows) {
     // The SQL branch addresses the metric table by refId, so a target refId that is not a
@@ -635,37 +634,36 @@ export async function ruleDefaultsFromPanel(input: {
   }
   const metricRefId = queries[0].refId;
 
-  // The synthesized row carries the overlay's fit options and every visible metric target,
-  // so the key below is the one the overlay wrote. It is derived from this very query, which
-  // is what makes the two impossible to drift apart. `seriesLabels` is not part of the
-  // fingerprint, so naming the series here does not move the key.
+  // The overlay's key is a function of the metric targets, the panel's fit options, the
+  // chosen series' display name and the visible range: the same call the panel makes, so
+  // the rule restores the snapshot the overlay wrote.
   const forecastRefId = nextRefId(queries);
-  const forecastModel = queryFromOptions({
-    refId: forecastRefId,
-    options: input.options,
-    sourceTargets: input.metricTargets,
-    seriesName: chosen.name,
-    seriesLabels:
-      identity.kind === 'labels'
-        ? chosen.labels
-        : identity.kind === 'name'
-          ? { __name__: identity.name }
-          : undefined,
-    datasource: { uid: forecastUid, type: FORECAST_DATASOURCE_TYPE },
-  });
   const key = await cacheKey({
-    ...cacheKeyInputFromQuery(forecastModel),
+    targets: input.metricTargets,
     visibleFromMs: input.visibleFromMs,
     visibleToMs: input.visibleToMs,
+    options,
+    seriesName: chosen.name,
   });
-  // A rule's model is an opaque object to Grafana; the synthesized Forecast query is the
-  // whole model plus the key the overlay wrote and the panel's resolution, exactly as the
-  // copied metric rows carry it.
+  const seriesLabels =
+    identity.kind === 'labels'
+      ? chosen.labels
+      : identity.kind === 'name'
+        ? { __name__: identity.name }
+        : undefined;
+  // The query is the key and the series identity it answers for; the model and training
+  // window live inside the snapshot, so no fit option is repeated here.
   const forecastQueryModel: Record<string, unknown> = {
-    ...forecastModel,
+    refId: forecastRefId,
+    kind: 'forecast',
     cacheKey: key,
-    maxDataPoints: input.panel?.maxDataPoints,
   };
+  if (seriesLabels) {
+    forecastQueryModel.seriesLabels = seriesLabels;
+  }
+  if (input.panel?.maxDataPoints != null) {
+    forecastQueryModel.maxDataPoints = input.panel.maxDataPoints;
+  }
   queries.push({
     refId: forecastRefId,
     queryType: '',
@@ -696,7 +694,7 @@ export async function ruleDefaultsFromPanel(input: {
           baselineRefId: forecastRefId,
           column: identity.column,
           value: identity.value,
-          tolerance: input.options?.alertTolerance ?? DEFAULT_ALERT_TOLERANCE,
+          tolerance: options.alertTolerance ?? DEFAULT_ALERT_TOLERANCE,
         }),
       },
     });
@@ -711,7 +709,7 @@ export async function ruleDefaultsFromPanel(input: {
     );
     conditionRefId = nextRefId(queries);
     queries.push(
-      thresholdExpression(conditionRefId, deviation, input.options?.alertTolerance ?? DEFAULT_ALERT_TOLERANCE, window)
+      thresholdExpression(conditionRefId, deviation, options.alertTolerance ?? DEFAULT_ALERT_TOLERANCE, window)
     );
   }
 
