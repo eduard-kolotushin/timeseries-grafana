@@ -8,10 +8,11 @@
   native table with full-day labels, `aria-pressed` selection, 28px day/nav targets and a visible focus
   ring. The forecast line uses `warning.shade` (darkened in light, lightened in dark) and the band has
   1px edges, so the series clears 3:1 in both themes.
-- **Schedules table regrouped.** Source (identity, runs, status, scope), Key (clipped hash + copy),
-  Schedule (cron + timezone) and Actions (enabled, Save, Delete, Delete model) replace the nine
-  columns; a fixed 780px floor and a 65vh scroll area keep the actions and the scrollbar visible at
-  1440px, with a sticky header and horizontal scroll at tablet width.
+- **Schedules table regrouped.** Source (identity, compact runs, status, scope; query summary in the
+  cell tooltip and screen-reader text), Key (clipped hash + copy), Schedule (cron + timezone) and
+  Actions (enabled, Save, Delete, Delete model) replace the nine columns. Source takes the spare
+  width, a fixed 780px floor and a 65vh scroll area keep the actions and the scrollbar visible at
+  1440px, the header sticks above the inputs at z-index 10, and tablet width scrolls horizontally.
 - **Copy and feedback.** Configuration now shows a **Saved** confirmation and a shorter explanation;
   the landing page is a short orientation with links to Configuration, Retrain schedules and
   Dashboards; the empty Forecast query explains the missing key in plain language; the miss error no

@@ -84,6 +84,15 @@ function dashboardHref(source: ScheduleSource): string | undefined {
   return `${config.appSubUrl}/d/${encodeURIComponent(source.dashboardUid)}?viewPanel=${source.panelId}`;
 }
 
+/** The table shows minutes; the full RFC3339 timestamp stays in the cell's title. */
+function shortRunTime(value: string | undefined): { text: string; title?: string } {
+  if (!value) {
+    return { text: '—' };
+  }
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(value);
+  return match ? { text: `${match[1]} ${match[2]}`, title: value } : { text: value, title: value };
+}
+
 /** Search covers what identifies a row, not only the cache hash the table keys on. */
 function searchHaystack(row: ScheduleRow): string {
   return [row.key, row.source?.panelTitle, row.source?.seriesName, row.source?.querySummary]
@@ -137,13 +146,50 @@ const getStyles = (theme: GrafanaTheme2) => ({
     '& thead th': {
       position: 'sticky',
       top: 0,
-      zIndex: 1,
+      // Grafana's Input wrapper is positioned with z-index 1; the header must
+      // outrank it or the cron/timezone fields paint over the header on scroll.
+      zIndex: 10,
       background: theme.colors.background.primary,
+      boxShadow: `inset 0 -1px 0 ${theme.colors.border.weak}`,
     },
+  }),
+  titleRow: css({
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: theme.spacing(1),
+  }),
+  titleText: css({
+    flex: '1 1 auto',
+    minWidth: 0,
+    overflowWrap: 'anywhere',
+  }),
+  badges: css({
+    flex: '0 0 auto',
+    paddingTop: 1,
   }),
   meta: css({
     color: theme.colors.text.secondary,
     fontSize: theme.typography.bodySmall.fontSize,
+  }),
+  runLine: css({
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: theme.spacing(0.5),
+  }),
+  status: css({
+    marginLeft: 'auto',
+  }),
+  srOnly: css({
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    padding: 0,
+    margin: -1,
+    overflow: 'hidden',
+    clip: 'rect(0, 0, 0, 0)',
+    whiteSpace: 'nowrap',
+    border: 0,
   }),
   key: css({
     display: 'block',
@@ -304,68 +350,74 @@ export const RetrainSchedules = () => {
         // links to that panel, and the series plus query say which of its targets this
         // row refits. A baseline row has none of this — its key is the metric hash.
         // Runs and state live here too, so the actions column does not slide off a
-        // 1440px screen behind the plugin details sidebar.
-        width: 240,
+        // 1440px screen behind the plugin details sidebar. This column takes the
+        // remaining width, so a wider window gives the title and query more room
+        // instead of widening the 64-char key column.
         cell: ({ row }) => {
           const source = row.original.source;
           const name = source?.panelTitle || source?.seriesName || '';
           const href = source ? dashboardHref(source) : undefined;
           const series = source?.seriesName && source.seriesName !== name ? source.seriesName : '';
+          const nextRun = shortRunTime(row.original.nextRunAt);
+          const lastRun = shortRunTime(row.original.lastRunAt);
           const status = row.original.lastStatus?.startsWith('error')
             ? 'error'
             : row.original.lastStatus === 'ok'
               ? 'ok'
               : 'never';
           return (
-            <div className={styles.wrap}>
-              <Stack direction="row" gap={1} alignItems="center" wrap="wrap">
-                {href ? (
-                  <a href={href}>{name}</a>
-                ) : (
-                  <span>{name || (row.original.scope === 'baseline' ? 'Fleet-wide baseline' : '—')}</span>
-                )}
-                <Badge text={row.original.scope} color={row.original.scope === 'baseline' ? 'purple' : 'blue'} />
-                {row.original.supersededAt && (
-                  <Badge
-                    text="Superseded"
-                    color="orange"
-                    tooltip={`No panel trains this key any more (since ${row.original.supersededAt}), so it is never retrained again. Delete the row to remove it.`}
-                  />
-                )}
-              </Stack>
-              {(series || source?.lookback || source?.querySummary) && (
+            <div className={styles.wrap} title={source?.querySummary}>
+              <div className={styles.titleRow}>
+                <div className={styles.titleText}>
+                  {href ? (
+                    <a href={href}>{name}</a>
+                  ) : (
+                    <span>{name || (row.original.scope === 'baseline' ? 'Fleet-wide baseline' : '—')}</span>
+                  )}
+                </div>
+                <div className={styles.badges}>
+                  <Stack direction="row" gap={1} alignItems="center">
+                    <Badge text={row.original.scope} color={row.original.scope === 'baseline' ? 'purple' : 'blue'} />
+                    {row.original.supersededAt && (
+                      <Badge
+                        text="Superseded"
+                        color="orange"
+                        tooltip={`No panel trains this key any more (since ${row.original.supersededAt}), so it is never retrained again. Delete the row to remove it.`}
+                      />
+                    )}
+                  </Stack>
+                </div>
+              </div>
+              {(series || source?.lookback) && (
                 <div className={styles.meta}>
                   {series && <code className={styles.wrap}>{series}</code>}
                   {series && (source?.lookback || source?.querySummary) ? ' ' : null}
                   {source?.lookback && <span className={styles.nowrap}>{source.lookback}</span>}
                 </div>
               )}
-              {source?.querySummary && (
-                <div className={cx(styles.meta, styles.clamp)} title={source.querySummary}>
-                  {source.querySummary}
-                </div>
-              )}
-              <div className={styles.meta}>
-                <span className={styles.nowrap}>
-                  Next <span>{row.original.nextRunAt || '—'}</span>
+              {source?.querySummary && <span className={styles.srOnly}>{source.querySummary}</span>}
+              <div className={cx(styles.meta, styles.runLine)}>
+                <span className={styles.nowrap} title={nextRun.title}>
+                  Next <span>{nextRun.text}</span>
                 </span>
-                {' · '}
-                <span className={styles.nowrap}>
-                  Last <span>{row.original.lastRunAt || '—'}</span>
+                <span className={styles.status}>
+                  <Badge
+                    text={status}
+                    color={status === 'ok' ? 'green' : status === 'error' ? 'red' : 'orange'}
+                    tooltip={row.original.lastStatus || 'Never run'}
+                  />
                 </span>
               </div>
-              <Stack direction="row" gap={1} alignItems="center">
-                <Badge
-                  text={status}
-                  color={status === 'ok' ? 'green' : status === 'error' ? 'red' : 'orange'}
-                  tooltip={row.original.lastStatus || 'Never run'}
-                />
-                {status === 'error' && (
-                  <span className={cx(styles.meta, styles.errorText, styles.clamp)} title={row.original.lastStatus}>
-                    {row.original.lastStatus}
-                  </span>
-                )}
-              </Stack>
+              <div className={cx(styles.meta, styles.runLine)}>
+                <span className={styles.nowrap} title={lastRun.title}>
+                  Last <span>{lastRun.text}</span>
+                </span>
+              </div>
+              {status === 'error' && (
+                <div className={cx(styles.meta, styles.errorText, styles.clamp)} title={row.original.lastStatus}>
+                  {row.original.lastStatus}
+                </div>
+              )}
             </div>
           );
         },
@@ -385,6 +437,8 @@ export const RetrainSchedules = () => {
               getText={() => row.original.key}
               icon="copy"
               size="sm"
+              variant="secondary"
+              fill="text"
               tooltip="Copy key"
               aria-label={`${rowId(row.original)} copy key`}
             />

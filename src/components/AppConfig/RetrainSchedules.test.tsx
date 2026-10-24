@@ -95,8 +95,8 @@ describe('RetrainSchedules', () => {
     expect(await screen.findByText('panelhash')).toBeInTheDocument();
     expect(screen.getByText('baselinehash')).toBeInTheDocument();
     const panel = rowOf('panel/panelhash cron');
-    expect(within(panel).getByText('2026-09-21T03:00:00Z')).toBeInTheDocument();
-    expect(within(panel).getByText('2026-09-20T03:00:00Z')).toBeInTheDocument();
+    expect(within(panel).getByText('2026-09-21 03:00')).toBeInTheDocument();
+    expect(within(panel).getByText('2026-09-20 03:00')).toBeInTheDocument();
     expect(screen.queryByTestId(testIds.appConfig.retrainError)).toBeNull();
   });
 
@@ -249,6 +249,7 @@ describe('RetrainSchedules', () => {
     const row = rowOf('panel/sourcedhash cron');
     expect(within(row).getByText('up{job="api"}')).toBeInTheDocument();
     expect(within(row).getByText('PromQL: sum(rate(http_requests_total[5m]))')).toBeInTheDocument();
+    expect(within(row).getByTitle('PromQL: sum(rate(http_requests_total[5m]))')).toBeInTheDocument();
     expect(within(row).getByText('21d')).toBeInTheDocument();
   });
 
