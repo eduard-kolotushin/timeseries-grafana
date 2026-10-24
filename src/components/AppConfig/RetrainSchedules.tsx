@@ -142,7 +142,7 @@ const getStyles = (theme: GrafanaTheme2) => ({
       tableLayout: 'fixed',
       width: '100%',
       minWidth: 780,
-      maxWidth: 1000,
+      maxWidth: 1200,
     },
     '& thead th': {
       position: 'sticky',

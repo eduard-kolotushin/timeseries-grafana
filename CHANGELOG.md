@@ -11,7 +11,7 @@
 - **Schedules table regrouped.** Source (identity, inline scope badge, compact runs, query summary
   in the cell tooltip and screen-reader text), Key (clipped hash + copy), Schedule (cron + timezone),
   Status (ok/error/never plus Superseded) and Actions (enabled, Save, Delete, Delete model) replace
-  the nine columns. The table is capped at 1000px and Source takes the remaining width, so a wider
+  the nine columns. The table is capped at 1200px and Source takes the remaining width, so a wider
   window no longer stretches the badges across the row; a fixed 780px floor and a 65vh scroll area
   keep the actions and the scrollbar visible at 1440px, the header sticks above the inputs at
   z-index 10, and tablet width scrolls horizontally.
