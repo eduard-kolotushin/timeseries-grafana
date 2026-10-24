@@ -97,6 +97,7 @@ describe('RetrainSchedules', () => {
     const panel = rowOf('panel/panelhash cron');
     expect(within(panel).getByText('2026-09-21 03:00')).toBeInTheDocument();
     expect(within(panel).getByText('2026-09-20 03:00')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument();
     expect(screen.queryByTestId(testIds.appConfig.retrainError)).toBeNull();
   });
 

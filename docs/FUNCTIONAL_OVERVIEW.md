@@ -364,7 +364,7 @@ schedule.
 | **Who can use** | **Admin** (peer tab of Overview and Configuration on the plugin configuration page). |
 | **How configured** | Store required (F20). Rows come from the overlay's fits (F2) and from the worker (F25). |
 | **Input params** | Filters *Search* / *Scope* (All, panel, baseline) / *Enabled* (All, Enabled, Disabled) / *Status* (All, ok, error, never run); per-row cron, timezone and enabled editors; per-row *copy key*, *Save*, *Delete*, *Delete model*; a *Refresh* button; 20-row client-side paging; a *Source* deep link for `panel` rows. *Delete* removes the row (`DELETE /schedules?scope=&key=`, F5) and leaves the model; *Delete model* adds `drop=model`, which removes the snapshot with it, so the backend's retention reconcile cannot give the row back on its next tick (v14). |
-| **Expected result** | Four columns: *Source* (panel title link or a `baseline` label, scope badge, series/lookback, the query summary in the cell tooltip and screen-reader text, compact next/last runs with the full RFC3339 on hover, status badge, *Superseded* marker), *Key* (clipped hash with a copy button), *Schedule* (cron and timezone inputs stacked) and *Actions* (enabled switch, *Save*, *Delete*, *Delete model*). The Source column takes the remaining width, so a wider window gives the title room instead of widening the key. The table scrolls inside a 65vh area with a sticky header (z-index above the inputs); at 1440px the four columns fit the plugin details column, and below 780px the same table scrolls horizontally instead of hiding the actions at the bottom of a long page. Errors surface as `Schedules failed` + the backend reason; a `drop=model` of a `baseline` row answers with a note that the model belongs to the worker's schema, which the page renders as an info alert. |
+| **Expected result** | Five columns: *Source* (panel title link or a `baseline` label with its scope badge inline, series/lookback, the query summary in the cell tooltip and screen-reader text, compact next/last runs with the full RFC3339 on hover), *Key* (clipped hash with a copy button), *Schedule* (cron and timezone inputs stacked), *Status* (ok/error/never badge plus the *Superseded* marker) and *Actions* (enabled switch, *Save*, *Delete*, *Delete model*). The table is capped at 1000px and the Source column takes the remaining width, so a wider window gives the title room instead of stretching the scope badge or the key; at 1440px the five columns fit the plugin details column, and below 780px the same table scrolls horizontally instead of hiding the actions at the bottom of a long page. The table scrolls inside a 65vh area with a sticky header (z-index above the inputs). Errors surface as `Schedules failed` + the backend reason; a `drop=model` of a `baseline` row answers with a note that the model belongs to the worker's schema, which the page renders as an info alert. |
 
 **Positive — Compose:** the tab listed 6 then 5 rows; the `panel` rows showed the panel title and
 `value 21d Druid: minuteweek · minute` as their source with `/d/forecast-minute-week?viewPanel=N` links, and the
@@ -396,16 +396,17 @@ is 196px with a 130×61 (4-line) `<code>` on 12.2.10 and 260px with a 194×47 (3
 all four widths, the `panel` row's source cell is 216px on 12.2.10, and the plugin details sidebar stays in place
 at 700px on both versions.
 
-**UI pass — regrouped columns.** The nine-column table was replaced by the four columns above: at 1440px the
-table is 789px inside its 789px container (Key 150, Schedule 160, Actions 230, and Source takes the remaining
-≈249), so next/last run, status, the enabled switch and all row actions are visible without horizontal scrolling;
-a 64-char key clips with an ellipsis and a copy button. At 1568px the Source column grows to ≈377 while the key
-stays 150, so long panel titles and series get the extra room. The table wrapper is capped at 65vh, so its
-horizontal scrollbar sits at a visible height instead of below 20 rows, and the header is sticky at z-index 10 —
-above Grafana's z-index-1 input wrapper, so the cron/timezone fields scroll under the header instead of painting
-over it. Runs show minutes (`2026-10-24 11:20`) with the full RFC3339 value on hover, the status badge shares the
-next-run line, and the query summary lives in the cell tooltip and a screen-reader-only span rather than a visible
-SQL line. At 768px the 780px table floor keeps its columns readable and scrolls horizontally; the actions are one
+**UI pass — regrouped columns.** The nine-column table was replaced by the five columns above: at 1440px the
+table is 789px inside its 789px container (Key 120, Schedule 140, Status 90, Actions 230, and Source takes the
+remaining ≈209), so next/last run, status, the enabled switch and all row actions are visible without horizontal
+scrolling; a 64-char key clips with an ellipsis and a copy button. The table is capped at 1000px, so on a wider
+window Source grows to ≈420 and then stops rather than pushing the scope badge to the far edge; the scope badge
+is inline with the title. The table wrapper is capped at 65vh, so its horizontal scrollbar sits at a visible
+height instead of below 20 rows, and the header is sticky at z-index 10 — above Grafana's z-index-1 input wrapper,
+so the cron/timezone fields scroll under the header instead of painting over it. Runs show minutes
+(`2026-10-24 11:20`) with the full RFC3339 value on hover, status lives in its own column with the *Superseded*
+marker, and the query summary lives in the cell tooltip and a screen-reader-only span rather than a visible SQL
+line. At 768px the 780px table floor keeps its columns readable and scrolls horizontally; the actions are one
 scroll away rather than at the bottom of the page.
 
 ### F13. Retrain action

@@ -142,6 +142,7 @@ const getStyles = (theme: GrafanaTheme2) => ({
       tableLayout: 'fixed',
       width: '100%',
       minWidth: 780,
+      maxWidth: 1000,
     },
     '& thead th': {
       position: 'sticky',
@@ -153,19 +154,13 @@ const getStyles = (theme: GrafanaTheme2) => ({
       boxShadow: `inset 0 -1px 0 ${theme.colors.border.weak}`,
     },
   }),
-  titleRow: css({
-    display: 'flex',
-    alignItems: 'flex-start',
-    gap: theme.spacing(1),
-  }),
   titleText: css({
-    flex: '1 1 auto',
-    minWidth: 0,
     overflowWrap: 'anywhere',
   }),
-  badges: css({
-    flex: '0 0 auto',
-    paddingTop: 1,
+  scopeBadge: css({
+    display: 'inline-flex',
+    verticalAlign: 'middle',
+    marginLeft: theme.spacing(1),
   }),
   meta: css({
     color: theme.colors.text.secondary,
@@ -176,9 +171,6 @@ const getStyles = (theme: GrafanaTheme2) => ({
     flexWrap: 'wrap',
     alignItems: 'center',
     gap: theme.spacing(0.5),
-  }),
-  status: css({
-    marginLeft: 'auto',
   }),
   srOnly: css({
     position: 'absolute',
@@ -200,16 +192,6 @@ const getStyles = (theme: GrafanaTheme2) => ({
     whiteSpace: 'nowrap',
     fontFamily: theme.typography.fontFamilyMonospace,
     fontSize: theme.typography.bodySmall.fontSize,
-  }),
-  clamp: css({
-    display: '-webkit-box',
-    WebkitLineClamp: 1,
-    WebkitBoxOrient: 'vertical',
-    overflow: 'hidden',
-    overflowWrap: 'anywhere',
-  }),
-  errorText: css({
-    color: theme.colors.error.text,
   }),
 });
 
@@ -360,38 +342,22 @@ export const RetrainSchedules = () => {
           const series = source?.seriesName && source.seriesName !== name ? source.seriesName : '';
           const nextRun = shortRunTime(row.original.nextRunAt);
           const lastRun = shortRunTime(row.original.lastRunAt);
-          const status = row.original.lastStatus?.startsWith('error')
-            ? 'error'
-            : row.original.lastStatus === 'ok'
-              ? 'ok'
-              : 'never';
           return (
             <div className={styles.wrap} title={source?.querySummary}>
-              <div className={styles.titleRow}>
-                <div className={styles.titleText}>
-                  {href ? (
-                    <a href={href}>{name}</a>
-                  ) : (
-                    <span>{name || (row.original.scope === 'baseline' ? 'Fleet-wide baseline' : '—')}</span>
-                  )}
-                </div>
-                <div className={styles.badges}>
-                  <Stack direction="row" gap={1} alignItems="center">
-                    <Badge text={row.original.scope} color={row.original.scope === 'baseline' ? 'purple' : 'blue'} />
-                    {row.original.supersededAt && (
-                      <Badge
-                        text="Superseded"
-                        color="orange"
-                        tooltip={`No panel trains this key any more (since ${row.original.supersededAt}), so it is never retrained again. Delete the row to remove it.`}
-                      />
-                    )}
-                  </Stack>
-                </div>
+              <div className={styles.titleText}>
+                {href ? (
+                  <a href={href}>{name}</a>
+                ) : (
+                  <span>{name || (row.original.scope === 'baseline' ? 'Fleet-wide baseline' : '—')}</span>
+                )}
+                <span className={styles.scopeBadge}>
+                  <Badge text={row.original.scope} color={row.original.scope === 'baseline' ? 'purple' : 'blue'} />
+                </span>
               </div>
               {(series || source?.lookback) && (
                 <div className={styles.meta}>
                   {series && <code className={styles.wrap}>{series}</code>}
-                  {series && (source?.lookback || source?.querySummary) ? ' ' : null}
+                  {series && source?.lookback ? ' ' : null}
                   {source?.lookback && <span className={styles.nowrap}>{source.lookback}</span>}
                 </div>
               )}
@@ -400,24 +366,12 @@ export const RetrainSchedules = () => {
                 <span className={styles.nowrap} title={nextRun.title}>
                   Next <span>{nextRun.text}</span>
                 </span>
-                <span className={styles.status}>
-                  <Badge
-                    text={status}
-                    color={status === 'ok' ? 'green' : status === 'error' ? 'red' : 'orange'}
-                    tooltip={row.original.lastStatus || 'Never run'}
-                  />
-                </span>
               </div>
               <div className={cx(styles.meta, styles.runLine)}>
                 <span className={styles.nowrap} title={lastRun.title}>
                   Last <span>{lastRun.text}</span>
                 </span>
               </div>
-              {status === 'error' && (
-                <div className={cx(styles.meta, styles.errorText, styles.clamp)} title={row.original.lastStatus}>
-                  {row.original.lastStatus}
-                </div>
-              )}
             </div>
           );
         },
@@ -426,8 +380,8 @@ export const RetrainSchedules = () => {
         id: 'key',
         header: 'Key',
         // The whole key stays in the DOM for search and tests; the cell clips it
-        // visually so a 64-char hash cannot claim 260px of a 789px column.
-        width: 150,
+        // visually so a 64-char hash cannot claim a wide column.
+        width: 120,
         cell: ({ row }) => (
           <Stack direction="row" gap={1} alignItems="center">
             <code className={styles.key} title={row.original.key}>
@@ -448,7 +402,7 @@ export const RetrainSchedules = () => {
       {
         id: 'schedule',
         header: 'Schedule',
-        width: 160,
+        width: 140,
         cell: ({ row }) => (
           <Stack direction="column" gap={0.5}>
             <Input
@@ -465,6 +419,34 @@ export const RetrainSchedules = () => {
             />
           </Stack>
         ),
+      },
+      {
+        id: 'status',
+        header: 'Status',
+        width: 90,
+        cell: ({ row }) => {
+          const status = row.original.lastStatus?.startsWith('error')
+            ? 'error'
+            : row.original.lastStatus === 'ok'
+              ? 'ok'
+              : 'never';
+          return (
+            <Stack direction="column" gap={0.5} alignItems="flex-start">
+              <Badge
+                text={status}
+                color={status === 'ok' ? 'green' : status === 'error' ? 'red' : 'orange'}
+                tooltip={row.original.lastStatus || 'Never run'}
+              />
+              {row.original.supersededAt && (
+                <Badge
+                  text="Superseded"
+                  color="orange"
+                  tooltip={`No panel trains this key any more (since ${row.original.supersededAt}), so it is never retrained again. Delete the row to remove it.`}
+                />
+              )}
+            </Stack>
+          );
+        },
       },
       {
         id: 'actions',
