@@ -174,6 +174,25 @@ describe('ForecastPanel frames', () => {
     expect(drawn()[0].meta?.executedQueryString).toBe('SELECT 1 -- cpu-b');
   });
 
+  it('sends the panel visible range when the forecast range is Auto', async () => {
+    mockPost.mockReturnValueOnce(pendingPost());
+    render(<ForecastPanel {...props(rangeA, [historyFrame(rangeA, 'cpu-a')])} />);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    const body = mockPost.mock.calls[0][1] as { from: number; to: number };
+    expect(body.from).toBe(rangeA.from.valueOf());
+    expect(body.to).toBe(rangeA.to.valueOf());
+  });
+
+  it('keeps an explicit forecast range ahead of the panel range', async () => {
+    const forecastRange = { from: '2026-09-21T01:00:00.000Z', to: '2026-09-21T02:00:00.000Z' };
+    mockPost.mockReturnValueOnce(pendingPost());
+    render(<ForecastPanel {...props(rangeA, [historyFrame(rangeA, 'cpu-a')], { forecastRange })} />);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    const body = mockPost.mock.calls[0][1] as { from: number; to: number };
+    expect(body.from).toBe(Date.parse(forecastRange.from));
+    expect(body.to).toBe(Date.parse(forecastRange.to));
+  });
+
   it('keeps drawing the completed load while nothing about the query changed', async () => {
     mockPost.mockReturnValueOnce(pendingPost());
     const first = <ForecastPanel {...props(rangeA, [historyFrame(rangeA, 'cpu-a')])} />;

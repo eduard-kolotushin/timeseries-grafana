@@ -264,15 +264,7 @@ Train step follows the model, not the dashboard interval:
 
 ## Forecast window
 
-`forecastRange` is Grafana raw from/to in the same dashboard timezone. Empty / Auto is `[dashboard now, now + autoForecastHorizon]`:
-
-| Model | Duration |
-| --- | --- |
-| baseline minute-of-week or hour-of-week | 6h |
-| baseline hour | 24h |
-| baseline day | 7d |
-| seasonal naive | 24h |
-| naive, mean, drift, SES, Holt | 6h |
+`forecastRange` is Grafana raw from/to in the same dashboard timezone. Empty / Auto is the panel's visible `[from, to]` — the same window its metric query covers, so the fitted series is in-sample over the visible range. An explicit from/to is parsed as written; it may lie before, across or after the panel, and the x-axis extends only when its `to` is later than the panel's.
 
 The backend emits every `last + k×step` grid point inside that window for any integer `k`: `k ≥ 1` is the forecast horizon, `k ≤ 0` evaluates the final fitted state at or before the training range's last timestamp (a backcast), from the snapshot's state alone. Bands at `k ≤ 0` exist only for the seasonal baseline (its per-key SE is looked up by timestamp); every other model returns `null` bounds there, which the panel draws as a gap. A window with no grid point (e.g. one entirely between two steps) is still a 400 reason. One window is capped at `maxForecastPoints` (1e6) points on every path, counted over the signed `k` range: a `[from, to]` that needs more is a 413 reason, and the library enforces the same bound as `forecast.MaxForecastPoints`.
 

@@ -35,11 +35,11 @@ export interface ForecastOptions {
  * so a key computed outside the panel matches the one the overlay wrote.
  */
 export const DEFAULT_FORECAST_OPTIONS: ForecastOptions = {
-  model: 'holt',
+  model: 'baseline',
   alpha: 0.8,
   beta: 0.2,
   period: 7,
-  season: 'hour',
+  season: 'minute-week',
   calendar: '',
   showInterval: true,
   interval: 0.95,

@@ -1,5 +1,23 @@
 import { getTimeZone } from '@grafana/data';
-import { absoluteDayBound, applyLookbackRange, autoForecastHorizon, autoLookback, civilYmd, dashboardTimeZone, forecastLevel, isoUtc, isInvalidForecastWindow, isInvalidTrainWindow, resolveForecastWindow, resolveTrainWindow, timeZoneFromScene, trainMaxDataPoints, trainStepInterval, trainStepMs, type ResolvedTrainWindow, type TrainWindow } from './lookback';
+import {
+  absoluteDayBound,
+  applyLookbackRange,
+  autoLookback,
+  civilYmd,
+  dashboardTimeZone,
+  forecastLevel,
+  isoUtc,
+  isInvalidForecastWindow,
+  isInvalidTrainWindow,
+  resolveForecastWindow,
+  resolveTrainWindow,
+  timeZoneFromScene,
+  trainMaxDataPoints,
+  trainStepInterval,
+  trainStepMs,
+  type ResolvedTrainWindow,
+  type TrainWindow,
+} from './lookback';
 
 const day = 24 * 60 * 60 * 1000;
 
@@ -88,14 +106,14 @@ describe('resolveTrainWindow', () => {
     ['now-5m', 5 * 60 * 1000],
     ['now-1y', 365 * day],
   ] as const)('keeps the picked %s → now window relative so a retrain re-resolves it', (from, width) => {
-    expect(
-      atNow(() => resolveTrainWindow({ model: 'holt', trainRange: { from, to: 'now' } }, panelTo, 'utc'))
-    ).toEqual({
-      fromMs: NOW - width,
-      toMs: NOW,
-      relative: true,
-      lookbackMs: width,
-    });
+    expect(atNow(() => resolveTrainWindow({ model: 'holt', trainRange: { from, to: 'now' } }, panelTo, 'utc'))).toEqual(
+      {
+        fromMs: NOW - width,
+        toMs: NOW,
+        relative: true,
+        lookbackMs: width,
+      }
+    );
   });
 
   it.each([
@@ -236,7 +254,8 @@ describe('applyLookbackRange', () => {
         {
           builder: {
             queryType: 'sql',
-            query: 'SELECT __time FROM t WHERE __time >= MILLIS_TO_TIMESTAMP(${__from}) AND __time <= MILLIS_TO_TIMESTAMP(${__to})',
+            query:
+              'SELECT __time FROM t WHERE __time >= MILLIS_TO_TIMESTAMP(${__from}) AND __time <= MILLIS_TO_TIMESTAMP(${__to})',
           },
         },
       ],
@@ -249,75 +268,39 @@ describe('applyLookbackRange', () => {
   });
 });
 
-const hour = 60 * 60 * 1000;
-
-describe('autoForecastHorizon', () => {
-  it.each([
-    ['baseline', 'minute-week', '6h'],
-    ['baseline', 'week', '6h'],
-    ['baseline', 'hour', '24h'],
-    ['baseline', 'day', '7d'],
-    ['seasonal', undefined, '24h'],
-    ['holt', undefined, '6h'],
-    ['ses', undefined, '6h'],
-    ['naive', undefined, '6h'],
-    ['mean', undefined, '6h'],
-    ['drift', undefined, '6h'],
-  ] as const)('%s %s → %s', (model, season, want) => {
-    expect(autoForecastHorizon(model, season)).toBe(want);
-  });
-});
-
 describe('resolveForecastWindow', () => {
-  const nowMs = Date.UTC(2026, 7, 23, 12, 0, 0);
+  const panelRange = {
+    fromMs: Date.UTC(2026, 7, 23, 6, 0, 0),
+    toMs: Date.UTC(2026, 7, 23, 12, 0, 0),
+  };
 
-  it('uses Auto from dashboard now through now + model duration', () => {
-    expect(resolveForecastWindow({ model: 'holt' }, nowMs)).toEqual({
-      fromMs: nowMs,
-      toMs: nowMs + 6 * hour,
-    });
-    expect(resolveForecastWindow({ model: 'baseline', season: 'hour' }, nowMs)).toEqual({
-      fromMs: nowMs,
-      toMs: nowMs + 24 * hour,
-    });
-    expect(resolveForecastWindow({ model: 'baseline', season: 'day' }, nowMs)).toEqual({
-      fromMs: nowMs,
-      toMs: nowMs + 7 * day,
-    });
-  });
-
-  it('ignores a leftover horizon and still uses Auto when forecastRange is unset', () => {
-    expect(resolveForecastWindow({ model: 'holt' }, nowMs)).toEqual({
-      fromMs: nowMs,
-      toMs: nowMs + 6 * hour,
-    });
+  it('uses Auto as the panel visible range', () => {
+    expect(resolveForecastWindow({}, panelRange)).toEqual(panelRange);
+    expect(resolveForecastWindow({ forecastRange: { from: '', to: '' } }, panelRange)).toEqual(panelRange);
   });
 
   it('uses an absolute from/to range', () => {
     const from = '2026-08-23T12:00:00.000Z';
     const to = '2026-08-23T18:00:00.000Z';
-    expect(resolveForecastWindow({ model: 'holt', forecastRange: { from, to } }, nowMs, 'utc')).toEqual({
+    expect(resolveForecastWindow({ forecastRange: { from, to } }, panelRange, 'utc')).toEqual({
       fromMs: Date.parse(from),
       toMs: Date.parse(to),
     });
   });
 
-  // The panel's use case: the picker may hold a window over the drawn history,
-  // and the backend backcasts it — the resolver must not clamp it to now.
-  it('keeps an explicit past range instead of clamping it to now', () => {
+  // The picker may hold a window over the drawn history, and the backend backcasts it:
+  // the resolver must not replace an explicit past range with the panel range.
+  it('keeps an explicit past range', () => {
     const from = '2026-08-20T00:00:00.000Z';
     const to = '2026-08-21T00:00:00.000Z';
-    expect(
-      resolveForecastWindow({ model: 'baseline', season: 'hour', forecastRange: { from, to } }, nowMs, 'utc')
-    ).toEqual({ fromMs: Date.parse(from), toMs: Date.parse(to) });
+    expect(resolveForecastWindow({ forecastRange: { from, to } }, panelRange, 'utc')).toEqual({
+      fromMs: Date.parse(from),
+      toMs: Date.parse(to),
+    });
   });
 
   it('marks an inverted range invalid instead of falling back to Auto', () => {
-    const w = resolveForecastWindow(
-      { model: 'holt', forecastRange: { from: 'now', to: 'now-1h' } },
-      nowMs,
-      'utc'
-    );
+    const w = resolveForecastWindow({ forecastRange: { from: 'now', to: 'now-1h' } }, panelRange, 'utc');
     expect(isInvalidForecastWindow(w)).toBe(true);
   });
 });
@@ -332,7 +315,9 @@ describe('timeZoneFromScene / dashboardTimeZone', () => {
   });
 
   it('reads $timeRange.state.timeZone and walks parent', () => {
-    expect(timeZoneFromScene({ state: { $timeRange: { state: { timeZone: 'Europe/Moscow' } } } })).toBe('Europe/Moscow');
+    expect(timeZoneFromScene({ state: { $timeRange: { state: { timeZone: 'Europe/Moscow' } } } })).toBe(
+      'Europe/Moscow'
+    );
     expect(timeZoneFromScene({ parent: { state: { $timeRange: { state: { timeZone: 'utc' } } } } })).toBe('utc');
   });
 

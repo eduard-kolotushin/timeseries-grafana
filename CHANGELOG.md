@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Forecast Auto follows the panel.** With an empty Forecast range, the overlay now resolves the
+  panel's visible from/to, so the metric and fitted line share the x-axis (the in-sample/backcast
+  path); an explicit range may still reach into the future and extend the x-axis. New panels default
+  to Seasonal baseline with minute-of-week seasonality, while a dashboard that stores `model`/`season`
+  keeps its values.
 - **UI pass from the 2026-10-23 audit.** The range picker now stacks its calendar inside the popover
   when the trigger is too close to the left edge, stays clamped to the viewport, moves focus into the
   dialog, traps Tab, and closes on Escape without also exiting the panel editor. The calendar is a

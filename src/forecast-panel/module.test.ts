@@ -47,4 +47,10 @@ describe('panel option groups', () => {
       { path: 'alertAction', category: 'Alerting' },
     ]);
   });
+
+  it('starts a new panel on the seasonal minute-of-week baseline', () => {
+    const items = panelOptions();
+    expect(items.find((option) => option.path === 'model')?.defaultValue).toBe('baseline');
+    expect(items.find((option) => option.path === 'season')?.defaultValue).toBe('minute-week');
+  });
 });

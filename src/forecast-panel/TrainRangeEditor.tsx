@@ -12,9 +12,9 @@ import {
   TimeRange,
 } from '@grafana/data';
 import { Button, Field, FilterInput, IconButton, Input, Stack, TimeRangeLabel, useStyles2 } from '@grafana/ui';
+import { livePanel, panelIdFromLocation } from './alertFromPanel';
 import {
   absoluteDayBound,
-  autoForecastHorizon,
   autoLookback,
   CivilDate,
   civilYmd,
@@ -23,7 +23,7 @@ import {
 } from './lookback';
 import { TrainRangeCalendar } from './TrainRangeCalendar';
 import { pickerLayout, placePicker, PickerLayout } from './pickerPlacement';
-import { ForecastOptions, TrainTimeRange } from './types';
+import { DEFAULT_FORECAST_OPTIONS, ForecastOptions, TrainTimeRange } from './types';
 
 const QUICK: Array<{ from: string; to: string; display: string }> = [
   { from: 'now-5m', to: 'now', display: 'Last 5 minutes' },
@@ -59,12 +59,17 @@ const QUICK_FUTURE: Array<{ from: string; to: string; display: string }> = [
 
 export type RangeEditorSettings = { kind?: 'train' | 'forecast' };
 
-function pickerRaw(kind: 'train' | 'forecast', value: TrainTimeRange | undefined, auto: string): TrainTimeRange {
+function pickerRaw(
+  kind: 'train' | 'forecast',
+  value: TrainTimeRange | undefined,
+  auto: string,
+  panelRange: TrainTimeRange | undefined
+): TrainTimeRange {
   if (value != null && !isExplicitAutoTrainRange(value)) {
     return value;
   }
   if (kind === 'forecast') {
-    return { from: 'now', to: `now+${auto}` };
+    return panelRange ?? { from: '', to: '' };
   }
   return { from: `now-${auto}`, to: 'now' };
 }
@@ -105,12 +110,10 @@ export const TrainRangeEditor = ({
   const styles = useStyles2(getStyles);
   const timeZone = dashboardTimeZone();
   const kind = item.settings?.kind ?? 'train';
-  const auto =
-    kind === 'forecast'
-      ? autoForecastHorizon(context.options?.model ?? 'holt', context.options?.season)
-      : autoLookback(context.options?.model ?? 'holt', context.options?.season);
+  const auto = autoLookback(context.options?.model ?? DEFAULT_FORECAST_OPTIONS.model, context.options?.season);
+  const panelRange = kind === 'forecast' ? livePanel(panelIdFromLocation()).time : undefined;
   const isAuto = value == null || isExplicitAutoTrainRange(value);
-  const raw = pickerRaw(kind, value, auto);
+  const raw = pickerRaw(kind, value, auto, panelRange);
   const range = toPickerValue(raw, timeZone);
 
   const triggerRef = useRef<HTMLDivElement>(null);
@@ -128,12 +131,12 @@ export const TrainRangeEditor = ({
   // Opening the picker reloads the draft fields from the panel's current value.
   // That is a render-time derivation, not an effect: setting state in an effect
   // made React render the popup twice for data it already had.
-  const draftKey = [open, value?.from, value?.to, auto, kind].join('\u0000');
+  const draftKey = [open, value?.from, value?.to, auto, kind, panelRange?.from, panelRange?.to].join('\u0000');
   const [draftedKey, setDraftedKey] = useState(draftKey);
   if (draftedKey !== draftKey) {
     setDraftedKey(draftKey);
     if (open) {
-      const next = pickerRaw(kind, value, auto);
+      const next = pickerRaw(kind, value, auto, panelRange);
       setFrom(next.from);
       setTo(next.to);
       setSearch('');
@@ -304,14 +307,18 @@ export const TrainRangeEditor = ({
           onClick={() => (open ? close(false) : setOpen(true))}
         >
           <span className={styles.label}>
-            <TimeRangeLabel value={range} timeZone={timeZone} placeholder="Auto (by model)" />
+            <TimeRangeLabel
+              value={range}
+              timeZone={timeZone}
+              placeholder={kind === 'forecast' ? 'Auto (panel range)' : 'Auto (by model)'}
+            />
           </span>
         </Button>
       </div>
       {isAuto && (
         <div className={styles.hint}>
           {kind === 'forecast'
-            ? `Auto (Grafana now through now + ${auto}). Open to set From and To; use Auto in the picker to reset.`
+            ? `Auto (the panel’s visible range). Open to set From and To; use Auto in the picker to reset.`
             : `Auto (last ${auto} ending at the panel To). Open to set From and To; use Auto in the picker to reset.`}
         </div>
       )}

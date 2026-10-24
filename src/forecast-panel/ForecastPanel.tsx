@@ -9,7 +9,6 @@ import { dashboardUidFromPath } from './alertFromPanel';
 import { cacheKey, fitOptions } from './cacheKey';
 import { extractSeries, graphableFrames, historyFrame } from './extract';
 import {
-  dashboardNowMs,
   forecastLevel,
   isInvalidForecastWindow,
   isInvalidTrainWindow,
@@ -136,8 +135,11 @@ export const ForecastPanel: React.FC<Props> = ({
       retrain = takeRetrain(key);
       setError(null);
       const history: DataFrame[] = [];
-      const nowMs = dashboardNowMs(timeZone);
-      const window = resolveForecastWindow(options, nowMs, timeZone);
+      const window = resolveForecastWindow(
+        options,
+        { fromMs: timeRange.from.valueOf(), toMs: timeRange.to.valueOf() },
+        timeZone
+      );
 
       const visible = graphable.flatMap((series) => extractSeries(series, graphable));
       for (const points of visible) {
@@ -281,6 +283,7 @@ export const ForecastPanel: React.FC<Props> = ({
     data.request,
     graphable,
     allTargets,
+    timeRange.from,
     timeRange.to,
     timeZone,
     options,
