@@ -8,7 +8,7 @@
   native table with full-day labels, `aria-pressed` selection, 28px day/nav targets and a visible focus
   ring. The forecast line uses `warning.shade` (darkened in light, lightened in dark) and the band has
   1px edges, so the series clears 3:1 in both themes.
-- **Schedules table regrouped.** Source (identity, inline scope badge, compact runs, query summary
+- **Schedules table regrouped.** Source (identity, scope badge in a reserved title-row slot, compact runs, query summary
   in the cell tooltip and screen-reader text), Key (clipped hash + copy), Schedule (cron + timezone),
   Status (ok/error/never plus Superseded) and Actions (enabled, Save, Delete, Delete model) replace
   the nine columns. The table is capped at 1200px and Source takes the remaining width, so a wider

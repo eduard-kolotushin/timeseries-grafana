@@ -155,12 +155,20 @@ const getStyles = (theme: GrafanaTheme2) => ({
     },
   }),
   titleText: css({
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: theme.spacing(1),
+    flexWrap: 'nowrap',
+  }),
+  // The title shrinks and wraps; the badge keeps a fixed slot on the same line.
+  titleLabel: css({
+    flex: '0 1 auto',
+    minWidth: 0,
     overflowWrap: 'anywhere',
   }),
   scopeBadge: css({
-    display: 'inline-flex',
-    verticalAlign: 'middle',
-    marginLeft: theme.spacing(1),
+    flex: '0 0 auto',
+    marginTop: 1,
   }),
   meta: css({
     color: theme.colors.text.secondary,
@@ -345,11 +353,13 @@ export const RetrainSchedules = () => {
           return (
             <div className={styles.wrap} title={source?.querySummary}>
               <div className={styles.titleText}>
-                {href ? (
-                  <a href={href}>{name}</a>
-                ) : (
-                  <span>{name || (row.original.scope === 'baseline' ? 'Fleet-wide baseline' : '—')}</span>
-                )}
+                <span className={styles.titleLabel}>
+                  {href ? (
+                    <a href={href}>{name}</a>
+                  ) : (
+                    <span>{name || (row.original.scope === 'baseline' ? 'Fleet-wide baseline' : '—')}</span>
+                  )}
+                </span>
                 <span className={styles.scopeBadge}>
                   <Badge text={row.original.scope} color={row.original.scope === 'baseline' ? 'purple' : 'blue'} />
                 </span>
